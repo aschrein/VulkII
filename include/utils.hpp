@@ -35,7 +35,6 @@
 #define NOTNULL(x) ASSERT_ALWAYS((x) != NULL)
 #define ARRAY_SIZE(_ARR) ((int)(sizeof(_ARR) / sizeof(*_ARR)))
 
-
 #undef MIN
 #undef MAX
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
@@ -138,9 +137,9 @@ template <typename F> __Defer__<F> defer_func(F f) { return __Defer__<F>(f); }
 static inline size_t get_page_size() { return sysconf(_SC_PAGE_SIZE); }
 #elif WIN32
 static inline size_t get_page_size() {
-	SYSTEM_INFO si;
+  SYSTEM_INFO si;
   GetSystemInfo(&si);
-	return si.dwPageSize;
+  return si.dwPageSize;
 }
 #else
 static inline size_t get_page_size() { return 1 << 12; }

@@ -37,7 +37,7 @@ ELSE()
 	-pedantic-errors -Wall -Wextra -Werror -ferror-limit=1 \
 	-Wno-c99-extensions -Wno-comment \
 	-fno-exceptions -fno-rtti -fvisibility=hidden")
-  set (LIBS pthread ncurses z dl)
+  set (LIBS SDL2 pthread ncurses z dl)
   set (INCLUDES "")
 ENDIF()
 target_include_directories(vulkii
