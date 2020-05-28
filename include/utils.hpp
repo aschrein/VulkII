@@ -13,6 +13,15 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#define DLL_EXPORT __attribute__((visibility("default")))
+#define ATTR_USED __attribute__((used))
+#elif WIN32
+#include <Windows.h>
+#define DLL_EXPORT __declspec(dllexport)
+#define ATTR_USED
+#else
+#define DLL_EXPORT
+#define ATTR_USED
 #endif
 
 #define ASSERT_ALWAYS(x)                                                                           \
@@ -25,8 +34,7 @@
 #define ASSERT_DEBUG(x) ASSERT_ALWAYS(x)
 #define NOTNULL(x) ASSERT_ALWAYS((x) != NULL)
 #define ARRAY_SIZE(_ARR) ((int)(sizeof(_ARR) / sizeof(*_ARR)))
-#define DLL_EXPORT __attribute__((visibility("default")))
-#define ATTR_USED __attribute__((used))
+
 
 #undef MIN
 #undef MAX
@@ -128,6 +136,12 @@ template <typename F> __Defer__<F> defer_func(F f) { return __Defer__<F>(f); }
 
 #if __linux__
 static inline size_t get_page_size() { return sysconf(_SC_PAGE_SIZE); }
+#elif WIN32
+static inline size_t get_page_size() {
+	SYSTEM_INFO si;
+  GetSystemInfo(&si);
+	return si.dwPageSize;
+}
 #else
 static inline size_t get_page_size() { return 1 << 12; }
 #endif
@@ -158,6 +172,12 @@ static inline void map_pages(void *ptr, size_t num_pages) {
       mmap(ptr, num_pages * get_page_size(), PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
   ASSERT_ALWAYS((size_t)new_ptr == (size_t)ptr);
 }
+#elif WIN32
+// TODO
+static inline void protect_pages(void *ptr, size_t num_pages) {}
+static inline void unprotect_pages(void *ptr, size_t num_pages, bool exec = false) {}
+static inline void unmap_pages(void *ptr, size_t num_pages) {}
+static inline void map_pages(void *ptr, size_t num_pages) {}
 #else
 // Noops
 static inline void protect_pages(void *ptr, size_t num_pages) {}
@@ -353,7 +373,7 @@ static inline uint64_t hash_of(string_ref a) {
 /** String view of a static string
  */
 static inline string_ref stref_s(char const *static_string) {
-  if (static_string == NULL || static_string[0] == '\0') return string_ref{.ptr = NULL, .len = 0};
+  if (static_string == NULL || static_string[0] == '\0') return string_ref{NULL, 0};
   ASSERT_DEBUG(static_string != NULL);
   string_ref out;
   out.ptr = static_string;
