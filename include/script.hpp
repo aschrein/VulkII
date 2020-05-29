@@ -596,4 +596,21 @@ struct IEvaluator {
   bool       is_error() { return state->eval_error; }
 };
 
+#define ASSERT_EVAL(x)                                                                             \
+  do {                                                                                             \
+    if (!(x)) {                                                                                    \
+      set_error();                                                                                 \
+      state->push_error(#x);                                                                       \
+      abort();                                                                                     \
+      return NULL;                                                                                 \
+    }                                                                                              \
+  } while (0)
+#define CHECK_ERROR()                                                                              \
+  do {                                                                                             \
+    if (is_error()) {                                                                              \
+      abort();                                                                                     \
+      return NULL;                                                                                 \
+    }                                                                                              \
+  } while (0)
+
 #endif // SCRIPT_HPP

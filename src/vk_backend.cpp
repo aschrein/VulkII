@@ -63,6 +63,13 @@ struct Mem_Chunk : Slot {
   u32                   size             = 0;
   u32                   cursor           = 0; // points to the next free 256 byte block
   u32                   memory_type_bits = 0;
+  void                  dump() {
+    fprintf(stdout, "Mem_Chunk {\n");
+    fprintf(stdout, "  ref_cnt: %i\n", ref_cnt);
+    fprintf(stdout, "  size   : %i\n", size);
+    fprintf(stdout, "  cursor : %i\n", cursor);
+    fprintf(stdout, "}\n");
+  }
   void init(VkDevice device, u32 num_pages, u32 heap_index, VkMemoryPropertyFlags prop_flags,
             u32 type_bits) {
     VkMemoryAllocateInfo info;
@@ -74,21 +81,25 @@ struct Mem_Chunk : Slot {
     this->size             = num_pages;
     this->prop_flags       = prop_flags;
     this->memory_type_bits = type_bits;
+    this->cursor           = 0;
   }
-  void add_reference() { ref_cnt++; }
   void rem_reference() {
     ASSERT_DEBUG(ref_cnt > 0);
     ref_cnt--;
   }
   bool is_referenced() { return ref_cnt != 0; }
   void release(VkDevice device) { vkFreeMemory(device, mem, NULL); }
-  bool has_space(u32 size) { return cursor + ((size + PAGE_SIZE - 1) / PAGE_SIZE) < size; }
-  u32  alloc(u32 alignment, u32 size) {
+  bool has_space(u32 req_size) {
+    if (ref_cnt == 0) cursor = 0;
+    return cursor + ((req_size + PAGE_SIZE - 1) / PAGE_SIZE) < size;
+  }
+  u32 alloc(u32 alignment, u32 req_size) {
     ASSERT_DEBUG((alignment & (alignment - 1)) == 0); // PoT
     ASSERT_DEBUG(((alignment - 1) & PAGE_SIZE) == 0); // 256 bytes is enough to align this
     u32 offset = cursor;
-    cursor += ((size + PAGE_SIZE - 1) / PAGE_SIZE);
+    cursor += ((req_size + PAGE_SIZE - 1) / PAGE_SIZE);
     ASSERT_DEBUG(cursor < size);
+    ref_cnt++;
     return offset * PAGE_SIZE;
   }
 };
@@ -120,7 +131,13 @@ struct Resource_Array {
     u32 item_index;
   };
   Array<Deferred_Release> limbo_items;
-  void                    init() {
+  void                    dump() {
+    fprintf(stdout, "Resource_Array:");
+    fprintf(stdout, "  items: %i", (u32)items.size);
+    fprintf(stdout, "  free : %i", (u32)free_items.size);
+    fprintf(stdout, "  limbo: %i\n", (u32)limbo_items.size);
+  }
+  void init() {
     items.init();
     free_items.init();
     limbo_items.init();
@@ -128,7 +145,7 @@ struct Resource_Array {
   void release() {
     ito(items.size) {
       T &item = items[i];
-      if (item.is_alive()) Parent_t::release_item(item);
+      if (item.is_alive()) ((Parent_t *)this)->release_item(item);
     }
     items.release();
     free_items.release();
@@ -136,9 +153,9 @@ struct Resource_Array {
   }
   ID push(T t) {
     if (free_items.size) {
-      auto id       = free_items.pop();
-      items[id - 1] = t;
-      items[id - 1].set_index(id);
+      auto id   = free_items.pop();
+      items[id] = t;
+      items[id].set_index(id);
       return {id + 1};
     }
     items.push(t);
@@ -149,14 +166,14 @@ struct Resource_Array {
     ASSERT_DEBUG(index && items[index - 1].get_id().get_index() == index);
     return items[index];
   }
-  void remove(u32 id, u32 timeout) {
-    ASSERT_DEBUG(id);
-    items[id - 1].disable();
+  void remove(ID id, u32 timeout) {
+    ASSERT_DEBUG(!id.is_null());
+    items[id.index()].disable();
     if (timeout == 0) {
-      Parent_t::release_item(items[id - 1]);
-      free_items.push(id);
+      ((Parent_t *)this)->release_item(items[id.index()]);
+      free_items.push(id.index());
     } else {
-      limbo_items.push({timeout, id});
+      limbo_items.push({timeout, id.index()});
     }
   }
   template <typename Ff> void for_each(Ff fn) {
@@ -166,14 +183,14 @@ struct Resource_Array {
     }
   }
   void tick() {
-    Array<Pair<u32, u32>> new_limbo_items;
+    Array<Deferred_Release> new_limbo_items;
     new_limbo_items.init();
-    ito(limbo_items) {
+    ito(limbo_items.size) {
       Deferred_Release &item = limbo_items[i];
       ASSERT_DEBUG(item.timer != 0);
       item.timer -= 1;
       if (item.timer == 0) {
-        Parent_t::release_item(items[item.item_index]);
+        ((Parent_t *)this)->release_item(items[item.item_index]);
         free_items.push(item.item_index);
       } else {
         new_limbo_items.push(item);
@@ -237,15 +254,15 @@ struct Graphics_Pipeline_Wrapper : public Slot {
     resource_slots.release();
   }
 
-//  void init(VkDevice                         device,                   //
-//            VkShaderModule                   vs_shader_module,         //
-//            VkShaderModule                   ps_shader_module,         //
-//            VkGraphicsPipelineCreateInfo     pipeline_create_template, //
-//            Pair<string_ref, Vertex_Input> * vertex_inputs,            //
-//            u32                              num_vertex_inputs,        //
-//            VkVertexInputBindingDescription *vertex_bind_descs,        //
-//            u32                              num_vertex_bind_descs,    //
-//            u32                              push_constants_size = 128) {}
+  //  void init(VkDevice                         device,                   //
+  //            VkShaderModule                   vs_shader_module,         //
+  //            VkShaderModule                   ps_shader_module,         //
+  //            VkGraphicsPipelineCreateInfo     pipeline_create_template, //
+  //            Pair<string_ref, Vertex_Input> * vertex_inputs,            //
+  //            u32                              num_vertex_inputs,        //
+  //            VkVertexInputBindingDescription *vertex_bind_descs,        //
+  //            u32                              num_vertex_bind_descs,    //
+  //            u32                              push_constants_size = 128) {}
 };
 
 struct Window {
@@ -312,6 +329,23 @@ struct Window {
     mem_chunks.init();
     buffers.init(this);
     images.init(this);
+  }
+
+  void release() {
+    buffers.release();
+    images.release();
+    ito(mem_chunks.size) mem_chunks[i].release(device);
+    mem_chunks.release();
+    vkDeviceWaitIdle(device);
+    ito(sc_image_count) vkDestroySemaphore(device, sc_free_sem[i], NULL);
+    ito(sc_image_count) vkDestroySemaphore(device, render_finish_sem[i], NULL);
+    ito(sc_image_count) vkDestroyFence(device, frame_fences[i], NULL);
+    vkDestroySwapchainKHR(device, swapchain, NULL);
+    vkDestroyDevice(device, NULL);
+    vkDestroySurfaceKHR(instance, surface, NULL);
+    vkDestroyInstance(instance, NULL);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
   }
 
   u32 find_mem_type(u32 type, VkMemoryPropertyFlags prop_flags) {
@@ -422,8 +456,7 @@ struct Window {
                      reqs.memoryTypeBits);
 
       ASSERT_DEBUG(new_chunk.has_space(info.size));
-      u32    offset = new_chunk.alloc(reqs.alignment, info.size);
-      Buffer new_buf;
+      u32 offset              = new_chunk.alloc(reqs.alignment, info.size);
       new_buf.buffer          = buf;
       new_buf.access_flags    = 0;
       new_buf.create_info     = cinfo;
@@ -444,20 +477,14 @@ struct Window {
     return {buffers.push(new_buf), (i32)rd::Type::Buffer};
   }
 
-  void release() {
-    ito(mem_chunks.size) mem_chunks[i].release(device);
-    mem_chunks.release();
-    vkDeviceWaitIdle(device);
-    ito(sc_image_count) vkDestroySemaphore(device, sc_free_sem[i], NULL);
-    ito(sc_image_count) vkDestroySemaphore(device, render_finish_sem[i], NULL);
-    ito(sc_image_count) vkDestroyFence(device, frame_fences[i], NULL);
-    vkDestroySwapchainKHR(device, swapchain, NULL);
-    vkDestroyDevice(device, NULL);
-    vkDestroySurfaceKHR(instance, surface, NULL);
-    vkDestroyInstance(instance, NULL);
-    SDL_DestroyWindow(window);
-    SDL_Quit();
+  void release_resource(Resource_ID res_id) {
+    if (res_id.type == (i32)rd::Type::Buffer) {
+      buffers.remove(res_id.id, 3);
+    } else {
+      TRAP;
+    }
   }
+
   void release_swapchain() {
     if (swapchain != VK_NULL_HANDLE) {
       vkDestroySwapchainKHR(device, swapchain, NULL);
@@ -779,6 +806,8 @@ struct Window {
     window_height = surface_capabilities.currentExtent.height;
   }
   void start_frame() {
+    buffers.tick();
+    images.tick();
   restart:
     update_surface_size();
     if (window_width != (i32)sc_extent.width || window_height != (i32)sc_extent.height) {
@@ -876,31 +905,43 @@ struct Window {
   }
 };
 
-typedef void (*Loop_Callback_t)(rd::Pass_Mng *);
+// typedef void (*Loop_Callback_t)(rd::Pass_Mng *);
 
 enum class Render_Value_t {
   UNKNOWN = 0,
   RESOURCE_ID,
-
+  FLAGS,
 };
 
 struct Render_Value {
   union {
-    ID id;
+    Resource_ID res_id;
   };
 };
 
 struct Renderign_Evaluator final : public IEvaluator {
-  Window wnd;
-
-  void                 init() { wnd.init(); }
+  Window             wnd;
+  Pool<Render_Value> rd_values;
+  void               init() {
+    rd_values = Pool<Render_Value>::create(1 << 10);
+    wnd.init();
+  }
   Renderign_Evaluator *create() {
     Renderign_Evaluator *out = new Renderign_Evaluator;
     out->init();
     return out;
   }
+  void enter_scope() {
+    state->enter_scope();
+    rd_values.enter_scope();
+  }
+  void exit_scope() {
+    state->exit_scope();
+    rd_values.exit_scope();
+  }
   void release() override {
     wnd.release();
+    rd_values.release();
     delete this;
   }
   void start_frame() {
@@ -918,6 +959,22 @@ struct Renderign_Evaluator final : public IEvaluator {
     }
     wnd.start_frame();
   }
+  Value *wrap_flags(u32 flags) {
+    Value *new_val    = state->value_storage.alloc_zero(1);
+    new_val->i        = (i32)flags;
+    new_val->type     = (i32)Value::Value_t::ANY;
+    new_val->any_type = (i32)Render_Value_t::FLAGS;
+    return new_val;
+  }
+  Value *wrap_resource(Resource_ID res_id) {
+    Render_Value *rval = rd_values.alloc_zero(1);
+    rval->res_id       = res_id;
+    Value *new_val     = state->value_storage.alloc_zero(1);
+    new_val->type      = (i32)Value::Value_t::ANY;
+    new_val->any_type  = (i32)Render_Value_t::RESOURCE_ID;
+    new_val->any       = rval;
+    return new_val;
+  }
   void  end_frame() { wnd.end_frame(); }
   Match eval(List *l) override {
     if (l == NULL) return NULL;
@@ -928,13 +985,63 @@ struct Renderign_Evaluator final : public IEvaluator {
       return NULL;
     } else if (l->cmp_symbol("render-loop")) {
       while (true) {
-        state->enter_scope();
+        enter_scope();
         eval_args(l->next);
-        state->exit_scope();
+        exit_scope();
       }
       return NULL;
     } else if (l->cmp_symbol("end_frame")) {
       end_frame();
+      return NULL;
+    } else if (l->cmp_symbol("flags")) {
+      List *cur   = l->next;
+      u32   flags = 0;
+      while (cur != NULL) {
+        if (cur->cmp_symbol("Buffer_Usage_Bits::USAGE_TRANSIENT")) {
+          flags |= (i32)rd::Buffer_Usage_Bits::USAGE_TRANSIENT;
+        } else if (cur->cmp_symbol("Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER")) {
+          flags |= (i32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER;
+        } else if (cur->cmp_symbol("Memory_Bits::MAPPABLE")) {
+          flags |= (i32)rd::Memory_Bits::MAPPABLE;
+        } else {
+          ASSERT_DEBUG(false);
+        }
+        cur = cur->next;
+      }
+      return wrap_flags(flags);
+    } else if (l->cmp_symbol("show_stats")) {
+      wnd.buffers.dump();
+      wnd.images.dump();
+      fprintf(stdout, "num mem chunks: %i\n", (i32)wnd.mem_chunks.size);
+      ito(wnd.mem_chunks.size) wnd.mem_chunks[i].dump();
+      return NULL;
+    } else if (l->cmp_symbol("create_buffer")) {
+      SmallArray<Value *, 2> args;
+      args.init();
+      defer(args.release());
+      eval_args_and_collect(l->next, args);
+      ASSERT_EVAL(args.size = 3);
+      ASSERT_EVAL(args[0]->type == (i32)Value::Value_t::ANY &&
+                  args[0]->any_type == (i32)Render_Value_t::FLAGS);
+      ASSERT_EVAL(args[1]->type == (i32)Value::Value_t::ANY &&
+                  args[1]->any_type == (i32)Render_Value_t::FLAGS);
+      ASSERT_EVAL(args[2]->type == (i32)Value::Value_t::I32);
+      rd::Buffer info;
+      info.usage_bits    = args[0]->i;
+      info.mem_bits      = args[1]->i;
+      info.size          = args[2]->i;
+      Resource_ID res_id = wnd.create_buffer(info, NULL);
+      return wrap_resource(res_id);
+    } else if (l->cmp_symbol("release_resource")) {
+      SmallArray<Value *, 2> args;
+      args.init();
+      defer(args.release());
+      eval_args_and_collect(l->next, args);
+      ASSERT_EVAL(args.size = 1);
+      ASSERT_EVAL(args[0]->type == (i32)Value::Value_t::ANY &&
+                  args[0]->any_type == (i32)Render_Value_t::RESOURCE_ID);
+      Render_Value *rval = (Render_Value *)args[0]->any;
+      wnd.release_resource(rval->res_id);
       return NULL;
     }
     if (prev != NULL) return prev->eval(l);
