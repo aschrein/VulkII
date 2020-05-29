@@ -332,7 +332,6 @@ static inline bool parse_float(char const *str, size_t len, float *result) {
   return true;
 }
 
-
 struct Value {
   enum class Value_t : i32 { UNKNOWN = 0, I32, F32, SYMBOL, BINDING, LAMBDA, SCOPE, MODE, ANY };
   i32 type;
@@ -393,11 +392,11 @@ struct Symbol_Table {
     string_ref name;
     Value *    val;
   };
-  struct Symbol_Hash_Table {
+  struct Symbol_Frame {
     using Table_t = Hash_Table<string_ref, Value *, Default_Allocator, 0x10, 0x10>;
-    Table_t            table;
-    Symbol_Hash_Table *prev;
-    void               init() {
+    Table_t       table;
+    Symbol_Frame *prev;
+    void          init() {
       table.init();
       prev = NULL;
     }
@@ -406,27 +405,27 @@ struct Symbol_Table {
       prev = NULL;
     }
   };
-  Pool<Symbol_Hash_Table> table_storage;
-  Symbol_Hash_Table *     head;
-  Symbol_Hash_Table *     tail;
+  Pool<Symbol_Frame> table_storage;
+  Symbol_Frame *     head;
+  Symbol_Frame *     tail;
 
   void init() {
-    table_storage = Pool<Symbol_Hash_Table>::create(0x400);
+    table_storage = Pool<Symbol_Frame>::create(0x400);
     head          = table_storage.alloc(1);
     head->init();
     tail = head;
   }
   void release() {
-    Symbol_Hash_Table *cur = tail;
+    Symbol_Frame *cur = tail;
     while (cur != NULL) {
-      Symbol_Hash_Table *prev = cur->prev;
+      Symbol_Frame *prev = cur->prev;
       cur->release();
       cur = prev;
     }
     table_storage.release();
   }
   Value *lookup_value(string_ref name) {
-    Symbol_Hash_Table *cur = tail;
+    Symbol_Frame *cur = tail;
     while (cur != NULL) {
       if (Value **val = cur->table.get_or_null(name)) return *val;
       cur = cur->prev;
@@ -434,7 +433,7 @@ struct Symbol_Table {
     return NULL;
   }
   Value *lookup_value(string_ref name, void *scope) {
-    Symbol_Hash_Table *cur = (Symbol_Hash_Table *)scope;
+    Symbol_Frame *cur = (Symbol_Frame *)scope;
     while (cur != NULL) {
       if (Value **val = cur->table.get_or_null(name)) return *val;
       cur = cur->prev;
@@ -442,25 +441,25 @@ struct Symbol_Table {
     return NULL;
   }
   void *get_scope() { return (void *)tail; }
-  void  set_scope(void *scope) { tail = (Symbol_Hash_Table *)scope; }
+  void  set_scope(void *scope) { tail = (Symbol_Frame *)scope; }
   void  enter_scope() {
-    Symbol_Hash_Table *new_table = table_storage.alloc(1);
+    Symbol_Frame *new_table = table_storage.alloc(1);
     new_table->init();
     new_table->prev = tail;
     tail            = new_table;
   }
   void exit_scope() {
-    Symbol_Hash_Table *new_tail = tail->prev;
+    Symbol_Frame *new_tail = tail->prev;
     ASSERT_DEBUG(new_tail != NULL);
     tail->release();
     table_storage.pop();
     tail = new_tail;
   }
   void ATTR_USED dump() {
-    Symbol_Hash_Table *cur = tail;
+    Symbol_Frame *cur = tail;
     while (cur != NULL) {
       fprintf(stdout, "--------new-table\n");
-      cur->table.iter([&](Symbol_Hash_Table::Table_t::Pair_t const &item) {
+      cur->table.iter([&](Symbol_Frame::Table_t::Pair_t const &item) {
         fprintf(stdout, "symbol(\"%.*s\"):\n", STRF(item.key));
         item.value->dump();
       });
@@ -492,6 +491,20 @@ struct Evaluator_State {
     list_storage.release();
     value_storage.release();
     symbol_table.release();
+  }
+
+  void enter_scope() {
+    string_storage.enter_scope();
+    list_storage.enter_scope();
+    value_storage.enter_scope();
+    symbol_table.enter_scope();
+  }
+
+  void exit_scope() {
+    string_storage.exit_scope();
+    list_storage.exit_scope();
+    value_storage.exit_scope();
+    symbol_table.exit_scope();
   }
 
   Value *alloc_value() { return value_storage.alloc_zero(1); }

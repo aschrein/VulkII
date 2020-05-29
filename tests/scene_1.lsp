@@ -1,9 +1,10 @@
 (scope
-  (print (format "hello world %i" 1))
+  (print "Scene 1 started")
   (add-mode rendering
-    (print (format "hello world %i" 2))
+    (print "Entering rendering mode")
     (render-loop
       (start_frame)
+      (print "next frame")
       (end_frame)
     )
   )

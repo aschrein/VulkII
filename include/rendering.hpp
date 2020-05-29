@@ -1,8 +1,8 @@
 #ifndef RENDERING_HPP
 #define RENDERING_HPP
 
-#include "utils.hpp"
 #include "script.hpp"
+#include "utils.hpp"
 
 struct ID {
   u32  _id = 0;
@@ -11,16 +11,16 @@ struct ID {
 };
 
 struct Resource_ID {
-  u32  _id  = 0;
-  u32  type = 0;
-  u32  index() { return _id - 1; }
-  bool is_null() { return _id == 0; }
+  ID   id;
+  u32  type;
+  u32  index() { return id.index(); }
+  bool is_null() { return id.is_null(); }
 };
 
 namespace rd {
 enum class RT_t { Color, Depth };
 enum class Type { RT, Image, Buffer, Dummy };
-enum class Cmp_t { LT, LE, GT, GE, EQ};
+enum class Cmp_t { LT, LE, GT, GE, EQ };
 enum class Primitive_t { TRIANGLE_LIST, LINE_LIST };
 enum class Front_Face { CW, CCW };
 enum class Cull_Mode { NONE, FRONT, BACK };
@@ -133,9 +133,8 @@ struct Imm_Ctx {
   void VS_set_shader(Resource_ID id);
   void PS_set_shader(Resource_ID id);
   void CS_set_shader(Resource_ID id);
-  void RS_set_depth_stencil_state(bool enable_depth_test, Cmp_t cmp_op,
-                                  bool enable_depth_write, float max_depth,
-                                  float depth_bias = 0.0f);
+  void RS_set_depth_stencil_state(bool enable_depth_test, Cmp_t cmp_op, bool enable_depth_write,
+                                  float max_depth, float depth_bias = 0.0f);
   void RS_set_line_width(float line_width);
   void bind_resource(string_ref name, u32 id, u32 index);
   void bind_resource(string_ref name, string_ref id, u32 index);

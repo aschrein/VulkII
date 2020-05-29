@@ -94,7 +94,7 @@ struct Mem_Chunk : Slot {
 };
 
 struct Buffer : public Slot {
-  u32                mem_chunk_id;
+  u32                mem_chunk_index;
   u32                mem_offset;
   VkBuffer           buffer;
   VkBufferCreateInfo create_info;
@@ -102,13 +102,150 @@ struct Buffer : public Slot {
 };
 
 struct Image : public Slot {
-  u32                mem_chunk_id;
+  u32                mem_chunk_index;
   u32                mem_offset;
   VkImageLayout      layout;
   VkAccessFlags      access_flags;
   VkImageAspectFlags aspect;
   VkImage            image;
   VkImageCreateInfo  create_info;
+};
+
+template <typename T, typename Parent_t> //
+struct Resource_Array {
+  Array<T>   items;
+  Array<u32> free_items;
+  struct Deferred_Release {
+    u32 timer;
+    u32 item_index;
+  };
+  Array<Deferred_Release> limbo_items;
+  void                    init() {
+    items.init();
+    free_items.init();
+    limbo_items.init();
+  }
+  void release() {
+    ito(items.size) {
+      T &item = items[i];
+      if (item.is_alive()) Parent_t::release_item(item);
+    }
+    items.release();
+    free_items.release();
+    limbo_items.release();
+  }
+  ID push(T t) {
+    if (free_items.size) {
+      auto id       = free_items.pop();
+      items[id - 1] = t;
+      items[id - 1].set_index(id);
+      return {id + 1};
+    }
+    items.push(t);
+    items.back().set_index(items.size - 1);
+    return {(u32)items.size};
+  }
+  T &operator[](u32 index) {
+    ASSERT_DEBUG(index && items[index - 1].get_id().get_index() == index);
+    return items[index];
+  }
+  void remove(u32 id, u32 timeout) {
+    ASSERT_DEBUG(id);
+    items[id - 1].disable();
+    if (timeout == 0) {
+      Parent_t::release_item(items[id - 1]);
+      free_items.push(id);
+    } else {
+      limbo_items.push({timeout, id});
+    }
+  }
+  template <typename Ff> void for_each(Ff fn) {
+    ito(items.size) {
+      T &item = items[i];
+      if (item.is_alive()) fn(item);
+    }
+  }
+  void tick() {
+    Array<Pair<u32, u32>> new_limbo_items;
+    new_limbo_items.init();
+    ito(limbo_items) {
+      Deferred_Release &item = limbo_items[i];
+      ASSERT_DEBUG(item.timer != 0);
+      item.timer -= 1;
+      if (item.timer == 0) {
+        Parent_t::release_item(items[item.item_index]);
+        free_items.push(item.item_index);
+      } else {
+        new_limbo_items.push(item);
+      }
+    }
+    limbo_items.release();
+    limbo_items = new_limbo_items;
+  }
+};
+
+struct Shader_Descriptor {
+  u32                          set;
+  VkDescriptorSetLayoutBinding layout;
+};
+
+struct Vertex_Input {
+  uint32_t binding;
+  uint32_t offset;
+  VkFormat format;
+};
+
+struct Graphics_Pipeline_State {
+  VkCullModeFlags     cull_mode;
+  VkFrontFace         front_face;
+  VkPolygonMode       polygon_mode;
+  float               line_width;
+  bool                enable_depth_test;
+  VkCompareOp         cmp_op;
+  bool                enable_depth_write;
+  float               max_depth;
+  VkPrimitiveTopology topology;
+  float               depth_bias_const;
+  u32                 ps, vs;
+  u32                 pass;
+  u64                 dummy; // used for hashing to emulate C string
+  bool                operator==(const Graphics_Pipeline_State &that) const {
+    return memcmp(this, &that, sizeof(*this)) == 0;
+  }
+  Graphics_Pipeline_State() {
+    memset(this, 0, sizeof(*this)); // Important for memhash
+    dummy = 0;
+  }
+};
+
+u64 hash_of(Graphics_Pipeline_State const &state) { return hash_of((char const *)&state); }
+
+struct Graphics_Pipeline_Wrapper : public Slot {
+  VkShaderModule                            vs_shader_module;
+  VkShaderModule                            ps_shader_module;
+  SmallArray<VkDescriptorSetLayout, 4>      set_layouts;
+  VkPipelineLayout                          pipeline_layout;
+  VkPipeline                                pipeline;
+  Hash_Table<string_ref, Shader_Descriptor> resource_slots;
+
+  void release(VkDevice device) {
+    vkDestroyShaderModule(device, vs_shader_module, NULL);
+    vkDestroyShaderModule(device, ps_shader_module, NULL);
+    ito(set_layouts.size) vkDestroyDescriptorSetLayout(device, set_layouts[i], NULL);
+    vkDestroyPipelineLayout(device, pipeline_layout, NULL);
+    vkDestroyPipeline(device, pipeline, NULL);
+    resource_slots.release();
+  }
+
+//  void init(VkDevice                         device,                   //
+//            VkShaderModule                   vs_shader_module,         //
+//            VkShaderModule                   ps_shader_module,         //
+//            VkGraphicsPipelineCreateInfo     pipeline_create_template, //
+//            Pair<string_ref, Vertex_Input> * vertex_inputs,            //
+//            u32                              num_vertex_inputs,        //
+//            VkVertexInputBindingDescription *vertex_bind_descs,        //
+//            u32                              num_vertex_bind_descs,    //
+//            u32                              push_constants_size = 128) {}
 };
 
 struct Window {
@@ -148,6 +285,34 @@ struct Window {
   u32 transfer_queue_id = 0;
 
   Array<Mem_Chunk> mem_chunks;
+  struct Buffer_Array : Resource_Array<Buffer, Buffer_Array> {
+    Window *wnd = NULL;
+    void    release_item(Buffer &buf) {
+      vkDestroyBuffer(wnd->device, buf.buffer, NULL);
+      wnd->mem_chunks[buf.mem_chunk_index].rem_reference();
+    }
+    void init(Window *wnd) {
+      this->wnd = wnd;
+      Resource_Array::init();
+    }
+  } buffers;
+  struct Image_Array : Resource_Array<Image, Image_Array> {
+    Window *wnd = NULL;
+    void    release_item(Image &img) {
+      vkDestroyImage(wnd->device, img.image, NULL);
+      wnd->mem_chunks[img.mem_chunk_index].rem_reference();
+    }
+    void init(Window *wnd) {
+      this->wnd = wnd;
+      Resource_Array::init();
+    }
+  } images;
+
+  void init_ds() {
+    mem_chunks.init();
+    buffers.init(this);
+    images.init(this);
+  }
 
   u32 find_mem_type(u32 type, VkMemoryPropertyFlags prop_flags) {
     VkPhysicalDeviceMemoryProperties props;
@@ -171,15 +336,112 @@ struct Window {
     return mem;
   }
 
-  Pair<VkBuffer, VkDeviceMemory> create_transient_buffer(VkBufferCreateInfo info) {
-    VkBuffer buf;
-    VK_ASSERT_OK(vkCreateBuffer(device, &info, NULL, &buf));
+  Pair<VkBuffer, VkDeviceMemory> create_transient_buffer(u32 size) {
+    VkBuffer           buf;
+    VkBufferCreateInfo cinfo;
+    MEMZERO(cinfo);
+    cinfo.sType                 = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    cinfo.pQueueFamilyIndices   = &graphics_queue_id;
+    cinfo.queueFamilyIndexCount = 1;
+    cinfo.sharingMode           = VK_SHARING_MODE_EXCLUSIVE;
+    cinfo.size                  = size;
+    cinfo.usage                 = 0;
+    cinfo.usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    VK_ASSERT_OK(vkCreateBuffer(device, &cinfo, NULL, &buf));
     VkMemoryRequirements reqs;
     vkGetBufferMemoryRequirements(device, buf, &reqs);
     VkDeviceMemory mem = alloc_memory(
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, reqs);
     VK_ASSERT_OK(vkBindBufferMemory(device, buf, mem, 0));
     return {buf, mem};
+  }
+
+  Resource_ID create_buffer(rd::Buffer info, void const *initial_data) {
+    u32 prop_flags = 0;
+    if (info.mem_bits & (i32)rd::Memory_Bits::MAPPABLE) {
+      prop_flags |= VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    }
+    if (info.mem_bits & (i32)rd::Memory_Bits::DEVICE) {
+      prop_flags |= VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    }
+    VkBuffer           buf;
+    VkBufferCreateInfo cinfo;
+    {
+      MEMZERO(cinfo);
+      cinfo.sType                 = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+      cinfo.pQueueFamilyIndices   = &graphics_queue_id;
+      cinfo.queueFamilyIndexCount = 1;
+      cinfo.sharingMode           = VK_SHARING_MODE_EXCLUSIVE;
+      cinfo.size                  = info.size;
+      cinfo.usage                 = 0;
+      cinfo.usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+      if (info.mem_bits & (i32)rd::Memory_Bits::MAPPABLE) {
+        cinfo.usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+      }
+      if (info.usage_bits & (i32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER) {
+        cinfo.usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+      }
+      if (info.usage_bits & (i32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER) {
+        cinfo.usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+      }
+      if (info.usage_bits & (i32)rd::Buffer_Usage_Bits::USAGE_UAV) {
+        cinfo.usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+      }
+      if (info.usage_bits & (i32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER) {
+        cinfo.usage |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+      }
+      VK_ASSERT_OK(vkCreateBuffer(device, &cinfo, NULL, &buf));
+    }
+    VkMemoryRequirements reqs;
+    vkGetBufferMemoryRequirements(device, buf, &reqs);
+    Buffer new_buf;
+    ito(mem_chunks.size) { // look for a suitable memory chunk
+      Mem_Chunk &chunk = mem_chunks[i];
+      if ((chunk.prop_flags & prop_flags) == prop_flags &&
+          (chunk.memory_type_bits & reqs.memoryTypeBits) == reqs.memoryTypeBits) {
+        if (chunk.has_space(info.size)) {
+          u32 offset = chunk.alloc(reqs.alignment, info.size);
+
+          new_buf.buffer          = buf;
+          new_buf.access_flags    = 0;
+          new_buf.create_info     = cinfo;
+          new_buf.mem_chunk_index = i;
+          new_buf.mem_offset      = offset;
+          goto finally;
+        }
+      }
+    }
+    // if failed create a new one
+    {
+      Mem_Chunk new_chunk;
+      u32       num_pages = 1 << 17;
+      if (num_pages * Mem_Chunk::PAGE_SIZE < info.size) {
+        num_pages = (info.size + Mem_Chunk::PAGE_SIZE - 1) / Mem_Chunk::PAGE_SIZE;
+      }
+      new_chunk.init(device, num_pages, find_mem_type(reqs.memoryTypeBits, prop_flags), prop_flags,
+                     reqs.memoryTypeBits);
+
+      ASSERT_DEBUG(new_chunk.has_space(info.size));
+      u32    offset = new_chunk.alloc(reqs.alignment, info.size);
+      Buffer new_buf;
+      new_buf.buffer          = buf;
+      new_buf.access_flags    = 0;
+      new_buf.create_info     = cinfo;
+      new_buf.mem_chunk_index = (u32)mem_chunks.size;
+      new_buf.mem_offset      = offset;
+      mem_chunks.push(new_chunk);
+    }
+  finally:
+    if (initial_data != NULL) {
+      ASSERT_DEBUG(info.mem_bits & (i32)rd::Memory_Bits::MAPPABLE);
+      Mem_Chunk &chunk = mem_chunks[new_buf.mem_chunk_index];
+      void *     data  = NULL;
+      VK_ASSERT_OK(
+          vkMapMemory(device, chunk.mem, new_buf.mem_offset, new_buf.create_info.size, 0, &data));
+      memcpy(data, initial_data, new_buf.create_info.size);
+      vkUnmapMemory(device, chunk.mem);
+    }
+    return {buffers.push(new_buf), (i32)rd::Type::Buffer};
   }
 
   void release() {
@@ -355,7 +617,7 @@ struct Window {
   }
 
   void init() {
-    mem_chunks.init();
+    init_ds();
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS);
     SDL_Window *window = SDL_CreateWindow("VulkII", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                           1280, 720, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
@@ -616,6 +878,18 @@ struct Window {
 
 typedef void (*Loop_Callback_t)(rd::Pass_Mng *);
 
+enum class Render_Value_t {
+  UNKNOWN = 0,
+  RESOURCE_ID,
+
+};
+
+struct Render_Value {
+  union {
+    ID id;
+  };
+};
+
 struct Renderign_Evaluator final : public IEvaluator {
   Window wnd;
 
@@ -654,7 +928,9 @@ struct Renderign_Evaluator final : public IEvaluator {
       return NULL;
     } else if (l->cmp_symbol("render-loop")) {
       while (true) {
+        state->enter_scope();
         eval_args(l->next);
+        state->exit_scope();
       }
       return NULL;
     } else if (l->cmp_symbol("end_frame")) {
