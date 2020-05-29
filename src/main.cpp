@@ -1,516 +1,497 @@
-#define UTILS_IMPL
-#include "utils.hpp"
+#include "rendering.hpp"
 
-//#include <imgui.h>
-//#include <imgui/examples/imgui_impl_sdl.h>
-//#include <imgui/examples/imgui_impl_vulkan.h>
+#define ALLOC_VAL() (Value *)alloc_value()
 
-#ifdef __linux__
-#define VK_USE_PLATFORM_XCB_KHR
-#include <SDL2/SDL.h>
-#include <SDL2/SDL_vulkan.h>
-#include <vulkan/vulkan.h>
-#else
-#define VK_USE_PLATFORM_WIN32_KHR
-#include <SDL.h>
-#include <SDL_vulkan.h>
-#include <vulkan/vulkan.h>
-#endif
-
-#define VK_ASSERT_OK(x)                                                                            \
+#define ASSERT_EVAL(x)                                                                             \
   do {                                                                                             \
-    VkResult __res = x;                                                                            \
-    if (__res != VK_SUCCESS) {                                                                     \
-      fprintf(stderr, "VkResult: %i\n", (i32)__res);                                               \
-      TRAP;                                                                                        \
+    if (!(x)) {                                                                                    \
+      set_error();                                                                                 \
+      state->push_error(#x);                                                                       \
+      abort();                                                                                     \
+      return NULL;                                                                                 \
     }                                                                                              \
   } while (0)
+#define CHECK_ERROR()                                                                              \
+  do {                                                                                             \
+    if (is_error()) {                                                                              \
+      abort();                                                                                     \
+      return NULL;                                                                                 \
+    }                                                                                              \
+  } while (0)
+#define CALL_EVAL(x)                                                                               \
+  eval_unwrap(x);                                                                                  \
+  CHECK_ERROR()
+#define ASSERT_SMB(x) ASSERT_EVAL(x != NULL && x->type == (i32)Value::Value_t::SYMBOL);
+#define ASSERT_I32(x) ASSERT_EVAL(x != NULL && x->type == (i32)Value::Value_t::I32);
+#define ASSERT_F32(x) ASSERT_EVAL(x != NULL && x->type == (i32)Value::Value_t::F32);
+#define ASSERT_ANY(x) ASSERT_EVAL(x != NULL && x->type == (i32)Value::Value_t::ANY);
 
-struct Window {
-  static constexpr u32 MAX_SC_IMAGES = 0x10;
-  SDL_Window *         window        = 0;
+#define EVAL_SMB(res, id)                                                                          \
+  Value *res = eval_unwrap(l->get(id));                                                            \
+  ASSERT_SMB(res)
+#define EVAL_I32(res, id)                                                                          \
+  Value *res = eval_unwrap(l->get(id));                                                            \
+  ASSERT_I32(res)
+#define EVAL_F32(res, id)                                                                          \
+  Value *res = eval_unwrap(l->get(id));                                                            \
+  ASSERT_F32(res)
+#define EVAL_ANY(res, id)                                                                          \
+  Value *res = eval_unwrap(l->get(id));                                                            \
+  ASSERT_ANY(res)
 
-  VkSurfaceKHR surface       = VK_NULL_HANDLE;
-  i32          window_width  = 1280;
-  i32          window_height = 720;
 
-  VkInstance       instance                   = VK_NULL_HANDLE;
-  VkPhysicalDevice physdevice                 = VK_NULL_HANDLE;
-  VkQueue          queue                      = VK_NULL_HANDLE;
-  VkDevice         device                     = VK_NULL_HANDLE;
-  VkCommandPool    cmd_pool                   = VK_NULL_HANDLE;
-  VkCommandBuffer  cmd_buffers[MAX_SC_IMAGES] = {};
-
-  VkSwapchainKHR     swapchain                      = VK_NULL_HANDLE;
-  VkRenderPass       sc_render_pass                 = VK_NULL_HANDLE;
-  uint32_t           sc_image_count                 = 0;
-  VkImageLayout      sc_image_layout[MAX_SC_IMAGES] = {};
-  VkImage            sc_images[MAX_SC_IMAGES]       = {};
-  VkImageView        sc_image_views[MAX_SC_IMAGES]  = {};
-  VkFramebuffer      sc_framebuffers[MAX_SC_IMAGES] = {};
-  VkExtent2D         sc_extent                      = {};
-  VkSurfaceFormatKHR sc_format                      = {};
-
-  u32         frame_id                         = 0;
-  VkFence     frame_fences[MAX_SC_IMAGES]      = {};
-  VkSemaphore sc_free_sem[MAX_SC_IMAGES]       = {};
-  VkSemaphore render_finish_sem[MAX_SC_IMAGES] = {};
-
-  u32 graphics_queue_id = 0;
-  u32 compute_queue_id  = 0;
-  u32 transfer_queue_id = 0;
-
-  void release() {
-    vkDeviceWaitIdle(device);
-    ito(sc_image_count) vkDestroySemaphore(device, sc_free_sem[i], NULL);
-    ito(sc_image_count) vkDestroySemaphore(device, render_finish_sem[i], NULL);
-    ito(sc_image_count) vkDestroyFence(device, frame_fences[i], NULL);
-    vkDestroySwapchainKHR(device, swapchain, NULL);
-    vkDestroyDevice(device, NULL);
-    vkDestroySurfaceKHR(instance, surface, NULL);
-    vkDestroyInstance(instance, NULL);
-    SDL_DestroyWindow(window);
+struct Default_Evaluator final : public IEvaluator {
+  void               init() {}
+  Default_Evaluator *create() {
+    Default_Evaluator *out = new Default_Evaluator;
+    out->init();
+    return out;
   }
-  void release_swapchain() {
-    if (swapchain != VK_NULL_HANDLE) {
-      vkDestroySwapchainKHR(device, swapchain, NULL);
-    }
-    ito(sc_image_count) {
-      if (sc_framebuffers[i] != VK_NULL_HANDLE)
-        vkDestroyFramebuffer(device, sc_framebuffers[i], NULL);
-      if (sc_image_views[i] != VK_NULL_HANDLE) vkDestroyImageView(device, sc_image_views[i], NULL);
-    }
-    if (sc_render_pass != VK_NULL_HANDLE) {
-      vkDestroyRenderPass(device, sc_render_pass, NULL);
-    }
-  }
-
-  void update_swapchain() {
-    SDL_SetWindowResizable(window, SDL_FALSE);
-    defer(SDL_SetWindowResizable(window, SDL_TRUE));
-    vkDeviceWaitIdle(device);
-    release_swapchain();
-    u32                format_count = 0;
-    VkSurfaceFormatKHR formats[0x100];
-    vkGetPhysicalDeviceSurfaceFormatsKHR(physdevice, surface, &format_count, 0);
-    vkGetPhysicalDeviceSurfaceFormatsKHR(physdevice, surface, &format_count, formats);
-    VkSurfaceFormatKHR format_of_choice;
-    format_of_choice.format = VK_FORMAT_UNDEFINED;
-    ito(format_count) {
-      if (formats[i].format == VK_FORMAT_R8G8B8A8_SRGB ||  //
-          formats[i].format == VK_FORMAT_B8G8R8A8_SRGB ||  //
-          formats[i].format == VK_FORMAT_B8G8R8_SRGB ||    //
-          formats[i].format == VK_FORMAT_R8G8B8_SRGB ||    //
-          formats[i].format == VK_FORMAT_R8G8B8_UNORM ||   //
-          formats[i].format == VK_FORMAT_R8G8B8A8_UNORM || //
-          formats[i].format == VK_FORMAT_B8G8R8A8_UNORM || //
-          formats[i].format == VK_FORMAT_B8G8R8_UNORM      //
-      ) {
-        format_of_choice = formats[i];
-        break;
-      }
-    }
-    ASSERT_ALWAYS(format_of_choice.format != VK_FORMAT_UNDEFINED);
-    sc_format = format_of_choice;
-
-    uint32_t num_present_modes = 0;
-    vkGetPhysicalDeviceSurfacePresentModesKHR(physdevice, surface, &num_present_modes, NULL);
-    VkPresentModeKHR present_modes[0x100];
-    vkGetPhysicalDeviceSurfacePresentModesKHR(physdevice, surface, &num_present_modes,
-                                              present_modes);
-    VkPresentModeKHR present_mode_of_choice = VK_PRESENT_MODE_FIFO_KHR; // always supported.
-    ito(num_present_modes) {
-      if (present_modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) { // prefer mailbox
-        present_mode_of_choice = VK_PRESENT_MODE_MAILBOX_KHR;
-        break;
-      }
-    }
-    //    usleep(100000);
-    VkSurfaceCapabilitiesKHR surface_capabilities;
-    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physdevice, surface, &surface_capabilities);
-
-    sc_extent        = surface_capabilities.currentExtent;
-    sc_extent.width  = CLAMP(sc_extent.width, surface_capabilities.minImageExtent.width,
-                            surface_capabilities.maxImageExtent.width);
-    sc_extent.height = CLAMP(sc_extent.height, surface_capabilities.minImageExtent.height,
-                             surface_capabilities.maxImageExtent.height);
-
-    VkSwapchainCreateInfoKHR sc_create_info;
-    MEMZERO(sc_create_info);
-    sc_create_info.sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-    sc_create_info.surface          = surface;
-    sc_create_info.minImageCount    = CLAMP(3, surface_capabilities.minImageCount, 0x10);
-    sc_create_info.imageFormat      = format_of_choice.format;
-    sc_create_info.imageColorSpace  = format_of_choice.colorSpace;
-    sc_create_info.imageExtent      = sc_extent;
-    sc_create_info.imageArrayLayers = 1;
-    sc_create_info.imageUsage =
-        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    sc_create_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    sc_create_info.preTransform     = surface_capabilities.currentTransform;
-    sc_create_info.compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-    sc_create_info.presentMode      = present_mode_of_choice;
-    sc_create_info.clipped          = VK_TRUE;
-    sc_image_count                  = 0;
-    VK_ASSERT_OK(vkCreateSwapchainKHR(device, &sc_create_info, 0, &swapchain));
-    vkGetSwapchainImagesKHR(device, swapchain, &sc_image_count, NULL);
-    vkGetSwapchainImagesKHR(device, swapchain, &sc_image_count, sc_images);
-    ito(sc_image_count) {
-      VkImageViewCreateInfo view_ci;
-      MEMZERO(view_ci);
-      view_ci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-      view_ci.image = sc_images[i];
-      MEMZERO(view_ci.components);
-      view_ci.components.r = VK_COMPONENT_SWIZZLE_R;
-      view_ci.components.g = VK_COMPONENT_SWIZZLE_G;
-      view_ci.components.b = VK_COMPONENT_SWIZZLE_B;
-      view_ci.components.a = VK_COMPONENT_SWIZZLE_A;
-      view_ci.format       = sc_format.format;
-      MEMZERO(view_ci.subresourceRange);
-      view_ci.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-      view_ci.subresourceRange.baseMipLevel   = 0;
-      view_ci.subresourceRange.levelCount     = 1;
-      view_ci.subresourceRange.baseArrayLayer = 0;
-      view_ci.subresourceRange.layerCount     = 1;
-      view_ci.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
-      VK_ASSERT_OK(vkCreateImageView(device, &view_ci, NULL, &sc_image_views[i]));
-      sc_image_layout[i] = VK_IMAGE_LAYOUT_UNDEFINED;
-    }
-    {
-      VkAttachmentDescription attachment;
-      MEMZERO(attachment);
-      attachment.format         = sc_format.format;
-      attachment.samples        = VK_SAMPLE_COUNT_1_BIT;
-      attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
-      attachment.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
-      attachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-      attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-      attachment.initialLayout  = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-      attachment.finalLayout    = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-      VkAttachmentReference color_attachment;
-      MEMZERO(color_attachment);
-      color_attachment.attachment = 0;
-      color_attachment.layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-      VkSubpassDescription subpass;
-      MEMZERO(subpass);
-      subpass.pipelineBindPoint    = VK_PIPELINE_BIND_POINT_GRAPHICS;
-      subpass.colorAttachmentCount = 1;
-      subpass.pColorAttachments    = &color_attachment;
-      VkSubpassDependency dependency;
-      MEMZERO(dependency);
-      dependency.srcSubpass    = VK_SUBPASS_EXTERNAL;
-      dependency.dstSubpass    = 0;
-      dependency.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-      dependency.dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-      dependency.srcAccessMask = 0;
-      dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-      VkRenderPassCreateInfo info;
-      MEMZERO(info);
-      info.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-      info.attachmentCount = 1;
-      info.pAttachments    = &attachment;
-      info.subpassCount    = 1;
-      info.pSubpasses      = &subpass;
-      info.dependencyCount = 1;
-      info.pDependencies   = &dependency;
-      VK_ASSERT_OK(vkCreateRenderPass(device, &info, NULL, &sc_render_pass));
-    }
-    ito(sc_image_count) {
-      VkFramebufferCreateInfo info;
-      MEMZERO(info);
-      info.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-      info.attachmentCount = 1;
-      info.width           = sc_extent.width;
-      info.height          = sc_extent.height;
-      info.layers          = 1;
-      info.pAttachments    = &sc_image_views[i];
-      info.renderPass      = sc_render_pass;
-      VK_ASSERT_OK(vkCreateFramebuffer(device, &info, NULL, &sc_framebuffers[i]));
-    }
-  }
-
-  void init() {
-    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS);
-    SDL_Window *window = SDL_CreateWindow("VulkII", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                          1280, 720, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+  void  release() override { delete this; }
+  Match eval(List *l) override {
+    if (l == NULL) return NULL;
     TMP_STORAGE_SCOPE;
-
-    u32 num_instance_extensions;
-    ASSERT_ALWAYS(SDL_Vulkan_GetInstanceExtensions(window, &num_instance_extensions, nullptr));
-    const char **instance_extensions =
-        (char const **)tl_alloc_tmp((num_instance_extensions + 1) * sizeof(char *));
-    ASSERT_ALWAYS(
-        SDL_Vulkan_GetInstanceExtensions(window, &num_instance_extensions, instance_extensions));
-    instance_extensions[num_instance_extensions++] = VK_EXT_DEBUG_REPORT_EXTENSION_NAME;
-
-    VkApplicationInfo app_info;
-    MEMZERO(app_info);
-    app_info.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    app_info.apiVersion         = VK_API_VERSION_1_2;
-    app_info.applicationVersion = 1;
-    app_info.pApplicationName   = "Vulkii";
-    app_info.pEngineName        = "Vulkii";
-
-    const char *layerNames[] = {//
-                                // "VK_LAYER_LUNARG_standard_validation" // [Deprecated]
-                                "VK_LAYER_KHRONOS_validation", NULL};
-
-    VkInstanceCreateInfo info;
-    MEMZERO(info);
-    info.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-    info.pApplicationInfo        = &app_info;
-    info.enabledLayerCount       = ARRAY_SIZE(layerNames) - 1;
-    info.ppEnabledLayerNames     = layerNames;
-    info.enabledExtensionCount   = num_instance_extensions;
-    info.ppEnabledExtensionNames = instance_extensions;
-
-    VK_ASSERT_OK(vkCreateInstance(&info, nullptr, &instance));
-
-    if (!SDL_Vulkan_CreateSurface(window, instance, &surface)) {
-      TRAP;
-    }
-    const u32               MAX_COUNT = 0x100;
-    u32                     physdevice_count;
-    VkPhysicalDevice        physdevice_handles[MAX_COUNT];
-    VkQueueFamilyProperties queue_family_properties[MAX_COUNT];
-    //  VkQueueFamilyProperties2    queue_family_properties2[MAX_COUNT];
-    //  VkQueueFamilyProperties2KHR queue_family_properties2KHR[MAX_COUNT];
-
-    vkEnumeratePhysicalDevices(instance, &physdevice_count, 0);
-    vkEnumeratePhysicalDevices(instance, &physdevice_count, physdevice_handles);
-
-    VkPhysicalDevice graphics_device_id = NULL;
-
-    ito(physdevice_count) {
-      {
-        u32 num_queue_family_properties = 0;
-        vkGetPhysicalDeviceQueueFamilyProperties(physdevice_handles[i],
-                                                 &num_queue_family_properties, NULL);
-        vkGetPhysicalDeviceQueueFamilyProperties(
-            physdevice_handles[i], &num_queue_family_properties, queue_family_properties);
-
-        jto(num_queue_family_properties) {
-
-          VkBool32 sup = VK_FALSE;
-          vkGetPhysicalDeviceSurfaceSupportKHR(physdevice_handles[i], j, surface, &sup);
-
-          if (sup && (queue_family_properties[j].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
-            graphics_queue_id  = j;
-            graphics_device_id = physdevice_handles[i];
+    if (l->child != NULL) {
+      ASSERT_EVAL(!l->nonempty());
+      return global_eval(l->child);
+    } else if (l->nonempty()) {
+      i32  imm32;
+      f32  immf32;
+      bool is_imm32  = !l->quoted && parse_decimal_int(l->symbol.ptr, l->symbol.len, &imm32);
+      bool is_immf32 = !l->quoted && parse_float(l->symbol.ptr, l->symbol.len, &immf32);
+      if (is_imm32) {
+        Value *new_val = ALLOC_VAL();
+        new_val->i     = imm32;
+        new_val->type  = (i32)Value::Value_t::I32;
+        return new_val;
+      } else if (is_immf32) {
+        Value *new_val = ALLOC_VAL();
+        new_val->f     = immf32;
+        new_val->type  = (i32)Value::Value_t::F32;
+        return new_val;
+      } else if (l->cmp_symbol("for-range")) {
+        List *name_l = l->next;
+        ASSERT_EVAL(name_l->nonempty());
+        string_ref name = name_l->symbol;
+        Value *    lb   = CALL_EVAL(l->get(2));
+        ASSERT_EVAL(lb != NULL && lb->type == (i32)Value::Value_t::I32);
+        Value *ub = CALL_EVAL(l->get(3));
+        ASSERT_EVAL(ub != NULL && ub->type == (i32)Value::Value_t::I32);
+        Value *new_val = ALLOC_VAL();
+        new_val->i     = 0;
+        new_val->type  = (i32)Value::Value_t::I32;
+        for (i32 i = lb->i; i < ub->i; i++) {
+          state->symbol_table.enter_scope();
+          new_val->i = i;
+          state->symbol_table.add_symbol(name, new_val);
+          defer(state->symbol_table.exit_scope());
+          eval_args(l->get(4));
+        }
+        return NULL;
+      } else if (l->cmp_symbol("for-items")) {
+        Value *name = CALL_EVAL(l->next);
+        ASSERT_EVAL(name->type == (i32)Value::Value_t::SYMBOL);
+        SmallArray<Value *, 8> items;
+        items.init();
+        defer(items.release());
+        eval_args_and_collect(l->next->next->child, items);
+        ito(items.size) {
+          state->symbol_table.enter_scope();
+          state->symbol_table.add_symbol(name->str, items[i]);
+          defer(state->symbol_table.exit_scope());
+          eval_args(l->get(3));
+        }
+        return NULL;
+      } else if (l->cmp_symbol("if")) {
+        EVAL_I32(cond, 1);
+        state->symbol_table.enter_scope();
+        defer(state->symbol_table.exit_scope());
+        if (cond->i != 0) {
+          Value *val = CALL_EVAL(l->get(2));
+          return val;
+        } else {
+          Value *val = CALL_EVAL(l->get(3));
+          return val;
+        }
+      } else if (l->cmp_symbol("add-mode")) {
+        EVAL_SMB(name, 1);
+        state->symbol_table.enter_scope();
+        defer(state->symbol_table.exit_scope());
+        IEvaluator *mode = IEvaluator::create_mode(name->str);
+        ASSERT_EVAL(mode != NULL);
+        IEvaluator *old_head = IEvaluator::get_head();
+        IEvaluator::set_head(mode);
+        eval_args(l->get(2));
+        IEvaluator::set_head(old_head);
+        mode->release();
+        return NULL;
+      } else if (l->cmp_symbol("lambda")) {
+        Value *new_val = ALLOC_VAL();
+        new_val->list  = l->next;
+        new_val->type  = (i32)Value::Value_t::LAMBDA;
+        return new_val;
+      } else if (l->cmp_symbol("scope")) {
+        state->symbol_table.enter_scope();
+        defer(state->symbol_table.exit_scope());
+        return eval_args(l->next);
+      } else if (l->cmp_symbol("add")) {
+        SmallArray<Value *, 2> args;
+        args.init();
+        defer(args.release());
+        eval_args_and_collect(l->next, args);
+        ASSERT_EVAL(args.size == 2);
+        Value *op1 = args[0];
+        ASSERT_EVAL(op1 != NULL);
+        Value *op2 = args[1];
+        ASSERT_EVAL(op2 != NULL);
+        ASSERT_EVAL(op1->type == op2->type);
+        if (op1->type == (i32)Value::Value_t::I32) {
+          Value *new_val = ALLOC_VAL();
+          new_val->i     = op1->i + op2->i;
+          new_val->type  = (i32)Value::Value_t::I32;
+          return new_val;
+        } else if (op1->type == (i32)Value::Value_t::F32) {
+          Value *new_val = ALLOC_VAL();
+          new_val->f     = op1->f + op2->f;
+          new_val->type  = (i32)Value::Value_t::F32;
+          return new_val;
+        } else {
+          ASSERT_EVAL(false && "add: unsopported operand types");
+        }
+        return NULL;
+      } else if (l->cmp_symbol("sub")) {
+        SmallArray<Value *, 2> args;
+        args.init();
+        defer(args.release());
+        eval_args_and_collect(l->next, args);
+        ASSERT_EVAL(args.size == 2);
+        Value *op1 = args[0];
+        ASSERT_EVAL(op1 != NULL);
+        Value *op2 = args[1];
+        ASSERT_EVAL(op2 != NULL);
+        ASSERT_EVAL(op1->type == op2->type);
+        if (op1->type == (i32)Value::Value_t::I32) {
+          Value *new_val = ALLOC_VAL();
+          new_val->i     = op1->i - op2->i;
+          new_val->type  = (i32)Value::Value_t::I32;
+          return new_val;
+        } else if (op1->type == (i32)Value::Value_t::F32) {
+          Value *new_val = ALLOC_VAL();
+          new_val->f     = op1->f - op2->f;
+          new_val->type  = (i32)Value::Value_t::F32;
+          return new_val;
+        } else {
+          ASSERT_EVAL(false && "sub: unsopported operand types");
+        }
+        return NULL;
+      } else if (l->cmp_symbol("mul")) {
+        SmallArray<Value *, 2> args;
+        args.init();
+        defer(args.release());
+        eval_args_and_collect(l->next, args);
+        ASSERT_EVAL(args.size == 2);
+        Value *op1 = args[0];
+        ASSERT_EVAL(op1 != NULL);
+        Value *op2 = args[1];
+        ASSERT_EVAL(op2 != NULL);
+        ASSERT_EVAL(op1->type == op2->type);
+        if (op1->type == (i32)Value::Value_t::I32) {
+          Value *new_val = ALLOC_VAL();
+          new_val->i     = op1->i * op2->i;
+          new_val->type  = (i32)Value::Value_t::I32;
+          return new_val;
+        } else if (op1->type == (i32)Value::Value_t::F32) {
+          Value *new_val = ALLOC_VAL();
+          new_val->f     = op1->f * op2->f;
+          new_val->type  = (i32)Value::Value_t::F32;
+          return new_val;
+        } else {
+          ASSERT_EVAL(false && "mul: unsopported operand types");
+        }
+        return NULL;
+      } else if (l->cmp_symbol("cmp")) {
+        List *                 mode = l->next;
+        SmallArray<Value *, 2> args;
+        args.init();
+        defer(args.release());
+        eval_args_and_collect(mode->next, args);
+        ASSERT_EVAL(args.size == 2);
+        Value *op1 = args[0];
+        ASSERT_EVAL(op1 != NULL);
+        Value *op2 = args[1];
+        ASSERT_EVAL(op2 != NULL);
+        ASSERT_EVAL(op1->type == op2->type);
+        if (mode->cmp_symbol("lt")) {
+          if (op1->type == (i32)Value::Value_t::I32) {
+            Value *new_val = ALLOC_VAL();
+            new_val->i     = op1->i < op2->i ? 1 : 0;
+            new_val->type  = (i32)Value::Value_t::I32;
+            return new_val;
+          } else if (op1->type == (i32)Value::Value_t::F32) {
+            Value *new_val = ALLOC_VAL();
+            new_val->i     = op1->f < op2->f ? 1 : 0;
+            new_val->type  = (i32)Value::Value_t::I32;
+            return new_val;
+          } else {
+            ASSERT_EVAL(false && "cmp: unsopported operand types");
           }
-          if (sup && (queue_family_properties[j].queueFlags & VK_QUEUE_COMPUTE_BIT)) {
-            compute_queue_id = j;
+        } else if (mode->cmp_symbol("eq")) {
+          if (op1->type == (i32)Value::Value_t::I32) {
+            Value *new_val = ALLOC_VAL();
+            new_val->i     = op1->i == op2->i ? 1 : 0;
+            new_val->type  = (i32)Value::Value_t::I32;
+            return new_val;
+          } else if (op1->type == (i32)Value::Value_t::F32) {
+            Value *new_val = ALLOC_VAL();
+            new_val->i     = op1->f == op2->f ? 1 : 0;
+            new_val->type  = (i32)Value::Value_t::I32;
+            return new_val;
+          } else {
+            ASSERT_EVAL(false && "cmp: unsopported operand types");
           }
-          if (sup && (queue_family_properties[j].queueFlags & VK_QUEUE_TRANSFER_BIT)) {
-            transfer_queue_id = j;
+        } else {
+          ASSERT_EVAL(false && "cmp: unsopported op");
+        }
+        return NULL;
+      } else if (l->cmp_symbol("let")) {
+        List *name = l->next;
+        ASSERT_EVAL(name->nonempty());
+        Value *val = CALL_EVAL(l->get(2));
+        state->symbol_table.add_symbol(name->symbol, val);
+        return val;
+      } else if (l->cmp_symbol("get-scope")) {
+        Value *new_val = ALLOC_VAL();
+        new_val->any   = state->symbol_table.get_scope();
+        new_val->type  = (i32)Value::Value_t::SCOPE;
+        return new_val;
+      } else if (l->cmp_symbol("set-scope")) {
+        Value *val = CALL_EVAL(l->get(1));
+        ASSERT_EVAL(val != NULL && val->type == (i32)Value::Value_t::SCOPE);
+        void *old_scope = state->symbol_table.get_scope();
+        state->symbol_table.set_scope(val->any);
+        state->symbol_table.enter_scope();
+        defer({
+          state->symbol_table.exit_scope();
+          state->symbol_table.set_scope(old_scope);
+        });
+        { // Preserve list
+          List *cur = l->get(2)->child;
+          while (cur != NULL) {
+            if (cur->nonempty()) {
+              state->symbol_table.add_symbol(
+                  cur->symbol, state->symbol_table.lookup_value(cur->symbol, old_scope));
+            }
+            cur = cur->next;
           }
         }
+        return eval_args(l->get(3));
+      } else if (l->cmp_symbol("get-mode")) {
+        Value *new_val = ALLOC_VAL();
+        new_val->any   = get_head();
+        new_val->type  = (i32)Value::Value_t::MODE;
+        return new_val;
+      } else if (l->cmp_symbol("set-mode")) {
+        Value *val = CALL_EVAL(l->get(1));
+        ASSERT_EVAL(val != NULL && val->type == (i32)Value::Value_t::MODE);
+        IEvaluator *old_mode = get_head();
+        set_head((IEvaluator *)val->any);
+        defer(set_head(old_mode););
+        return eval_args(l->get(2));
+      } else if (l->cmp_symbol("quote")) {
+        Value *new_val = ALLOC_VAL();
+        new_val->list  = l->next;
+        new_val->type  = (i32)Value::Value_t::BINDING;
+        return new_val;
+      } else if (l->cmp_symbol("deref")) {
+        return state->symbol_table.lookup_value(l->next->symbol);
+      } else if (l->cmp_symbol("unbind")) {
+        ASSERT_EVAL(l->next->nonempty());
+        Value *sym = state->symbol_table.lookup_value(l->next->symbol);
+        ASSERT_EVAL(sym != NULL && sym->type == (i32)Value::Value_t::BINDING);
+        return global_eval(sym->list);
+      } else if (l->cmp_symbol("unquote")) {
+        ASSERT_EVAL(l->next->nonempty());
+        Value *sym = state->symbol_table.lookup_value(l->next->symbol);
+        ASSERT_EVAL(sym != NULL && sym->type == (i32)Value::Value_t::BINDING);
+        ASSERT_EVAL(sym->list->nonempty());
+        Value *new_val = ALLOC_VAL();
+        new_val->str   = sym->list->symbol;
+        new_val->type  = (i32)Value::Value_t::SYMBOL;
+        return new_val;
+      } else if (l->cmp_symbol("nil")) {
+        return NULL;
+      } else if (l->cmp_symbol("print")) {
+        EVAL_SMB(str, 1);
+        fprintf(stdout, "%.*s\n", STRF(str->str));
+        return NULL;
+      } else if (l->cmp_symbol("format")) {
+        // state->symbol_table.dump();
+        SmallArray<Value *, 4> args;
+        args.init();
+        defer({ args.release(); });
+        eval_args_and_collect(l->next, args);
+        Value *fmt    = args[0];
+        u32    cur_id = 1;
+        {
+          char *      tmp_buf = (char *)tl_alloc_tmp(0x100);
+          u32         cursor  = 0;
+          char const *c       = fmt->str.ptr;
+          char const *end     = fmt->str.ptr + fmt->str.len;
+          while (c != end) {
+            if (c[0] == '%') {
+              if (c + 1 == end) {
+                ASSERT_EVAL(false && "[format] Format string ends with %%");
+              }
+              if (cur_id == args.size) {
+                ASSERT_EVAL(false && "[format] Not enough arguments");
+              } else {
+                i32    num_chars = 0;
+                Value *val       = args[cur_id];
+                if (c[1] == 'i') {
+                  ASSERT_EVAL(val != NULL && val->type == (i32)Value::Value_t::I32);
+                  num_chars = sprintf(tmp_buf + cursor, "%i", val->i);
+                } else if (c[1] == 'f') {
+                  ASSERT_EVAL(val != NULL && val->type == (i32)Value::Value_t::F32);
+                  num_chars = sprintf(tmp_buf + cursor, "%f", val->f);
+                } else if (c[1] == 's') {
+                  ASSERT_EVAL(val != NULL && val->type == (i32)Value::Value_t::SYMBOL);
+                  num_chars = sprintf(tmp_buf + cursor, "%.*s", (i32)val->str.len, val->str.ptr);
+                } else {
+                  ASSERT_EVAL(false && "[format]  Unknown format");
+                }
+                if (num_chars < 0) {
+                  ASSERT_EVAL(false && "[format] Blimey!");
+                }
+                if (num_chars > 0x100) {
+                  ASSERT_EVAL(false && "[format] Format buffer overflow!");
+                }
+                cursor += num_chars;
+              }
+              cur_id += 1;
+              c += 1;
+            } else {
+              tmp_buf[cursor++] = c[0];
+            }
+            c += 1;
+          }
+          tmp_buf[cursor] = '\0';
+          Value *new_val  = ALLOC_VAL();
+          new_val->str    = move_cstr(stref_s(tmp_buf));
+          new_val->type   = (i32)Value::Value_t::SYMBOL;
+          return new_val;
+        }
+      } else {
+        ASSERT_EVAL(l->nonempty());
+        Value *sym = state->symbol_table.lookup_value(l->symbol);
+        if (sym != NULL) {
+          if (sym->type == (i32)Value::Value_t::LAMBDA) {
+            ASSERT_EVAL(sym->list->child != NULL);
+            List *lambda   = sym->list; // Try to evaluate
+            List *arg_name = lambda->child;
+            List *arg_val  = l->next;
+            state->symbol_table.enter_scope();
+            defer(state->symbol_table.exit_scope());
+            bool saw_vararg = false;
+            while (arg_name != NULL && arg_name->nonempty()) { // Bind arguments
+              ASSERT_EVAL(!saw_vararg && "vararg must be the last argument");
+              ASSERT_EVAL(arg_val != NULL);
+              ASSERT_EVAL(arg_name->nonempty());
+              if (arg_name->cmp_symbol("...")) {
+                Value *new_val = ALLOC_VAL();
+                new_val->list  = arg_val;
+                new_val->type  = (i32)Value::Value_t::BINDING;
+                state->symbol_table.add_symbol(arg_name->symbol, new_val);
+                saw_vararg = true;
+              } else {
+                Value *val = CALL_EVAL(arg_val);
+                state->symbol_table.add_symbol(arg_name->symbol, val);
+              }
+              arg_name = arg_name->next;
+              arg_val  = arg_val->next;
+            }
+            return eval_args(lambda->next);
+          } else if (sym->type == (i32)Value::Value_t::BINDING) {
+            //            Value *val = CALL_EVAL(sym->list);
+            Value *val = sym;
+            return val;
+          }
+          return sym;
+        }
+        Value *new_val = ALLOC_VAL();
+        new_val->str   = l->symbol;
+        new_val->type  = (i32)Value::Value_t::SYMBOL;
+        return new_val;
       }
-      //    {
-      //      u32 num_queue_family_properties = 0;
-      //      vkGetPhysicalDeviceQueueFamilyProperties2(physdevice_handles[i],
-      //      &num_queue_family_properties,
-      //                                                NULL);
-      //      vkGetPhysicalDeviceQueueFamilyProperties2(physdevice_handles[i],
-      //      &num_queue_family_properties,
-      //                                                queue_family_properties2);
-      //    }
-      //    {
-      //      u32 num_queue_family_properties = 0;
-      //      vkGetPhysicalDeviceQueueFamilyProperties2KHR(physdevice_handles[i],
-      //                                                   &num_queue_family_properties, NULL);
-      //      vkGetPhysicalDeviceQueueFamilyProperties2KHR(
-      //          physdevice_handles[i], &num_queue_family_properties, queue_family_properties2KHR);
-      //    }
     }
-    char const *       device_extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
-    VkDeviceCreateInfo deviceCreateInfo;
-    MEMZERO(deviceCreateInfo);
-    deviceCreateInfo.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    deviceCreateInfo.queueCreateInfoCount    = 1;
-    deviceCreateInfo.pQueueCreateInfos       = 0;
-    deviceCreateInfo.enabledLayerCount       = 0;
-    deviceCreateInfo.ppEnabledLayerNames     = 0;
-    deviceCreateInfo.enabledExtensionCount   = ARRAY_SIZE(device_extensions);
-    deviceCreateInfo.ppEnabledExtensionNames = device_extensions;
-    deviceCreateInfo.pEnabledFeatures        = 0;
-    float                   priority         = 1.0f;
-    VkDeviceQueueCreateInfo queue_create_info;
-    MEMZERO(queue_create_info);
-    queue_create_info.sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-    queue_create_info.queueFamilyIndex = graphics_queue_id;
-    queue_create_info.queueCount       = 1;
-    queue_create_info.pQueuePriorities = &priority;
-    deviceCreateInfo.pQueueCreateInfos = &queue_create_info;
-    VK_ASSERT_OK(vkCreateDevice(graphics_device_id, &deviceCreateInfo, NULL, &device));
-    vkGetDeviceQueue(device, graphics_queue_id, 0, &queue);
-    ASSERT_ALWAYS(queue != VK_NULL_HANDLE);
-    physdevice = graphics_device_id;
-    update_swapchain();
-    {
-      VkCommandPoolCreateInfo info;
-      MEMZERO(info);
-      info.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-      info.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-      info.queueFamilyIndex = graphics_queue_id;
-
-      vkCreateCommandPool(device, &info, 0, &cmd_pool);
-    }
-    {
-      VkCommandBufferAllocateInfo info;
-      MEMZERO(info);
-      info.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-      info.commandPool        = cmd_pool;
-      info.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-      info.commandBufferCount = sc_image_count;
-
-      vkAllocateCommandBuffers(device, &info, cmd_buffers);
-    }
-    {
-      VkSemaphoreCreateInfo info;
-      MEMZERO(info);
-      info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-      info.pNext = NULL;
-      info.flags = 0;
-      ito(sc_image_count) vkCreateSemaphore(device, &info, 0, &sc_free_sem[i]);
-      ito(sc_image_count) vkCreateSemaphore(device, &info, 0, &render_finish_sem[i]);
-    }
-    {
-      VkFenceCreateInfo info;
-      MEMZERO(info);
-      info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-      info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-      ito(sc_image_count) vkCreateFence(device, &info, 0, &frame_fences[i]);
-    }
-  }
-
-  void update_surface_size() {
-    VkSurfaceCapabilitiesKHR surface_capabilities;
-    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physdevice, surface, &surface_capabilities);
-    window_width  = surface_capabilities.currentExtent.width;
-    window_height = surface_capabilities.currentExtent.height;
-  }
-  void start_frame() {
-  restart:
-    update_surface_size();
-    if (window_width != (i32)sc_extent.width || window_height != (i32)sc_extent.height) {
-      update_swapchain();
-    }
-
-    uint32_t cmd_index = (frame_id++) % sc_image_count;
-    VkResult wait_res  = vkWaitForFences(device, 1, &frame_fences[cmd_index], VK_TRUE, 1000);
-    if (wait_res == VK_TIMEOUT) {
-      goto restart;
-    }
-    vkResetFences(device, 1, &frame_fences[cmd_index]);
-
-    uint32_t image_index;
-    VkResult acquire_res = vkAcquireNextImageKHR(
-        device, swapchain, UINT64_MAX, sc_free_sem[cmd_index], VK_NULL_HANDLE, &image_index);
-
-    if (acquire_res == VK_ERROR_OUT_OF_DATE_KHR || acquire_res == VK_SUBOPTIMAL_KHR) {
-      update_swapchain();
-      goto restart;
-    } else if (acquire_res != VK_SUCCESS) {
-      TRAP;
-    }
-
-    VkCommandBufferBeginInfo begin_info;
-    MEMZERO(begin_info);
-    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkResetCommandBuffer(cmd_buffers[cmd_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
-    vkBeginCommandBuffer(cmd_buffers[cmd_index], &begin_info);
-    VkImageSubresourceRange srange;
-    MEMZERO(srange);
-    srange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-    srange.baseMipLevel   = 0;
-    srange.levelCount     = VK_REMAINING_MIP_LEVELS;
-    srange.baseArrayLayer = 0;
-    srange.layerCount     = VK_REMAINING_ARRAY_LAYERS;
-    {
-      VkImageMemoryBarrier bar;
-      MEMZERO(bar);
-      bar.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-      bar.srcAccessMask       = 0;
-      bar.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
-      bar.oldLayout           = sc_image_layout[image_index];
-      bar.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-      bar.srcQueueFamilyIndex = graphics_queue_id;
-      bar.dstQueueFamilyIndex = graphics_queue_id;
-      bar.image               = sc_images[image_index];
-      bar.subresourceRange    = srange;
-      vkCmdPipelineBarrier(cmd_buffers[cmd_index], VK_PIPELINE_STAGE_TRANSFER_BIT,
-                           VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &bar);
-    }
-    VkClearColorValue clear_color = {{1.0f, 0.0f, 0.0f, 1.0f}};
-    vkCmdClearColorImage(cmd_buffers[cmd_index], sc_images[image_index],
-                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &srange);
-    {
-      VkImageMemoryBarrier bar;
-      MEMZERO(bar);
-      bar.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-      bar.srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
-      bar.dstAccessMask       = VK_ACCESS_MEMORY_READ_BIT;
-      bar.oldLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-      bar.newLayout           = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-      bar.srcQueueFamilyIndex = graphics_queue_id;
-      bar.dstQueueFamilyIndex = graphics_queue_id;
-      bar.image               = sc_images[image_index];
-      bar.subresourceRange    = srange;
-      vkCmdPipelineBarrier(cmd_buffers[cmd_index], VK_PIPELINE_STAGE_TRANSFER_BIT,
-                           VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 1, &bar);
-    }
-    sc_image_layout[image_index] = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    vkEndCommandBuffer(cmd_buffers[cmd_index]);
-    VkPipelineStageFlags stage_flags[]{VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-    VkSubmitInfo         submit_info;
-    MEMZERO(submit_info);
-    submit_info.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit_info.waitSemaphoreCount   = 1;
-    submit_info.pWaitSemaphores      = &sc_free_sem[cmd_index];
-    submit_info.pWaitDstStageMask    = stage_flags;
-    submit_info.commandBufferCount   = 1;
-    submit_info.pCommandBuffers      = &cmd_buffers[cmd_index];
-    submit_info.signalSemaphoreCount = 1;
-    submit_info.pSignalSemaphores    = &render_finish_sem[cmd_index];
-    vkQueueSubmit(queue, 1, &submit_info, frame_fences[cmd_index]);
-    VkPresentInfoKHR present_info;
-    MEMZERO(present_info);
-    present_info.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-    present_info.waitSemaphoreCount = 1;
-    present_info.pWaitSemaphores    = &render_finish_sem[cmd_index];
-    present_info.swapchainCount     = 1;
-    present_info.pSwapchains        = &swapchain;
-    present_info.pImageIndices      = &image_index;
-    vkQueuePresentKHR(queue, &present_info);
+    TRAP;
   }
 };
+
+IEvaluator *g_head = NULL;
+
+IEvaluator *IEvaluator::get_head() {
+  if (g_head == NULL) {
+    Default_Evaluator *head = new Default_Evaluator();
+    head->init();
+    g_head = head;
+  }
+  return g_head;
+}
+
+void IEvaluator::set_head(IEvaluator *newhead) { g_head = newhead; }
+
+Hash_Table<string_ref, Evaluator_Creator_t> &get_factory_table() {
+  static Hash_Table<string_ref, Evaluator_Creator_t> table;
+  static int                                         _init = [&] {
+    table.init();
+    return 0;
+  }();
+  (void)_init;
+  return table;
+}
+
+void IEvaluator::add_mode(string_ref name, Evaluator_Creator_t creat) {
+  get_factory_table().insert(name, creat);
+}
+
+IEvaluator *IEvaluator::create_mode(string_ref name) {
+  if (get_factory_table().contains(name)) {
+    IEvaluator *out = (*get_factory_table().get(name))();
+    out->prev       = get_head();
+    out->state      = get_head()->state;
+    return out;
+  }
+  return NULL;
+}
+
+void parse_and_eval(string_ref text) {
+  Evaluator_State state;
+  state.init();
+  defer(state.release());
+
+  struct List_Allocator {
+    Evaluator_State *state;
+    List *           alloc() {
+      List *out = state->list_storage.alloc_zero(1);
+      return out;
+    }
+  } list_allocator;
+  list_allocator.state = &state;
+  List *root           = List::parse(text, list_allocator);
+  if (root == NULL) {
+    state.push_error("Couldn't parse");
+    return;
+  }
+  root->dump_list_graph();
+
+  IEvaluator::get_head()->state = &state;
+  IEvaluator::get_head()->eval(root);
+}
 
 int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
-  Window wnd;
-  wnd.init();
-  while (true) {
-    SDL_Event event;
-    while (SDL_PollEvent(&event)) {
-      if (event.type == SDL_QUIT) {
-        exit(0);
-      }
-      switch (event.type) {
-      case SDL_WINDOWEVENT:
-        if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
-          // Sleep(100000);
-        }
-        break;
-      }
-    }
-    wnd.start_frame();
-  }
-  wnd.release();
-
-  SDL_Quit();
-
+  ASSERT_ALWAYS(argc == 2);
+  parse_and_eval(stref_s(read_file_tmp(argv[1])));
   return 0;
 }

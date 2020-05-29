@@ -16,6 +16,7 @@ ELSE()
 ENDIF()
 add_executable(vulkii
 src/main.cpp
+src/vk_backend.cpp
 )
 IF (WIN32)
   if(EXISTS "${SDL2_PATH}/lib/x64/SDL2.lib")

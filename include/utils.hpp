@@ -626,6 +626,11 @@ struct Array {
     size += 1;
   }
 
+  T &back() {
+    ASSERT_DEBUG(size != 0);
+    return ptr[size - 1];
+  }
+
   T pop() {
     ASSERT_DEBUG(size != 0);
     ASSERT_DEBUG(ptr != NULL);
