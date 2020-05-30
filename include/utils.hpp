@@ -220,6 +220,13 @@ template <typename T = uint8_t> struct Pool {
     return out;
   }
 
+  T *back() { return (T *)(this->ptr + this->stack_capacity + this->cursor * sizeof(T)); }
+
+  void advance(size_t size) {
+    this->cursor += size;
+    ASSERT_DEBUG(this->cursor < this->capacity);
+  }
+
   void release() {
 #if __linux__
     if (this->ptr) munmap(this->ptr, mem_length);

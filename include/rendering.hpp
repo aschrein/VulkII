@@ -19,7 +19,7 @@ struct Resource_ID {
 
 namespace rd {
 enum class RT_t { Color, Depth };
-enum class Type { RT, Image, Buffer, Dummy };
+enum class Type { RT, Image, Buffer, Shader, Dummy };
 enum class Cmp_t { LT, LE, GT, GE, EQ };
 enum class Primitive_t { TRIANGLE_LIST, LINE_LIST };
 enum class Front_Face { CW, CCW };

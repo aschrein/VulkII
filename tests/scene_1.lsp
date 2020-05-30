@@ -23,41 +23,44 @@
         ))
       (unmap_buffer tmp_buf)
       (release_resource tmp_buf)
-      (let cs
-        (compile_shader pixel
+      (let cs_text
+        (build_shader
+          (type pixel)
+          (input vec3 in_position)
+          (input vec3 in_normal)
+          (input vec3 in_tangent)
+          (input vec3 in_binormal)
+          (input vec2 in_texcoord)
+
+          (output vec4 g_albedo)
+          (output vec4 g_normal)
+          (output vec4 g_arm)
+
+          (push_constants push_constants
+            (member mat4 transform)
+            (member int albedo_id)
+            (member int normal_id)
+            (member int arm_id)
+            (member float metal_factor)
+            (member float roughness_factor)
+            (member vec4 albedo_factor)
+          )
+          (set
+            (uniform_buffer uniforms
+              (member mat4 view)
+              (member mat4 proj)
+              (member vec3 camera_pos)
+            )
+          )
+          (set
+            (uniform_array
+              sampler2D
+              textures
+              4096
+            )
+          )
+          (body
 """
-#version 450
-#extension GL_EXT_nonuniform_qualifier : require
-
-layout(location = 0) out vec4 g_albedo;
-layout(location = 1) out vec4 g_normal;
-layout(location = 2) out vec4 g_arm;
-
-layout(location = 0) in vec3 in_position;
-layout(location = 1) in vec3 in_normal;
-layout(location = 2) in vec3 in_tangent;
-layout(location = 3) in vec3 in_binormal;
-layout(location = 4) in vec2 in_texcoord;
-
-layout(set = 1, binding = 0) uniform sampler2D textures[4096];
-
-layout(set = 0, binding = 0, std140) uniform UBO {
-  mat4 view;
-  mat4 proj;
-  vec3 camera_pos;
-} uniforms;
-
-layout(push_constant) uniform PC {
-  mat4 transform;
-  int albedo_id;
-  int normal_id;
-  int arm_id;
-  float metal_factor;
-  float roughness_factor;
-  vec4 albedo_factor;
-}
-push_constants;
-
 void main() {
   vec4 out_albedo;
   vec4 out_normal;
@@ -96,8 +99,11 @@ void main() {
   g_arm = out_arm;
 }
 """
+          )
         )
       )
+      (let cs (compile_shader cs_text))
+      (release_resource cs)
       (print "next frame")
       (show_stats)
       (end_frame)

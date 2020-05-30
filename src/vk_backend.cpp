@@ -123,6 +123,10 @@ struct Image : public Slot {
   VkImageCreateInfo  create_info;
 };
 
+struct Shader : public Slot {
+  VkShaderModule module;
+};
+
 template <typename T, typename Parent_t> //
 struct Resource_Array {
   Array<T>   items;
@@ -325,16 +329,26 @@ struct Window {
       Resource_Array::init();
     }
   } images;
+  struct Shader_Array : Resource_Array<Shader, Shader_Array> {
+    Window *wnd = NULL;
+    void release_item(Shader &shader) { vkDestroyShaderModule(wnd->device, shader.module, NULL); }
+    void init(Window *wnd) {
+      this->wnd = wnd;
+      Resource_Array::init();
+    }
+  } shaders;
 
   void init_ds() {
     mem_chunks.init();
     buffers.init(this);
     images.init(this);
+    shaders.init(this);
   }
 
   void release() {
     buffers.release();
     images.release();
+    shaders.release();
     ito(mem_chunks.size) mem_chunks[i].release(device);
     mem_chunks.release();
     vkDeviceWaitIdle(device);
@@ -506,9 +520,17 @@ struct Window {
     return module;
   }
 
+  Resource_ID alloc_shader(size_t len, u32 *bytecode) {
+    Shader sh;
+    sh.module = compile_spirv(len, bytecode);
+    return {shaders.push(sh), (i32)rd::Type::Shader};
+  }
+
   void release_resource(Resource_ID res_id) {
     if (res_id.type == (i32)rd::Type::Buffer) {
       buffers.remove(res_id.id, 3);
+    } else if (res_id.type == (i32)rd::Type::Shader) {
+      shaders.remove(res_id.id, 3);
     } else {
       TRAP;
     }
@@ -837,6 +859,7 @@ struct Window {
   void start_frame() {
     buffers.tick();
     images.tick();
+    shaders.tick();
   restart:
     update_surface_size();
     if (window_width != (i32)sc_extent.width || window_height != (i32)sc_extent.height) {
@@ -934,6 +957,99 @@ struct Window {
   }
 };
 
+struct Shader_Builder {
+  Pool<char>          tmp_buf;
+  u32                 input_counter   = 0;
+  u32                 output_counter  = 0;
+  u32                 set_counter     = 0;
+  u32                 binding_counter = 0;
+  shaderc_shader_kind kind;
+  void                init() { tmp_buf = Pool<char>::create(1 << 20); }
+  void                release() { tmp_buf.release(); }
+  string_ref          get_str() { return string_ref{(char const *)tmp_buf.at(0), tmp_buf.cursor}; }
+  void                putf(char const *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    i32 len = vsprintf(tmp_buf.back(), fmt, args);
+    va_end(args);
+    ASSERT_ALWAYS(len > 0);
+    tmp_buf.advance(len);
+  }
+  void eval(List *l) {
+    if (l->child != NULL) {
+      eval(l->child);
+    } else if (l->cmp_symbol("type")) {
+      if (l->next->cmp_symbol("pixel")) {
+        kind = shaderc_glsl_fragment_shader;
+      } else if (l->next->cmp_symbol("compute")) {
+        kind = shaderc_glsl_compute_shader;
+      } else if (l->next->cmp_symbol("vertex")) {
+        kind = shaderc_glsl_vertex_shader;
+      } else {
+        TRAP;
+      }
+    } else if (l->cmp_symbol("build_shader")) {
+      putf("#version 450\n");
+      putf("#extension GL_EXT_nonuniform_qualifier : require\n");
+      List *cur = l->next;
+      while (cur != NULL) {
+        eval(cur);
+        cur = cur->next;
+      }
+    } else if (l->cmp_symbol("body")) {
+      tmp_buf.put(l->get(1)->symbol.ptr, l->get(1)->symbol.len);
+    } else if (l->cmp_symbol("input")) {
+      putf("layout(location = %i) in %.*s %.*s;\n", input_counter, STRF(l->next->symbol),
+           STRF(l->next->next->symbol));
+      input_counter += 1;
+    } else if (l->cmp_symbol("output")) {
+      putf("layout(location = %i) out %.*s %.*s;\n", output_counter, STRF(l->next->symbol),
+           STRF(l->next->next->symbol));
+      output_counter += 1;
+    } else if (l->cmp_symbol("push_constants")) {
+      string_ref name = l->next->symbol;
+      putf("layout(push_constant) uniform %.*s_t {\n", STRF(name));
+      List *cur = l->get(2);
+      while (cur != NULL) {
+        eval(cur);
+        cur = cur->next;
+      }
+      putf("} %.*s;\n", STRF(name));
+    } else if (l->cmp_symbol("set")) {
+      binding_counter = 0;
+      List *cur       = l->next;
+      while (cur != NULL) {
+        eval(cur);
+        cur = cur->next;
+      }
+      set_counter += 1;
+    } else if (l->cmp_symbol("uniform_buffer")) {
+      string_ref name = l->next->symbol;
+      putf("layout(set = %i, binding = %i, std140) uniform %.*s_t {\n", set_counter,
+           binding_counter, STRF(name));
+      List *cur = l->get(2);
+      while (cur != NULL) {
+        eval(cur);
+        cur = cur->next;
+      }
+      putf("} %.*s;\n", STRF(name));
+      binding_counter += 1;
+    } else if (l->cmp_symbol("uniform_array")) {
+      string_ref type  = l->get(1)->symbol;
+      string_ref name  = l->get(2)->symbol;
+      string_ref cnt_s = l->get(3)->symbol;
+      i32        cnt   = 0;
+      ASSERT_ALWAYS(parse_decimal_int(cnt_s.ptr, cnt_s.len, &cnt));
+      putf("layout(set = %i, binding = %i) uniform %.*s %.*s [%i];\n", set_counter, binding_counter,
+           STRF(type), STRF(name), cnt);
+      binding_counter += cnt;
+    } else if (l->cmp_symbol("member")) {
+      putf("  %.*s %.*s;\n", STRF(l->next->symbol), STRF(l->next->next->symbol));
+      input_counter += 1;
+    }
+  }
+};
+
 // typedef void (*Loop_Callback_t)(rd::Pass_Mng *);
 
 enum class Render_Value_t {
@@ -941,6 +1057,7 @@ enum class Render_Value_t {
   RESOURCE_ID,
   FLAGS,
   ARRAY,
+  SHADER_SOURCE,
 };
 
 struct Render_Value {
@@ -948,9 +1065,14 @@ struct Render_Value {
     void *ptr;
     u32   size;
   };
+  struct Shader_Source {
+    shaderc_shader_kind kind;
+    string_ref          text;
+  };
   union {
-    Resource_ID res_id;
-    Array       arr;
+    Resource_ID   res_id;
+    Array         arr;
+    Shader_Source shsrc;
   };
 };
 
@@ -1026,6 +1148,16 @@ struct Renderign_Evaluator final : public IEvaluator {
     new_val->any       = rval;
     return new_val;
   }
+  Value *wrap_shader_source(string_ref text, shaderc_shader_kind kind) {
+    Render_Value *rval = rd_values.alloc_zero(1);
+    rval->shsrc.kind   = kind;
+    rval->shsrc.text   = text;
+    Value *new_val     = state->value_storage.alloc_zero(1);
+    new_val->type      = (i32)Value::Value_t::ANY;
+    new_val->any_type  = (i32)Render_Value_t::SHADER_SOURCE;
+    new_val->any       = rval;
+    return new_val;
+  }
   void  end_frame() { wnd.end_frame(); }
   Match eval(List *l) override {
     if (l == NULL) return NULL;
@@ -1069,6 +1201,7 @@ struct Renderign_Evaluator final : public IEvaluator {
     } else if (l->cmp_symbol("show_stats")) {
       wnd.buffers.dump();
       wnd.images.dump();
+      wnd.shaders.dump();
       fprintf(stdout, "num mem chunks: %i\n", (i32)wnd.mem_chunks.size);
       ito(wnd.mem_chunks.size) wnd.mem_chunks[i].dump();
       return NULL;
@@ -1147,45 +1280,47 @@ struct Renderign_Evaluator final : public IEvaluator {
       Render_Value *val_2 = (Render_Value *)args[1]->any;
       memcpy(val_1->arr.ptr, val_2->arr.ptr, val_2->arr.size);
       return NULL;
+    } else if (l->cmp_symbol("build_shader")) {
+      Shader_Builder builder;
+      builder.init();
+      builder.eval(l);
+      string_ref          text = move_cstr(builder.get_str());
+      shaderc_shader_kind kind = builder.kind;
+      builder.release();
+      return wrap_shader_source(text, kind);
     } else if (l->cmp_symbol("compile_shader")) {
       SmallArray<Value *, 4> args;
       args.init();
       defer(args.release());
       eval_args_and_collect(l->next, args);
-      ASSERT_EVAL(args.size == 2);
-      ASSERT_EVAL(args[0]->type == (i32)Value::Value_t::SYMBOL);
-      ASSERT_EVAL(args[1]->type == (i32)Value::Value_t::SYMBOL);
-      shaderc_shader_kind kind;
-      if (args[0]->str == stref_s("pixel")) {
-        kind = shaderc_glsl_fragment_shader;
-      } else if (args[0]->str == stref_s("vertex")) {
-        kind = shaderc_glsl_vertex_shader;
-      } else if (args[0]->str == stref_s("compute")) {
-        kind = shaderc_glsl_compute_shader;
-      } else {
-        TRAP;
-      }
+      ASSERT_EVAL(args.size == 1);
+      ASSERT_EVAL(args[0]->type == (i32)Value::Value_t::ANY &&
+                  args[0]->any_type == (i32)Render_Value_t::SHADER_SOURCE);
+      Render_Value *            val_1    = (Render_Value *)args[0]->any;
+      string_ref                text     = val_1->shsrc.text;
+      shaderc_shader_kind       kind     = val_1->shsrc.kind;
       shaderc_compiler_t        compiler = shaderc_compiler_initialize();
       shaderc_compile_options_t options  = shaderc_compile_options_initialize();
       shaderc_compile_options_set_source_language(options, shaderc_source_language_glsl);
       shaderc_compile_options_set_target_spirv(options, shaderc_spirv_version_1_3);
       shaderc_compile_options_set_target_env(options, shaderc_target_env_vulkan,
                                              shaderc_env_version_vulkan_1_2);
-      shaderc_compilation_result_t result = shaderc_compile_into_spv(
-          compiler, args[1]->str.ptr, args[1]->str.len, kind, "tmp.lsp", "main", options);
+      shaderc_compilation_result_t result =
+          shaderc_compile_into_spv(compiler, text.ptr, text.len, kind, "tmp.lsp", "main", options);
       defer({
         shaderc_result_release(result);
         shaderc_compiler_release(compiler);
         shaderc_compile_options_release(options);
       });
-      ASSERT_EVAL(shaderc_result_get_compilation_status(result) ==
-                  shaderc_compilation_status_success);
+      if (shaderc_result_get_compilation_status(result) != shaderc_compilation_status_success) {
+        state->push_error("%.*s\n", STRF(text));
+        state->push_error(shaderc_result_get_error_message(result));
+        TRAP;
+      }
       size_t         len    = shaderc_result_get_length(result);
       u32 *          spv    = (u32 *)shaderc_result_get_bytes(result);
-      VkShaderModule module = wnd.compile_spirv(len, spv);
-      vkDestroyShaderModule(wnd.device, module, NULL);
-
-      return NULL;
+      Resource_ID res_id = wnd.alloc_shader(len, spv);
+      return wrap_resource(res_id);
     }
     if (prev != NULL) return prev->eval(l);
     return {NULL, false};
