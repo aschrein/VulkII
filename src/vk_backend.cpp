@@ -9,6 +9,7 @@
 #define VK_USE_PLATFORM_XCB_KHR
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_vulkan.h>
+#include <shaderc/shaderc.h>
 #include <vulkan/vulkan.h>
 #else
 #define VK_USE_PLATFORM_WIN32_KHR
@@ -491,6 +492,18 @@ struct Window {
     Buffer &   buf   = buffers[res_id.id];
     Mem_Chunk &chunk = mem_chunks[buf.mem_chunk_index];
     vkUnmapMemory(device, chunk.mem);
+  }
+
+  VkShaderModule compile_spirv(size_t len, u32 *bytecode) {
+    VkShaderModuleCreateInfo info;
+    MEMZERO(info);
+    info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    info.codeSize = len;
+    info.flags    = 0;
+    info.pCode    = bytecode;
+    VkShaderModule module;
+    VK_ASSERT_OK(vkCreateShaderModule(device, &info, NULL, &module));
+    return module;
   }
 
   void release_resource(Resource_ID res_id) {
@@ -1039,6 +1052,12 @@ struct Renderign_Evaluator final : public IEvaluator {
           flags |= (i32)rd::Buffer_Usage_Bits::USAGE_TRANSIENT;
         } else if (cur->cmp_symbol("Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER")) {
           flags |= (i32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER;
+        } else if (cur->cmp_symbol("Buffer_Usage_Bits::USAGE_INDEX_BUFFER")) {
+          flags |= (i32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER;
+        } else if (cur->cmp_symbol("Buffer_Usage_Bits::USAGE_VERTEX_BUFFER")) {
+          flags |= (i32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
+        } else if (cur->cmp_symbol("Buffer_Usage_Bits::USAGE_UAV")) {
+          flags |= (i32)rd::Buffer_Usage_Bits::USAGE_UAV;
         } else if (cur->cmp_symbol("Memory_Bits::MAPPABLE")) {
           flags |= (i32)rd::Memory_Bits::MAPPABLE;
         } else {
@@ -1127,6 +1146,45 @@ struct Renderign_Evaluator final : public IEvaluator {
       Render_Value *val_1 = (Render_Value *)args[0]->any;
       Render_Value *val_2 = (Render_Value *)args[1]->any;
       memcpy(val_1->arr.ptr, val_2->arr.ptr, val_2->arr.size);
+      return NULL;
+    } else if (l->cmp_symbol("compile_shader")) {
+      SmallArray<Value *, 4> args;
+      args.init();
+      defer(args.release());
+      eval_args_and_collect(l->next, args);
+      ASSERT_EVAL(args.size == 2);
+      ASSERT_EVAL(args[0]->type == (i32)Value::Value_t::SYMBOL);
+      ASSERT_EVAL(args[1]->type == (i32)Value::Value_t::SYMBOL);
+      shaderc_shader_kind kind;
+      if (args[0]->str == stref_s("pixel")) {
+        kind = shaderc_glsl_fragment_shader;
+      } else if (args[0]->str == stref_s("vertex")) {
+        kind = shaderc_glsl_vertex_shader;
+      } else if (args[0]->str == stref_s("compute")) {
+        kind = shaderc_glsl_compute_shader;
+      } else {
+        TRAP;
+      }
+      shaderc_compiler_t        compiler = shaderc_compiler_initialize();
+      shaderc_compile_options_t options  = shaderc_compile_options_initialize();
+      shaderc_compile_options_set_source_language(options, shaderc_source_language_glsl);
+      shaderc_compile_options_set_target_spirv(options, shaderc_spirv_version_1_3);
+      shaderc_compile_options_set_target_env(options, shaderc_target_env_vulkan,
+                                             shaderc_env_version_vulkan_1_2);
+      shaderc_compilation_result_t result = shaderc_compile_into_spv(
+          compiler, args[1]->str.ptr, args[1]->str.len, kind, "tmp.lsp", "main", options);
+      defer({
+        shaderc_result_release(result);
+        shaderc_compiler_release(compiler);
+        shaderc_compile_options_release(options);
+      });
+      ASSERT_EVAL(shaderc_result_get_compilation_status(result) ==
+                  shaderc_compilation_status_success);
+      size_t         len    = shaderc_result_get_length(result);
+      u32 *          spv    = (u32 *)shaderc_result_get_bytes(result);
+      VkShaderModule module = wnd.compile_spirv(len, spv);
+      vkDestroyShaderModule(wnd.device, module, NULL);
+
       return NULL;
     }
     if (prev != NULL) return prev->eval(l);
