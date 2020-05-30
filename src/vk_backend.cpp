@@ -10,6 +10,7 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_vulkan.h>
 #include <shaderc/shaderc.h>
+#include <spirv_cross/spirv_cross_c.h>
 #include <vulkan/vulkan.h>
 #else
 #define VK_USE_PLATFORM_WIN32_KHR
@@ -30,6 +31,146 @@
   } while (0)
 
 Pool<char> string_storage = Pool<char>::create(1 << 20);
+
+struct Shader_Builder {
+  enum class Freq { PER_DC, PER_FRAME };
+  struct Uniform {
+    string_ref name;
+    string_ref type;
+    VkFormat   format;
+    u32        count;
+    Freq       freq;
+  };
+  struct Input {
+    string_ref name;
+    string_ref type;
+  };
+  struct Output {
+    string_ref name;
+    string_ref type;
+  };
+  string_ref scratch_name;
+  string_ref scratch_type;
+  VkFormat   scratch_format;
+  u32        scratch_count;
+  Freq       scratch_freq;
+  void       clear_scratch() {
+    scratch_name   = string_ref{NULL, 0};
+    scratch_type   = string_ref{NULL, 0};
+    scratch_format = 0;
+    scratch_count  = 1;
+    scratch_freq   = Freq::PER_DC;
+  }
+  SmallArray<Uniform, 8> uniforms;
+  SmallArray<Input, 8>   inputs;
+  SmallArray<Output, 8>  outputs;
+
+  u32        dispatch_x, dispatch_y, dispatch_z;
+  Pool<char> tmp_buf;
+  string_ref body;
+  string_ref header;
+  //  u32                 input_counter   = 0;
+  //  u32                 output_counter  = 0;
+  //  u32                 set_counter     = 0;
+  //  u32                 binding_counter = 0;
+  shaderc_shader_kind kind;
+  void                init() {
+    tmp_buf = Pool<char>::create(1 << 20);
+    uniforms.init();
+    inputs.init();
+    outputs.init();
+  }
+  void release() {
+    tmp_buf.release();
+    uniforms.release();
+    inputs.release();
+    outputs.release();
+  }
+  string_ref get_str() { return string_ref{(char const *)tmp_buf.at(0), tmp_buf.cursor}; }
+  void       putf(char const *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    i32 len = vsprintf(tmp_buf.back(), fmt, args);
+    va_end(args);
+    ASSERT_ALWAYS(len > 0);
+    tmp_buf.advance(len);
+  }
+  void eval(List *l) {
+    if (l->child != NULL) {
+      eval(l->child);
+    } else if (l->cmp_symbol("kind")) {
+      if (l->next->cmp_symbol("pixel")) {
+        kind = shaderc_glsl_fragment_shader;
+      } else if (l->next->cmp_symbol("compute")) {
+        kind = shaderc_glsl_compute_shader;
+      } else if (l->next->cmp_symbol("vertex")) {
+        kind = shaderc_glsl_vertex_shader;
+      } else {
+        TRAP;
+      }
+    } else if (l->cmp_symbol("create_shader")) {
+//      putf("#version 450\n");
+//      putf("#extension GL_EXT_nonuniform_qualifier : require\n");
+      List *cur = l->next;
+      while (cur != NULL) {
+        eval(cur);
+        cur = cur->next;
+      }
+    } else if (l->cmp_symbol("header")) {
+      header = l->symbol;
+    } else if (l->cmp_symbol("body")) {
+      body = l->symbol;
+    } else if (l->cmp_symbol("input")) {
+//      putf("layout(location = %i) in %.*s %.*s;\n", input_counter, STRF(l->next->symbol),
+//           STRF(l->next->next->symbol));
+//      input_counter += 1;
+    } else if (l->cmp_symbol("output")) {
+//      putf("layout(location = %i) out %.*s %.*s;\n", output_counter, STRF(l->next->symbol),
+//           STRF(l->next->next->symbol));
+//      output_counter += 1;
+    } else if (l->cmp_symbol("push_constants")) {
+//      string_ref name = l->next->symbol;
+//      putf("layout(push_constant) uniform %.*s_t {\n", STRF(name));
+//      List *cur = l->get(2);
+//      while (cur != NULL) {
+//        eval(cur);
+//        cur = cur->next;
+//      }
+//      putf("} %.*s;\n", STRF(name));
+    } else if (l->cmp_symbol("set")) {
+      binding_counter = 0;
+      List *cur       = l->next;
+      while (cur != NULL) {
+        eval(cur);
+        cur = cur->next;
+      }
+      set_counter += 1;
+    } else if (l->cmp_symbol("uniform_buffer")) {
+      string_ref name = l->next->symbol;
+      putf("layout(set = %i, binding = %i, std140) uniform %.*s_t {\n", set_counter,
+           binding_counter, STRF(name));
+      List *cur = l->get(2);
+      while (cur != NULL) {
+        eval(cur);
+        cur = cur->next;
+      }
+      putf("} %.*s;\n", STRF(name));
+      binding_counter += 1;
+    } else if (l->cmp_symbol("uniform_array")) {
+      string_ref type  = l->get(1)->symbol;
+      string_ref name  = l->get(2)->symbol;
+      string_ref cnt_s = l->get(3)->symbol;
+      i32        cnt   = 0;
+      ASSERT_ALWAYS(parse_decimal_int(cnt_s.ptr, cnt_s.len, &cnt));
+      putf("layout(set = %i, binding = %i) uniform %.*s %.*s [%i];\n", set_counter, binding_counter,
+           STRF(type), STRF(name), cnt);
+      binding_counter += cnt;
+    } else if (l->cmp_symbol("member")) {
+      putf("  %.*s %.*s;\n", STRF(l->next->symbol), STRF(l->next->next->symbol));
+      input_counter += 1;
+    }
+  }
+};
 
 string_ref relocate_cstr(string_ref old) {
   char *     new_ptr = string_storage.put(old.ptr, old.len + 1);
@@ -123,10 +264,6 @@ struct Image : public Slot {
   VkImageCreateInfo  create_info;
 };
 
-struct Shader : public Slot {
-  VkShaderModule module;
-};
-
 template <typename T, typename Parent_t> //
 struct Resource_Array {
   Array<T>   items;
@@ -211,63 +348,170 @@ struct Shader_Descriptor {
   VkDescriptorSetLayoutBinding layout;
 };
 
-struct Vertex_Input {
+struct Attribute_Source {
   uint32_t binding;
   uint32_t offset;
   VkFormat format;
 };
 
 struct Graphics_Pipeline_State {
-  VkCullModeFlags     cull_mode;
-  VkFrontFace         front_face;
-  VkPolygonMode       polygon_mode;
-  float               line_width;
-  bool                enable_depth_test;
-  VkCompareOp         cmp_op;
-  bool                enable_depth_write;
-  float               max_depth;
-  VkPrimitiveTopology topology;
-  float               depth_bias_const;
-  u32                 ps, vs;
-  u32                 pass;
-  u64                 dummy; // used for hashing to emulate C string
-  bool                operator==(const Graphics_Pipeline_State &that) const {
+  VkVertexInputBindingDescription   bindings[0x10];
+  u32                               num_bindings;
+  VkVertexInputAttributeDescription attributes[0x10];
+  u32                               num_attributes;
+  VkCullModeFlags                   cull_mode;
+  VkFrontFace                       front_face;
+  VkPolygonMode                     polygon_mode;
+  float                             line_width;
+  bool                              enable_depth_test;
+  VkCompareOp                       cmp_op;
+  bool                              enable_depth_write;
+  float                             max_depth;
+  VkPrimitiveTopology               topology;
+  float                             depth_bias_const;
+  ID                                ps, vs;
+  u64                               ps_hash, vs_hash;
+  u32                               push_constants_size;
+  u32                               pass;
+  u64                               dummy; // used for hashing to emulate C string
+  bool                              operator==(const Graphics_Pipeline_State &that) const {
     return memcmp(this, &that, sizeof(*this)) == 0;
   }
-  Graphics_Pipeline_State() {
+  void reset() {
     memset(this, 0, sizeof(*this)); // Important for memhash
-    dummy = 0;
   }
 };
 
 u64 hash_of(Graphics_Pipeline_State const &state) { return hash_of((char const *)&state); }
 
+struct Shader : public Slot {
+  List *root;
+  //  VkShaderModule module;
+  u64 hash;
+  //  struct Vertex_Attribute {
+  //    string_ref name;
+  //    VkFormat   format;
+  //    u32        location;
+  //  };
+  //  struct Shader_Input {
+  //    string_ref name;
+  //    VkFormat   format;
+  //    u32        location;
+  //  };
+  //  struct Resource_Slot {
+  //    string_ref name;
+  //    u32        size;
+  //    u32        set;
+  //    u32        binding;
+  //  };
+  //  SmallArray<Vertex_Attribute, 4> attributes;
+  //  SmallArray<Shader_Input, 4>     inputs;
+  //  SmallArray<Shader_Input, 4>     outputs;
+  //  SmallArray<Resource_Slot, 4>    resources;
+};
+
 struct Graphics_Pipeline_Wrapper : public Slot {
-  VkShaderModule                            vs_shader_module;
-  VkShaderModule                            ps_shader_module;
   SmallArray<VkDescriptorSetLayout, 4>      set_layouts;
   VkPipelineLayout                          pipeline_layout;
   VkPipeline                                pipeline;
   Hash_Table<string_ref, Shader_Descriptor> resource_slots;
+  VkShaderModule                            vs_module;
+  VkShaderModule                            ps_module;
 
   void release(VkDevice device) {
-    vkDestroyShaderModule(device, vs_shader_module, NULL);
-    vkDestroyShaderModule(device, ps_shader_module, NULL);
     ito(set_layouts.size) vkDestroyDescriptorSetLayout(device, set_layouts[i], NULL);
     vkDestroyPipelineLayout(device, pipeline_layout, NULL);
     vkDestroyPipeline(device, pipeline, NULL);
+    vkDestroyShaderModule(device, vs_module, NULL);
+    vkDestroyShaderModule(device, ps_module, NULL);
     resource_slots.release();
+    set_layouts.release();
   }
 
-  //  void init(VkDevice                         device,                   //
-  //            VkShaderModule                   vs_shader_module,         //
-  //            VkShaderModule                   ps_shader_module,         //
-  //            VkGraphicsPipelineCreateInfo     pipeline_create_template, //
-  //            Pair<string_ref, Vertex_Input> * vertex_inputs,            //
-  //            u32                              num_vertex_inputs,        //
-  //            VkVertexInputBindingDescription *vertex_bind_descs,        //
-  //            u32                              num_vertex_bind_descs,    //
-  //            u32                              push_constants_size = 128) {}
+  VkShaderModule compile_glsl(VkDevice device, string_ref text, shaderc_shader_kind kind) {
+    shaderc_compiler_t        compiler = shaderc_compiler_initialize();
+    shaderc_compile_options_t options  = shaderc_compile_options_initialize();
+    shaderc_compile_options_set_source_language(options, shaderc_source_language_glsl);
+    shaderc_compile_options_set_target_spirv(options, shaderc_spirv_version_1_3);
+    shaderc_compile_options_set_target_env(options, shaderc_target_env_vulkan,
+                                           shaderc_env_version_vulkan_1_2);
+    shaderc_compilation_result_t result =
+        shaderc_compile_into_spv(compiler, text.ptr, text.len, kind, "tmp.lsp", "main", options);
+    defer({
+      shaderc_result_release(result);
+      shaderc_compiler_release(compiler);
+      shaderc_compile_options_release(options);
+    });
+    if (shaderc_result_get_compilation_status(result) != shaderc_compilation_status_success) {
+      state->push_error("%.*s\n", STRF(text));
+      state->push_error(shaderc_result_get_error_message(result));
+      TRAP;
+    }
+    size_t                   len      = shaderc_result_get_length(result);
+    u32 *                    bytecode = (u32 *)shaderc_result_get_bytes(result);
+    VkShaderModuleCreateInfo info;
+    MEMZERO(info);
+    info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    info.codeSize = len;
+    info.flags    = 0;
+    info.pCode    = bytecode;
+    VkShaderModule module;
+    VK_ASSERT_OK(vkCreateShaderModule(device, &info, NULL, &module));
+    return module;
+  }
+
+  void init(VkDevice                 device,    //
+            Shader &                 vs_shader, //
+            Shader &                 ps_shader, //
+            Graphics_Pipeline_State &pipeline_info) {
+    set_layouts.init();
+    resource_slots.init();
+    SmallArray<VkPipelineShaderStageCreateInfo, 2> stages;
+    {
+      Shader_Builder vsbuilder;
+      vsbuilder.init();
+      defer(vsbuilder.release());
+      vsbuilder.eval(vs_shader.root);
+      string_ref          text = builder.get_str();
+      shaderc_shader_kind kind = builder.kind;
+      ASSERT_ALWAYS(kind == shaderc_glsl_vertex_shader);
+      vs_module = compile_glsl(device, text, kind);
+      VkPipelineShaderStageCreateInfo vs_shader_stage;
+      vs_shader_stage.stage  = VK_SHADER_STAGE_VERTEX_BIT;
+      vs_shader_stage.module = vs_shader;
+      vs_shader_stage.pName  = "main";
+      stages.push(vs_shader_stage);
+    }
+    {
+      Shader_Builder builder;
+      builder.init();
+      defer(builder.release());
+      builder.eval(ps_shader.root);
+      string_ref          text = builder.get_str();
+      shaderc_shader_kind kind = builder.kind;
+      ASSERT_ALWAYS(kind == shaderc_glsl_fragment_shader);
+      ps_module = compile_glsl(device, text, kind);
+      VkPipelineShaderStageCreateInfo shader_stage;
+      shader_stage.stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
+      shader_stage.module = ps_module;
+      shader_stage.pName  = "main";
+      stages.push(vs_shader_stage);
+    }
+    //    {
+
+    //    }
+    //    {
+    //      VkPipelineShaderStageCreateInfo vs_shader_stage;
+    //      vs_shader_stage.stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
+    //      vs_shader_stage.module = ps_shader.module;
+    //      vs_shader_stage.pName  = "main";
+    //      stages.push(vs_shader_stage);
+    //    }
+    //    ito(vs_shader.resources) {
+    //      Shader::Resource_Slot &res = vs_shader.resources[i];
+    //      resource_slots.insert(res.name)
+    //    }
+  }
 };
 
 struct Window {
@@ -337,8 +581,12 @@ struct Window {
       Resource_Array::init();
     }
   } shaders;
+  Graphics_Pipeline_State graphics_state;
+
+  Hash_Table<Graphics_Pipeline_State, Graphics_Pipeline_Wrapper> pipeline_cache;
 
   void init_ds() {
+    pipeline_cache.init();
     mem_chunks.init();
     buffers.init(this);
     images.init(this);
@@ -346,6 +594,7 @@ struct Window {
   }
 
   void release() {
+    pipeline_cache.release();
     buffers.release();
     images.release();
     shaders.release();
@@ -520,9 +769,15 @@ struct Window {
     return module;
   }
 
-  Resource_ID alloc_shader(size_t len, u32 *bytecode) {
+  // Resource_ID alloc_shader(size_t len, u32 *bytecode) {
+  //   Shader sh;
+  //   sh.module = compile_spirv(len, bytecode);
+  //   return {shaders.push(sh), (i32)rd::Type::Shader};
+  // }
+
+  Resource_ID alloc_shader(List *root) {
     Shader sh;
-    sh.module = compile_spirv(len, bytecode);
+    sh.root = root;
     return {shaders.push(sh), (i32)rd::Type::Shader};
   }
 
@@ -534,6 +789,81 @@ struct Window {
     } else {
       TRAP;
     }
+  }
+
+  void VS_bind_shader(Resource_ID res_id) {
+    ASSERT_DEBUG(res_id.type == (i32)rd::Type::Shader);
+    Shader &sh             = shaders[res_id.id];
+    graphics_state.vs      = res_id.id;
+    graphics_state.vs_hash = sh.hash;
+  }
+
+  void PS_bind_shader(Resource_ID res_id) {
+    ASSERT_DEBUG(res_id.type == (i32)rd::Type::Shader);
+    Shader &sh             = shaders[res_id.id];
+    graphics_state.ps      = res_id.id;
+    graphics_state.ps_hash = sh.hash;
+  }
+
+  void IA_set_topology(VkPrimitiveTopology topo) { graphics_state.topology = topo; }
+
+  void IA_bind_index_buffer(Resource_ID res_id, u32 offset, VkFormat format) {
+    ASSERT_DEBUG(res_id.type == (i32)rd::Type::Buffer);
+    Buffer &    buf = buffers[res_id.id];
+    VkIndexType type;
+    switch (format) {
+    case VK_FORMAT_R32_UINT: type = VK_INDEX_TYPE_UINT32; break;
+    case VK_FORMAT_R16_UINT: type = VK_INDEX_TYPE_UINT16; break;
+    default: TRAP;
+    }
+    vkCmdBindIndexBuffer(cmd_buffers[cmd_index], buf.buffer, (VkDeviceSize)offset, type);
+  }
+
+  void IA_bind_vertex_buffer(Resource_ID res_id, u32 binding, u32 offset, u32 stride,
+                             VkVertexInputRate rate) {
+    ASSERT_DEBUG(res_id.type == (i32)rd::Type::Buffer);
+    Buffer &     buf     = buffers[res_id.id];
+    VkDeviceSize doffset = (VkDeviceSize)offset;
+    vkCmdBindVertexBuffers(cmd_buffers[cmd_index], binding, 1, &buf.buffer, &doffset);
+    if (graphics_state.num_bindings <= binding) {
+      graphics_state.num_bindings = binding + 1;
+    }
+    graphics_state.bindings[binding].binding   = binding;
+    graphics_state.bindings[binding].inputRate = rate;
+    graphics_state.bindings[binding].stride    = stride;
+  }
+
+  void IA_bind_attribute(u32 location, u32 binding, u32 offset, VkFormat format) {
+    if (graphics_state.num_attributes <= location) {
+      graphics_state.num_attributes = location + 1;
+    }
+    graphics_state.attributes[location].binding  = binding;
+    graphics_state.attributes[location].format   = format;
+    graphics_state.attributes[location].location = location;
+    graphics_state.attributes[location].offset   = offset;
+  }
+
+  void IA_set_cull_mode(VkFrontFace ff, VkCullModeFlags cm) {
+    graphics_state.front_face = ff;
+    graphics_state.cull_mode  = cm;
+  }
+
+  void bind_graphics_pipeline() {}
+
+  void draw_indexed_instanced(u32 index_count, u32 instance_count, u32 start_index,
+                              i32 start_vertex, u32 start_instance) {
+    bind_graphics_pipeline();
+    vkCmdDrawIndexed(cmd_buffers[cmd_index], index_count, instance_count, start_index, start_vertex,
+                     start_instance);
+  }
+
+  u32 shader_get_input_location(Resource_ID res_id, string_ref name) {
+    ASSERT_DEBUG(res_id.type == (i32)rd::Type::Shader);
+    Shader &sh = shaders[res_id.id];
+    ito(sh.attributes.size) {
+      if (sh.attributes[i].name == name) return sh.attributes[i].location;
+    }
+    TRAP;
   }
 
   void release_swapchain() {
@@ -857,6 +1187,7 @@ struct Window {
     window_height = surface_capabilities.currentExtent.height;
   }
   void start_frame() {
+    graphics_state.reset();
     buffers.tick();
     images.tick();
     shaders.tick();
@@ -957,99 +1288,6 @@ struct Window {
   }
 };
 
-struct Shader_Builder {
-  Pool<char>          tmp_buf;
-  u32                 input_counter   = 0;
-  u32                 output_counter  = 0;
-  u32                 set_counter     = 0;
-  u32                 binding_counter = 0;
-  shaderc_shader_kind kind;
-  void                init() { tmp_buf = Pool<char>::create(1 << 20); }
-  void                release() { tmp_buf.release(); }
-  string_ref          get_str() { return string_ref{(char const *)tmp_buf.at(0), tmp_buf.cursor}; }
-  void                putf(char const *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    i32 len = vsprintf(tmp_buf.back(), fmt, args);
-    va_end(args);
-    ASSERT_ALWAYS(len > 0);
-    tmp_buf.advance(len);
-  }
-  void eval(List *l) {
-    if (l->child != NULL) {
-      eval(l->child);
-    } else if (l->cmp_symbol("type")) {
-      if (l->next->cmp_symbol("pixel")) {
-        kind = shaderc_glsl_fragment_shader;
-      } else if (l->next->cmp_symbol("compute")) {
-        kind = shaderc_glsl_compute_shader;
-      } else if (l->next->cmp_symbol("vertex")) {
-        kind = shaderc_glsl_vertex_shader;
-      } else {
-        TRAP;
-      }
-    } else if (l->cmp_symbol("build_shader")) {
-      putf("#version 450\n");
-      putf("#extension GL_EXT_nonuniform_qualifier : require\n");
-      List *cur = l->next;
-      while (cur != NULL) {
-        eval(cur);
-        cur = cur->next;
-      }
-    } else if (l->cmp_symbol("body")) {
-      tmp_buf.put(l->get(1)->symbol.ptr, l->get(1)->symbol.len);
-    } else if (l->cmp_symbol("input")) {
-      putf("layout(location = %i) in %.*s %.*s;\n", input_counter, STRF(l->next->symbol),
-           STRF(l->next->next->symbol));
-      input_counter += 1;
-    } else if (l->cmp_symbol("output")) {
-      putf("layout(location = %i) out %.*s %.*s;\n", output_counter, STRF(l->next->symbol),
-           STRF(l->next->next->symbol));
-      output_counter += 1;
-    } else if (l->cmp_symbol("push_constants")) {
-      string_ref name = l->next->symbol;
-      putf("layout(push_constant) uniform %.*s_t {\n", STRF(name));
-      List *cur = l->get(2);
-      while (cur != NULL) {
-        eval(cur);
-        cur = cur->next;
-      }
-      putf("} %.*s;\n", STRF(name));
-    } else if (l->cmp_symbol("set")) {
-      binding_counter = 0;
-      List *cur       = l->next;
-      while (cur != NULL) {
-        eval(cur);
-        cur = cur->next;
-      }
-      set_counter += 1;
-    } else if (l->cmp_symbol("uniform_buffer")) {
-      string_ref name = l->next->symbol;
-      putf("layout(set = %i, binding = %i, std140) uniform %.*s_t {\n", set_counter,
-           binding_counter, STRF(name));
-      List *cur = l->get(2);
-      while (cur != NULL) {
-        eval(cur);
-        cur = cur->next;
-      }
-      putf("} %.*s;\n", STRF(name));
-      binding_counter += 1;
-    } else if (l->cmp_symbol("uniform_array")) {
-      string_ref type  = l->get(1)->symbol;
-      string_ref name  = l->get(2)->symbol;
-      string_ref cnt_s = l->get(3)->symbol;
-      i32        cnt   = 0;
-      ASSERT_ALWAYS(parse_decimal_int(cnt_s.ptr, cnt_s.len, &cnt));
-      putf("layout(set = %i, binding = %i) uniform %.*s %.*s [%i];\n", set_counter, binding_counter,
-           STRF(type), STRF(name), cnt);
-      binding_counter += cnt;
-    } else if (l->cmp_symbol("member")) {
-      putf("  %.*s %.*s;\n", STRF(l->next->symbol), STRF(l->next->next->symbol));
-      input_counter += 1;
-    }
-  }
-};
-
 // typedef void (*Loop_Callback_t)(rd::Pass_Mng *);
 
 enum class Render_Value_t {
@@ -1057,7 +1295,7 @@ enum class Render_Value_t {
   RESOURCE_ID,
   FLAGS,
   ARRAY,
-  SHADER_SOURCE,
+  //  SHADER_SOURCE,
 };
 
 struct Render_Value {
@@ -1065,14 +1303,14 @@ struct Render_Value {
     void *ptr;
     u32   size;
   };
-  struct Shader_Source {
-    shaderc_shader_kind kind;
-    string_ref          text;
-  };
+  //  struct Shader_Source {
+  //    shaderc_shader_kind kind;
+  //    string_ref          text;
+  //  };
   union {
-    Resource_ID   res_id;
-    Array         arr;
-    Shader_Source shsrc;
+    Resource_ID res_id;
+    Array       arr;
+    //    Shader_Source shsrc;
   };
 };
 
@@ -1148,16 +1386,16 @@ struct Renderign_Evaluator final : public IEvaluator {
     new_val->any       = rval;
     return new_val;
   }
-  Value *wrap_shader_source(string_ref text, shaderc_shader_kind kind) {
-    Render_Value *rval = rd_values.alloc_zero(1);
-    rval->shsrc.kind   = kind;
-    rval->shsrc.text   = text;
-    Value *new_val     = state->value_storage.alloc_zero(1);
-    new_val->type      = (i32)Value::Value_t::ANY;
-    new_val->any_type  = (i32)Render_Value_t::SHADER_SOURCE;
-    new_val->any       = rval;
-    return new_val;
-  }
+  //  Value *wrap_shader_source(string_ref text, shaderc_shader_kind kind) {
+  //    Render_Value *rval = rd_values.alloc_zero(1);
+  //    rval->shsrc.kind   = kind;
+  //    rval->shsrc.text   = text;
+  //    Value *new_val     = state->value_storage.alloc_zero(1);
+  //    new_val->type      = (i32)Value::Value_t::ANY;
+  //    new_val->any_type  = (i32)Render_Value_t::SHADER_SOURCE;
+  //    new_val->any       = rval;
+  //    return new_val;
+  //  }
   void  end_frame() { wnd.end_frame(); }
   Match eval(List *l) override {
     if (l == NULL) return NULL;
@@ -1223,7 +1461,7 @@ struct Renderign_Evaluator final : public IEvaluator {
       Resource_ID res_id = wnd.create_buffer(info, NULL);
       return wrap_resource(res_id);
     } else if (l->cmp_symbol("release_resource")) {
-      SmallArray<Value *, 2> args;
+      SmallArray<Value *, 1> args;
       args.init();
       defer(args.release());
       eval_args_and_collect(l->next, args);
@@ -1266,6 +1504,17 @@ struct Renderign_Evaluator final : public IEvaluator {
         memcpy(data + i * 4, &args[i]->f, 4);
       }
       return wrap_array(data, args.size * 4);
+    } else if (l->cmp_symbol("array_i32")) {
+      SmallArray<Value *, 16> args;
+      args.init();
+      defer(args.release());
+      eval_args_and_collect(l->next, args);
+      u8 *data = (u8 *)alloc_tmp(4 * args.size);
+      ito(args.size) {
+        ASSERT_EVAL(args[i]->type == (i32)Value::Value_t::I32);
+        memcpy(data + i * 4, &args[i]->f, 4);
+      }
+      return wrap_array(data, args.size * 4);
     } else if (l->cmp_symbol("memcpy")) {
       SmallArray<Value *, 4> args;
       args.init();
@@ -1280,47 +1529,63 @@ struct Renderign_Evaluator final : public IEvaluator {
       Render_Value *val_2 = (Render_Value *)args[1]->any;
       memcpy(val_1->arr.ptr, val_2->arr.ptr, val_2->arr.size);
       return NULL;
-    } else if (l->cmp_symbol("build_shader")) {
-      Shader_Builder builder;
-      builder.init();
-      builder.eval(l);
-      string_ref          text = move_cstr(builder.get_str());
-      shaderc_shader_kind kind = builder.kind;
-      builder.release();
-      return wrap_shader_source(text, kind);
-    } else if (l->cmp_symbol("compile_shader")) {
-      SmallArray<Value *, 4> args;
+    } else if (l->cmp_symbol("create_shader")) {
+      return wrap_resource(wnd.alloc_shader(l));
+    }
+    // else if (l->cmp_symbol("build_shader")) {
+    //   Shader_Builder builder;
+    //   builder.init();
+    //   builder.eval(l);
+    //   string_ref          text = move_cstr(builder.get_str());
+    //   shaderc_shader_kind kind = builder.kind;
+    //   builder.release();
+    //   return wrap_shader_source(text, kind);
+    // } else if (l->cmp_symbol("compile_shader")) {
+    //   SmallArray<Value *, 4> args;
+    //   args.init();
+    //   defer(args.release());
+    //   eval_args_and_collect(l->next, args);
+    //   ASSERT_EVAL(args.size == 1);
+    //   ASSERT_EVAL(args[0]->type == (i32)Value::Value_t::ANY &&
+    //               args[0]->any_type == (i32)Render_Value_t::SHADER_SOURCE);
+    //   Render_Value *            val_1    = (Render_Value *)args[0]->any;
+    //   string_ref                text     = val_1->shsrc.text;
+    //   shaderc_shader_kind       kind     = val_1->shsrc.kind;
+    //   shaderc_compiler_t        compiler = shaderc_compiler_initialize();
+    //   shaderc_compile_options_t options  = shaderc_compile_options_initialize();
+    //   shaderc_compile_options_set_source_language(options, shaderc_source_language_glsl);
+    //   shaderc_compile_options_set_target_spirv(options, shaderc_spirv_version_1_3);
+    //   shaderc_compile_options_set_target_env(options, shaderc_target_env_vulkan,
+    //                                          shaderc_env_version_vulkan_1_2);
+    //   shaderc_compilation_result_t result =
+    //       shaderc_compile_into_spv(compiler, text.ptr, text.len, kind, "tmp.lsp", "main",
+    //       options);
+    //   defer({
+    //     shaderc_result_release(result);
+    //     shaderc_compiler_release(compiler);
+    //     shaderc_compile_options_release(options);
+    //   });
+    //   if (shaderc_result_get_compilation_status(result) != shaderc_compilation_status_success) {
+    //     state->push_error("%.*s\n", STRF(text));
+    //     state->push_error(shaderc_result_get_error_message(result));
+    //     TRAP;
+    //   }
+    //   size_t      len    = shaderc_result_get_length(result);
+    //   u32 *       spv    = (u32 *)shaderc_result_get_bytes(result);
+    //   Resource_ID res_id = wnd.alloc_shader(len, spv);
+    //   return wrap_resource(res_id);
+    // }
+    else if (l->cmp_symbol("VS_bind_shader")) {
+      SmallArray<Value *, 1> args;
       args.init();
       defer(args.release());
       eval_args_and_collect(l->next, args);
-      ASSERT_EVAL(args.size == 1);
+      ASSERT_EVAL(args.size = 1);
       ASSERT_EVAL(args[0]->type == (i32)Value::Value_t::ANY &&
-                  args[0]->any_type == (i32)Render_Value_t::SHADER_SOURCE);
-      Render_Value *            val_1    = (Render_Value *)args[0]->any;
-      string_ref                text     = val_1->shsrc.text;
-      shaderc_shader_kind       kind     = val_1->shsrc.kind;
-      shaderc_compiler_t        compiler = shaderc_compiler_initialize();
-      shaderc_compile_options_t options  = shaderc_compile_options_initialize();
-      shaderc_compile_options_set_source_language(options, shaderc_source_language_glsl);
-      shaderc_compile_options_set_target_spirv(options, shaderc_spirv_version_1_3);
-      shaderc_compile_options_set_target_env(options, shaderc_target_env_vulkan,
-                                             shaderc_env_version_vulkan_1_2);
-      shaderc_compilation_result_t result =
-          shaderc_compile_into_spv(compiler, text.ptr, text.len, kind, "tmp.lsp", "main", options);
-      defer({
-        shaderc_result_release(result);
-        shaderc_compiler_release(compiler);
-        shaderc_compile_options_release(options);
-      });
-      if (shaderc_result_get_compilation_status(result) != shaderc_compilation_status_success) {
-        state->push_error("%.*s\n", STRF(text));
-        state->push_error(shaderc_result_get_error_message(result));
-        TRAP;
-      }
-      size_t         len    = shaderc_result_get_length(result);
-      u32 *          spv    = (u32 *)shaderc_result_get_bytes(result);
-      Resource_ID res_id = wnd.alloc_shader(len, spv);
-      return wrap_resource(res_id);
+                  args[0]->any_type == (i32)Render_Value_t::RESOURCE_ID);
+      Render_Value *rval = (Render_Value *)args[0]->any;
+      wnd.VS_bind_shader(rval->res_id);
+      return NULL;
     }
     if (prev != NULL) return prev->eval(l);
     return {NULL, false};
