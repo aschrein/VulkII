@@ -162,9 +162,9 @@ struct Resource_Array {
     items.back().set_index(items.size - 1);
     return {(u32)items.size};
   }
-  T &operator[](u32 index) {
-    ASSERT_DEBUG(index && items[index - 1].get_id().get_index() == index);
-    return items[index];
+  T &operator[](ID id) {
+    ASSERT_DEBUG(!id.is_null() && items[id.index()].get_id().index() == id.index());
+    return items[id.index()];
   }
   void remove(ID id, u32 timeout) {
     ASSERT_DEBUG(!id.is_null());
@@ -475,6 +475,22 @@ struct Window {
       vkUnmapMemory(device, chunk.mem);
     }
     return {buffers.push(new_buf), (i32)rd::Type::Buffer};
+  }
+
+  void *map_buffer(Resource_ID res_id) {
+    ASSERT_DEBUG(res_id.type == (i32)rd::Type::Buffer);
+    Buffer &   buf   = buffers[res_id.id];
+    Mem_Chunk &chunk = mem_chunks[buf.mem_chunk_index];
+    void *     data  = NULL;
+    VK_ASSERT_OK(vkMapMemory(device, chunk.mem, buf.mem_offset, buf.create_info.size, 0, &data));
+    return data;
+  }
+
+  void unmap_buffer(Resource_ID res_id) {
+    ASSERT_DEBUG(res_id.type == (i32)rd::Type::Buffer);
+    Buffer &   buf   = buffers[res_id.id];
+    Mem_Chunk &chunk = mem_chunks[buf.mem_chunk_index];
+    vkUnmapMemory(device, chunk.mem);
   }
 
   void release_resource(Resource_ID res_id) {
@@ -911,19 +927,27 @@ enum class Render_Value_t {
   UNKNOWN = 0,
   RESOURCE_ID,
   FLAGS,
+  ARRAY,
 };
 
 struct Render_Value {
+  struct Array {
+    void *ptr;
+    u32   size;
+  };
   union {
     Resource_ID res_id;
+    Array       arr;
   };
 };
 
 struct Renderign_Evaluator final : public IEvaluator {
   Window             wnd;
   Pool<Render_Value> rd_values;
+  Pool<>             tmp_values;
   void               init() {
-    rd_values = Pool<Render_Value>::create(1 << 10);
+    rd_values  = Pool<Render_Value>::create(1 << 10);
+    tmp_values = Pool<>::create(1 << 10);
     wnd.init();
   }
   Renderign_Evaluator *create() {
@@ -931,16 +955,20 @@ struct Renderign_Evaluator final : public IEvaluator {
     out->init();
     return out;
   }
-  void enter_scope() {
+  void *alloc_tmp(u32 size) { return tmp_values.alloc(size); }
+  void  enter_scope() {
     state->enter_scope();
+    tmp_values.enter_scope();
     rd_values.enter_scope();
   }
   void exit_scope() {
     state->exit_scope();
+    tmp_values.exit_scope();
     rd_values.exit_scope();
   }
   void release() override {
     wnd.release();
+    tmp_values.release();
     rd_values.release();
     delete this;
   }
@@ -972,6 +1000,16 @@ struct Renderign_Evaluator final : public IEvaluator {
     Value *new_val     = state->value_storage.alloc_zero(1);
     new_val->type      = (i32)Value::Value_t::ANY;
     new_val->any_type  = (i32)Render_Value_t::RESOURCE_ID;
+    new_val->any       = rval;
+    return new_val;
+  }
+  Value *wrap_array(void *ptr, u32 size) {
+    Render_Value *rval = rd_values.alloc_zero(1);
+    rval->arr.ptr      = ptr;
+    rval->arr.size     = size;
+    Value *new_val     = state->value_storage.alloc_zero(1);
+    new_val->type      = (i32)Value::Value_t::ANY;
+    new_val->any_type  = (i32)Render_Value_t::ARRAY;
     new_val->any       = rval;
     return new_val;
   }
@@ -1042,6 +1080,53 @@ struct Renderign_Evaluator final : public IEvaluator {
                   args[0]->any_type == (i32)Render_Value_t::RESOURCE_ID);
       Render_Value *rval = (Render_Value *)args[0]->any;
       wnd.release_resource(rval->res_id);
+      return NULL;
+    } else if (l->cmp_symbol("map_buffer")) {
+      SmallArray<Value *, 2> args;
+      args.init();
+      defer(args.release());
+      eval_args_and_collect(l->next, args);
+      ASSERT_EVAL(args.size = 1);
+      ASSERT_EVAL(args[0]->type == (i32)Value::Value_t::ANY &&
+                  args[0]->any_type == (i32)Render_Value_t::RESOURCE_ID);
+      Render_Value *rval = (Render_Value *)args[0]->any;
+      void *        ptr  = wnd.map_buffer(rval->res_id);
+      return wrap_array(ptr, 0);
+    } else if (l->cmp_symbol("unmap_buffer")) {
+      SmallArray<Value *, 2> args;
+      args.init();
+      defer(args.release());
+      eval_args_and_collect(l->next, args);
+      ASSERT_EVAL(args.size = 1);
+      ASSERT_EVAL(args[0]->type == (i32)Value::Value_t::ANY &&
+                  args[0]->any_type == (i32)Render_Value_t::RESOURCE_ID);
+      Render_Value *rval = (Render_Value *)args[0]->any;
+      wnd.unmap_buffer(rval->res_id);
+      return NULL;
+    } else if (l->cmp_symbol("array_f32")) {
+      SmallArray<Value *, 16> args;
+      args.init();
+      defer(args.release());
+      eval_args_and_collect(l->next, args);
+      u8 *data = (u8 *)alloc_tmp(4 * args.size);
+      ito(args.size) {
+        ASSERT_EVAL(args[i]->type == (i32)Value::Value_t::F32);
+        memcpy(data + i * 4, &args[i]->f, 4);
+      }
+      return wrap_array(data, args.size * 4);
+    } else if (l->cmp_symbol("memcpy")) {
+      SmallArray<Value *, 4> args;
+      args.init();
+      defer(args.release());
+      eval_args_and_collect(l->next, args);
+      ASSERT_EVAL(args.size == 2);
+      ASSERT_EVAL(args[0]->type == (i32)Value::Value_t::ANY &&
+                  args[0]->any_type == (i32)Render_Value_t::ARRAY);
+      ASSERT_EVAL(args[1]->type == (i32)Value::Value_t::ANY &&
+                  args[1]->any_type == (i32)Render_Value_t::ARRAY);
+      Render_Value *val_1 = (Render_Value *)args[0]->any;
+      Render_Value *val_2 = (Render_Value *)args[1]->any;
+      memcpy(val_1->arr.ptr, val_2->arr.ptr, val_2->arr.size);
       return NULL;
     }
     if (prev != NULL) return prev->eval(l);

@@ -1,23 +1,6 @@
 #include "rendering.hpp"
 
 #define ALLOC_VAL() (Value *)alloc_value()
-
-#define ASSERT_EVAL(x)                                                                             \
-  do {                                                                                             \
-    if (!(x)) {                                                                                    \
-      set_error();                                                                                 \
-      state->push_error(#x);                                                                       \
-      abort();                                                                                     \
-      return NULL;                                                                                 \
-    }                                                                                              \
-  } while (0)
-#define CHECK_ERROR()                                                                              \
-  do {                                                                                             \
-    if (is_error()) {                                                                              \
-      abort();                                                                                     \
-      return NULL;                                                                                 \
-    }                                                                                              \
-  } while (0)
 #define CALL_EVAL(x)                                                                               \
   eval_unwrap(x);                                                                                  \
   CHECK_ERROR()
