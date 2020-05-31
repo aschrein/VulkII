@@ -32,60 +32,43 @@
 
 Pool<char> string_storage = Pool<char>::create(1 << 20);
 
-struct Shader_Builder {
-  enum class Freq { PER_DC, PER_FRAME };
-  struct Uniform {
-    string_ref name;
-    string_ref type;
-    VkFormat   format;
-    u32        count;
-    Freq       freq;
-  };
-  struct Input {
-    string_ref name;
-    string_ref type;
-  };
-  struct Output {
-    string_ref name;
-    string_ref type;
-  };
-  string_ref scratch_name;
-  string_ref scratch_type;
-  VkFormat   scratch_format;
-  u32        scratch_count;
-  Freq       scratch_freq;
-  void       clear_scratch() {
-    scratch_name   = string_ref{NULL, 0};
-    scratch_type   = string_ref{NULL, 0};
-    scratch_format = 0;
-    scratch_count  = 1;
-    scratch_freq   = Freq::PER_DC;
+VkFormat parse_format(string_ref str) {
+  if (str == stref_s("R16_FLOAT")) {
+    return VK_FORMAT_R16_SFLOAT;
+  } else if (str == stref_s("R32_FLOAT")) {
+    return VK_FORMAT_R32_SFLOAT;
+  } else if (str == stref_s("RGB32_FLOAT")) {
+    return VK_FORMAT_R32G32B32_SFLOAT;
+  } else if (str == stref_s("RGBA32_FLOAT")) {
+    return VK_FORMAT_R32G32B32A32_SFLOAT;
+  } else if (str == stref_s("R32_UINT")) {
+    return VK_FORMAT_R32_UINT;
+  } else {
+    TRAP;
   }
-  SmallArray<Uniform, 8> uniforms;
-  SmallArray<Input, 8>   inputs;
-  SmallArray<Output, 8>  outputs;
+}
 
-  u32        dispatch_x, dispatch_y, dispatch_z;
+char const *get_glsl_format(VkFormat format) {
+  if (format == VK_FORMAT_R16_SFLOAT) {
+    return "r16f";
+  } else if (format == VK_FORMAT_R32_SFLOAT) {
+    return "r32f";
+  } else if (format == VK_FORMAT_R32G32_SFLOAT) {
+    return "rg32f";
+  } else if (format == VK_FORMAT_R32G32B32_SFLOAT) {
+    return "rgb32f";
+  } else if (format == VK_FORMAT_R32G32B32A32_SFLOAT) {
+    return "rgba32f";
+  } else {
+    TRAP;
+  }
+}
+
+struct String_Builder {
   Pool<char> tmp_buf;
-  string_ref body;
-  string_ref header;
-  //  u32                 input_counter   = 0;
-  //  u32                 output_counter  = 0;
-  //  u32                 set_counter     = 0;
-  //  u32                 binding_counter = 0;
-  shaderc_shader_kind kind;
-  void                init() {
-    tmp_buf = Pool<char>::create(1 << 20);
-    uniforms.init();
-    inputs.init();
-    outputs.init();
-  }
-  void release() {
-    tmp_buf.release();
-    uniforms.release();
-    inputs.release();
-    outputs.release();
-  }
+  void       init() { tmp_buf = Pool<char>::create(1 << 20); }
+  void       release() { tmp_buf.release(); }
+  void       reset() { tmp_buf.reset(); }
   string_ref get_str() { return string_ref{(char const *)tmp_buf.at(0), tmp_buf.cursor}; }
   void       putf(char const *fmt, ...) {
     va_list args;
@@ -95,6 +78,170 @@ struct Shader_Builder {
     ASSERT_ALWAYS(len > 0);
     tmp_buf.advance(len);
   }
+  void put_char(char c) { tmp_buf.put(&c, 1); }
+};
+
+struct Shader_Builder {
+  enum class Freq { PER_DC, PER_FRAME };
+  enum class Class_t {
+    NONE,
+    SRV,
+    UAV,
+  };
+  enum class Global_t {
+    SAMPLER,
+    BUFFER,
+    IMAGE,
+  };
+  enum class Layout_t {
+    NONE,
+    ROW_MAJOR,
+    COL_MAJOR,
+  };
+  struct Uniform {
+    string_ref name;
+    string_ref type;
+    u32        count;
+    Freq       freq;
+    Layout_t   layout;
+    bool       operator==(Uniform const &that) {
+      return                       //
+          name == that.name &&     //
+          type == that.type &&     //
+          count == that.count &&   //
+          layout == that.layout && //
+          freq == that.freq;       //
+    }
+  };
+  struct Global {
+    string_ref       name;
+    Global_t         type;
+    Class_t          clazz;
+    u32              dim;
+    VkFormat         format;
+    u32              count;
+    Freq             freq;
+    VkDescriptorType get_desc_type() {
+      if (type == Global_t::BUFFER) {
+        return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      } else if (type == Global_t::IMAGE) {
+        if (clazz == Class_t::SRV) {
+          return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        } else if (clazz == Class_t::UAV) {
+          return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        }
+      } else if (type == Global_t::SAMPLER) {
+        return VK_DESCRIPTOR_TYPE_SAMPLER;
+      } else {
+        TRAP;
+      }
+    }
+    bool operator==(Global const &that) {
+      return                       //
+          name == that.name &&     //
+          clazz == that.clazz &&   //
+          type == that.type &&     //
+          format == that.format && //
+          count == that.count &&   //
+          dim == that.dim &&       //
+          freq == that.freq;       //
+    }
+  };
+  struct Input {
+    string_ref name;
+    string_ref type;
+    u32        location;
+    bool       operator==(Input const &that) {
+      return                           //
+          name == that.name &&         //
+          location == that.location && //
+          type == that.type;           //
+    }
+  };
+  struct Output {
+    string_ref name;
+    string_ref type;
+    u32        target;
+    bool       operator==(Output const &that) {
+      return                   //
+          name == that.name && //
+          type == that.type;   //
+    }
+  };
+  struct Scratch_State {
+    string_ref name;
+    string_ref type;
+    string_ref layout;
+    string_ref clazz;
+    VkFormat   format;
+    i32        count;
+    i32        target;
+    Freq       freq;
+    i32        dim;
+    i32        location;
+    void       clear() {
+      memset(this, 0, sizeof(*this));
+      format = VK_FORMAT_UNDEFINED;
+      count  = 1;
+      dim    = 1;
+      freq   = Freq::PER_DC;
+    }
+    void eval(List *l) {
+      if (l->child != NULL) {
+        eval(l->child);
+      } else if (l->cmp_symbol("type")) {
+        type = l->next->symbol;
+      } else if (l->cmp_symbol("class")) {
+        clazz = l->next->symbol;
+      } else if (l->cmp_symbol("name")) {
+        name = l->next->symbol;
+      } else if (l->cmp_symbol("layout")) {
+        layout = l->next->symbol;
+      } else if (l->cmp_symbol("freq")) {
+        if (l->next->cmp_symbol("PER_DC")) {
+          freq = Freq::PER_DC;
+        } else if (l->next->cmp_symbol("PER_FRAME")) {
+          freq = Freq::PER_FRAME;
+        } else {
+          TRAP;
+        }
+      } else if (l->cmp_symbol("format")) {
+        format = parse_format(l->next->symbol);
+      } else if (l->cmp_symbol("count")) {
+        ASSERT_DEBUG(parse_decimal_int(l->next->symbol.ptr, l->next->symbol.len, &count));
+      } else if (l->cmp_symbol("location")) {
+        ASSERT_DEBUG(parse_decimal_int(l->next->symbol.ptr, l->next->symbol.len, &location));
+      } else if (l->cmp_symbol("dim")) {
+        ASSERT_DEBUG(parse_decimal_int(l->next->symbol.ptr, l->next->symbol.len, &dim));
+      } else if (l->cmp_symbol("target")) {
+        ASSERT_DEBUG(parse_decimal_int(l->next->symbol.ptr, l->next->symbol.len, &target));
+      }
+    }
+  } scratch;
+  SmallArray<Uniform, 8> uniforms;
+  SmallArray<Global, 8>  globals;
+  SmallArray<Input, 8>   inputs;
+  SmallArray<Output, 8>  outputs;
+
+  u32        dispatch_x, dispatch_y, dispatch_z;
+  string_ref body;
+  string_ref header;
+
+  shaderc_shader_kind kind;
+  void                init() {
+
+    uniforms.init();
+    inputs.init();
+    outputs.init();
+    globals.init();
+  }
+  void release() {
+    uniforms.release();
+    inputs.release();
+    outputs.release();
+    globals.release();
+  }
+
   void eval(List *l) {
     if (l->child != NULL) {
       eval(l->child);
@@ -109,65 +256,89 @@ struct Shader_Builder {
         TRAP;
       }
     } else if (l->cmp_symbol("create_shader")) {
-//      putf("#version 450\n");
-//      putf("#extension GL_EXT_nonuniform_qualifier : require\n");
       List *cur = l->next;
       while (cur != NULL) {
         eval(cur);
         cur = cur->next;
       }
     } else if (l->cmp_symbol("header")) {
-      header = l->symbol;
+      header = l->next->symbol;
     } else if (l->cmp_symbol("body")) {
-      body = l->symbol;
+      body = l->next->symbol;
     } else if (l->cmp_symbol("input")) {
-//      putf("layout(location = %i) in %.*s %.*s;\n", input_counter, STRF(l->next->symbol),
-//           STRF(l->next->next->symbol));
-//      input_counter += 1;
+      scratch.clear();
+      List *cur = l->next;
+      while (cur != NULL) {
+        scratch.eval(cur);
+        cur = cur->next;
+      }
+      Input input;
+      input.name     = scratch.name;
+      input.type     = scratch.type;
+      input.location = scratch.location;
+      inputs.push(input);
     } else if (l->cmp_symbol("output")) {
-//      putf("layout(location = %i) out %.*s %.*s;\n", output_counter, STRF(l->next->symbol),
-//           STRF(l->next->next->symbol));
-//      output_counter += 1;
-    } else if (l->cmp_symbol("push_constants")) {
-//      string_ref name = l->next->symbol;
-//      putf("layout(push_constant) uniform %.*s_t {\n", STRF(name));
-//      List *cur = l->get(2);
-//      while (cur != NULL) {
-//        eval(cur);
-//        cur = cur->next;
-//      }
-//      putf("} %.*s;\n", STRF(name));
-    } else if (l->cmp_symbol("set")) {
-      binding_counter = 0;
-      List *cur       = l->next;
+      scratch.clear();
+      List *cur = l->next;
       while (cur != NULL) {
-        eval(cur);
+        scratch.eval(cur);
         cur = cur->next;
       }
-      set_counter += 1;
-    } else if (l->cmp_symbol("uniform_buffer")) {
-      string_ref name = l->next->symbol;
-      putf("layout(set = %i, binding = %i, std140) uniform %.*s_t {\n", set_counter,
-           binding_counter, STRF(name));
-      List *cur = l->get(2);
+      Output output;
+      output.name   = scratch.name;
+      output.type   = scratch.type;
+      output.target = scratch.target;
+      outputs.push(output);
+    } else if (l->cmp_symbol("uniform")) {
+      scratch.clear();
+      List *cur = l->next;
       while (cur != NULL) {
-        eval(cur);
+        scratch.eval(cur);
         cur = cur->next;
       }
-      putf("} %.*s;\n", STRF(name));
-      binding_counter += 1;
-    } else if (l->cmp_symbol("uniform_array")) {
-      string_ref type  = l->get(1)->symbol;
-      string_ref name  = l->get(2)->symbol;
-      string_ref cnt_s = l->get(3)->symbol;
-      i32        cnt   = 0;
-      ASSERT_ALWAYS(parse_decimal_int(cnt_s.ptr, cnt_s.len, &cnt));
-      putf("layout(set = %i, binding = %i) uniform %.*s %.*s [%i];\n", set_counter, binding_counter,
-           STRF(type), STRF(name), cnt);
-      binding_counter += cnt;
-    } else if (l->cmp_symbol("member")) {
-      putf("  %.*s %.*s;\n", STRF(l->next->symbol), STRF(l->next->next->symbol));
-      input_counter += 1;
+      Uniform uniform;
+      uniform.count = scratch.count;
+      uniform.freq  = scratch.freq;
+      uniform.name  = scratch.name;
+      uniform.type  = scratch.type;
+      if (scratch.layout == stref_s("row_major")) {
+        uniform.layout = Layout_t::ROW_MAJOR;
+      } else if (l->next->cmp_symbol("col_major")) {
+        uniform.layout = Layout_t::COL_MAJOR;
+      } else {
+        uniform.layout = Layout_t::NONE;
+      }
+      uniforms.push(uniform);
+    } else if (l->cmp_symbol("global")) {
+      scratch.clear();
+      List *cur = l->next;
+      while (cur != NULL) {
+        scratch.eval(cur);
+        cur = cur->next;
+      }
+      Global glob;
+      glob.count  = scratch.count;
+      glob.format = scratch.format;
+      glob.freq   = scratch.freq;
+      glob.name   = scratch.name;
+      glob.dim    = scratch.dim;
+      if (scratch.clazz == stref_s("SRV")) {
+        glob.clazz = Class_t::SRV;
+      } else if (l->next->cmp_symbol("UAV")) {
+        glob.clazz = Class_t::UAV;
+      } else {
+        TRAP;
+      }
+      if (scratch.type == stref_s("image")) {
+        glob.type = Global_t::IMAGE;
+      } else if (l->next->cmp_symbol("buffer")) {
+        glob.type = Global_t::BUFFER;
+      } else if (l->next->cmp_symbol("sampler")) {
+        glob.type = Global_t::SAMPLER;
+      } else {
+        TRAP;
+      }
+      globals.push(glob);
     }
   }
 };
@@ -343,15 +514,51 @@ struct Resource_Array {
   }
 };
 
-struct Shader_Descriptor {
-  u32                          set;
-  VkDescriptorSetLayoutBinding layout;
+// struct Shader_Descriptor {
+//  u32                          set;
+//  VkDescriptorSetLayoutBinding layout;
+//};
+
+// struct Attribute_Source {
+//  uint32_t binding;
+//  uint32_t offset;
+//  VkFormat format;
+//};
+
+struct Pass_Input {
+  string_ref name;
+  bool       history;
+  void       relocate() { name = relocate_cstr(name); }
 };
 
-struct Attribute_Source {
-  uint32_t binding;
-  uint32_t offset;
-  VkFormat format;
+struct Render_Pass : public Slot {
+  string_ref                name;
+  SmallArray<Pass_Input, 4> input;
+  SmallArray<string_ref, 4> output;
+  u32                       width;
+  u32                       height;
+  bool                      use_depth;
+  u32                       depth_target;
+  VkRenderPass              pass;
+  VkFramebuffer             fb;
+
+  void init() {
+    input.init();
+    output.init();
+  }
+
+  void release(VkDevice device) {
+    vkDestroyRenderPass(device, pass, NULL);
+    vkDestroyFramebuffer(device, fb, NULL);
+    input.release();
+    output.release();
+  }
+
+  void relocate() {
+    name = relocate_cstr(name);
+    ito(input.size) input[i].relocate();
+    ito(output.size) output[i] = relocate_cstr(output[i]);
+  }
 };
 
 struct Graphics_Pipeline_State {
@@ -371,8 +578,7 @@ struct Graphics_Pipeline_State {
   float                             depth_bias_const;
   ID                                ps, vs;
   u64                               ps_hash, vs_hash;
-  u32                               push_constants_size;
-  u32                               pass;
+  ID                                pass;
   u64                               dummy; // used for hashing to emulate C string
   bool                              operator==(const Graphics_Pipeline_State &that) const {
     return memcmp(this, &that, sizeof(*this)) == 0;
@@ -411,12 +617,15 @@ struct Shader : public Slot {
 };
 
 struct Graphics_Pipeline_Wrapper : public Slot {
-  SmallArray<VkDescriptorSetLayout, 4>      set_layouts;
-  VkPipelineLayout                          pipeline_layout;
-  VkPipeline                                pipeline;
-  Hash_Table<string_ref, Shader_Descriptor> resource_slots;
-  VkShaderModule                            vs_module;
-  VkShaderModule                            ps_module;
+  SmallArray<VkDescriptorSetLayout, 4>                            set_layouts;
+  VkPipelineLayout                                                pipeline_layout;
+  VkPipeline                                                      pipeline;
+  Hash_Table<string_ref, Pair<u32, u32>, Default_Allocator, 0x10> global_slots;
+  Hash_Table<string_ref, u32, Default_Allocator, 0x10>            uniform_slots;
+  VkShaderModule                                                  vs_module;
+  VkShaderModule                                                  ps_module;
+  u32                                                             uniform_size;
+  u32                                                             push_constants_size;
 
   void release(VkDevice device) {
     ito(set_layouts.size) vkDestroyDescriptorSetLayout(device, set_layouts[i], NULL);
@@ -424,11 +633,12 @@ struct Graphics_Pipeline_Wrapper : public Slot {
     vkDestroyPipeline(device, pipeline, NULL);
     vkDestroyShaderModule(device, vs_module, NULL);
     vkDestroyShaderModule(device, ps_module, NULL);
-    resource_slots.release();
+    global_slots.release();
+    uniform_slots.release();
     set_layouts.release();
   }
 
-  VkShaderModule compile_glsl(VkDevice device, string_ref text, shaderc_shader_kind kind) {
+  static VkShaderModule compile_glsl(VkDevice device, string_ref text, shaderc_shader_kind kind) {
     shaderc_compiler_t        compiler = shaderc_compiler_initialize();
     shaderc_compile_options_t options  = shaderc_compile_options_initialize();
     shaderc_compile_options_set_source_language(options, shaderc_source_language_glsl);
@@ -443,8 +653,8 @@ struct Graphics_Pipeline_Wrapper : public Slot {
       shaderc_compile_options_release(options);
     });
     if (shaderc_result_get_compilation_status(result) != shaderc_compilation_status_success) {
-      state->push_error("%.*s\n", STRF(text));
-      state->push_error(shaderc_result_get_error_message(result));
+      push_error("%.*s\n", STRF(text));
+      push_error(shaderc_result_get_error_message(result));
       TRAP;
     }
     size_t                   len      = shaderc_result_get_length(result);
@@ -460,57 +670,442 @@ struct Graphics_Pipeline_Wrapper : public Slot {
     return module;
   }
 
+  static void print_global(String_Builder &builder, Shader_Builder::Global &glob, u32 &set_counter,
+                           u32 &binding_counter) {
+    if (glob.type == Shader_Builder::Global_t::IMAGE) {
+      if (glob.clazz == Shader_Builder::Class_t::SRV) {
+        if (glob.dim == 2) {
+          if (glob.count == 1) {
+            builder.putf("layout(set = %i, binding = %i) texture2D %.*s;\n", set_counter,
+                         binding_counter, STRF(glob.name));
+            binding_counter += 1;
+          } else {
+            ASSERT_ALWAYS(glob.count > 1);
+            builder.putf("layout(set = %i, binding = %i) texture2D %.*s[%i];\n", set_counter,
+                         binding_counter, STRF(glob.name), glob.count);
+            binding_counter += glob.count;
+          }
+        } else {
+          TRAP;
+        }
+      } else if (glob.clazz == Shader_Builder::Class_t::UAV) {
+        if (glob.dim == 2) {
+          if (glob.count == 1) {
+            builder.putf("layout(set = %i, binding = %i, %s) image2D %.*s;\n", set_counter,
+                         binding_counter, get_glsl_format(glob.format), STRF(glob.name));
+            binding_counter += 1;
+          } else {
+            ASSERT_ALWAYS(glob.count > 1);
+            builder.putf("layout(set = %i, binding = %i, %s) image2D %.*s[%i];\n", set_counter,
+                         binding_counter, get_glsl_format(glob.format), STRF(glob.name),
+                         glob.count);
+            binding_counter += glob.count;
+          }
+        } else {
+          TRAP;
+        }
+      } else {
+        TRAP;
+      }
+    } else {
+      TRAP;
+    }
+  }
+
+  static void preprocess_shader(String_Builder &builder, Shader_Builder &shb) {
+    char const *cur       = shb.body.ptr;
+    char const *end       = cur + shb.body.len;
+    size_t      total_len = 0;
+    while (cur != end && total_len < shb.body.len) {
+      if (*cur == '@') {
+        cur++;
+        total_len += 1;
+        i32 match_len = -1;
+        if ((match_len = str_match(cur, "EXPORT_COLOR0<")) > 0) {
+          cur += match_len;
+          total_len += match_len;
+          i32 symbol_len = str_find(cur, 0x100, '>');
+          ASSERT_ALWAYS(symbol_len > 0);
+          builder.putf("_rt0 = %.*s;", symbol_len, cur);
+          cur += symbol_len + 1;
+          total_len += symbol_len + 1;
+        } else if ((match_len = str_match(cur, "EXPORT_POSITION<")) > 0) {
+          cur += match_len;
+          total_len += match_len;
+          i32 symbol_len = str_find(cur, 0x100, '>');
+          ASSERT_ALWAYS(symbol_len > 0);
+          builder.putf("gl_Position = %.*s;", symbol_len, cur);
+          cur += symbol_len + 1;
+          total_len += symbol_len + 1;
+        } else if ((match_len = str_match(cur, "ENTRY")) > 0) {
+          cur += match_len;
+          total_len += match_len;
+          builder.putf("void main()");
+        } else if ((match_len = str_match(cur, "GLOBAL<")) > 0) {
+          cur += match_len;
+          total_len += match_len;
+          i32 symbol_len = str_find(cur, 0x100, '>');
+          ASSERT_ALWAYS(symbol_len > 0);
+          builder.putf("%.*s", symbol_len, cur);
+          cur += symbol_len + 1;
+          total_len += symbol_len + 1;
+        } else if ((match_len = str_match(cur, "UNIFORM<")) > 0) {
+          cur += match_len;
+          total_len += match_len;
+          i32 symbol_len = str_find(cur, 0x100, '>');
+          ASSERT_ALWAYS(symbol_len > 0);
+          builder.putf("ubo.%.*s", symbol_len, cur);
+          cur += symbol_len + 1;
+          total_len += symbol_len + 1;
+        } else {
+          TRAP;
+        }
+      } else {
+        builder.put_char(*cur);
+        cur += 1;
+        total_len += 1;
+      }
+    }
+  }
+
+  static u32 parse_size(string_ref type) {
+    if (                             //
+        type == stref_s("float") ||  //
+        type == stref_s("float2") || //
+        type == stref_s("float3") || //
+        type == stref_s("float4") || //
+        type == stref_s("int") ||    //
+        type == stref_s("int2") ||   //
+        type == stref_s("int3") ||   //
+        type == stref_s("int4") ||   //
+        type == stref_s("uint") ||   //
+        type == stref_s("uint2") ||  //
+        type == stref_s("uint3") ||  //
+        type == stref_s("uint4") ||  //
+    ) {
+      return 16;
+    } else if (type == stref_s("float2x2")) {
+      return 16 * 2;
+    } else if (type == stref_s("float3x3")) {
+      return 16 * 3;
+    } else if (type == stref_s("float4x4")) {
+      return 16 * 4;
+    } else {
+      TRAP;
+    }
+  }
+
+  static i32 str_match(char const *cur, char const *patt) {
+    i32 i = 0;
+    while (true) {
+      if (cur[i] == '\0' || patt[i] == '\0') return i;
+      if (cur[i] == patt[i]) {
+        i++;
+      } else {
+        return -1;
+      }
+    }
+  }
+
+  static i32 str_find(char const *cur, size_t maxlen, char c) {
+    i32 i = 0;
+    while (true) {
+      if (i == (i32)maxlen) return -1;
+      if (cur[i] == '\0') return -1;
+      if (cur[i] == c) {
+        return i;
+      }
+      i++;
+    }
+  }
+
   void init(VkDevice                 device,    //
+            Render_Pass &            pass,      //
             Shader &                 vs_shader, //
             Shader &                 ps_shader, //
             Graphics_Pipeline_State &pipeline_info) {
     set_layouts.init();
-    resource_slots.init();
-    SmallArray<VkPipelineShaderStageCreateInfo, 2> stages;
+    uniform_slots.init();
+    global_slots.init();
+    (void)pipeline_info;
+    SmallArray<VkDescriptorSetLayoutBinding, 8> set_bindings;
+    set_bindings.init();
+    defer(set_bindings.release());
     {
       Shader_Builder vsbuilder;
       vsbuilder.init();
       defer(vsbuilder.release());
+      Shader_Builder psbuilder;
+      psbuilder.init();
+      defer(psbuilder.release());
+
       vsbuilder.eval(vs_shader.root);
-      string_ref          text = builder.get_str();
-      shaderc_shader_kind kind = builder.kind;
-      ASSERT_ALWAYS(kind == shaderc_glsl_vertex_shader);
-      vs_module = compile_glsl(device, text, kind);
-      VkPipelineShaderStageCreateInfo vs_shader_stage;
-      vs_shader_stage.stage  = VK_SHADER_STAGE_VERTEX_BIT;
-      vs_shader_stage.module = vs_shader;
-      vs_shader_stage.pName  = "main";
-      stages.push(vs_shader_stage);
+      psbuilder.eval(ps_shader.root);
+      ASSERT_ALWAYS(vsbuilder.outputs.size == psbuilder.inputs.size);
+      Hash_Table<string_ref, Shader_Builder::Uniform> uniform_table;
+      Hash_Table<string_ref, Shader_Builder::Global>  global_table;
+      uniform_table.init();
+      global_table.init();
+      defer({
+        global_table.release();
+        uniform_table.release();
+      });
+      ito(vsbuilder.uniforms.size) {
+        auto &uniform = vsbuilder.uniforms[i];
+        uniform_table.insert(uniform.name, uniform);
+      }
+      ito(psbuilder.uniforms.size) {
+        Shader_Builder::Uniform &uniform = psbuilder.uniforms[i];
+        if (uniform_table.contains(uniform.name)) {
+          ASSERT_ALWAYS(uniform == uniform_table.get(uniform.name));
+        } else {
+          uniform_table.insert(uniform.name, uniform);
+        }
+      }
+      ito(vsbuilder.globals.size) {
+        Shader_Builder::Global &glob = vsbuilder.globals[i];
+        global_table.insert(glob.name, glob);
+      }
+      ito(psbuilder.globals.size) {
+        auto &glob = psbuilder.globals[i];
+        if (global_table.contains(glob.name)) {
+          ASSERT_ALWAYS(glob == global_table.get(glob.name));
+        } else {
+          global_table.insert(glob.name, glob);
+        }
+      }
+
+      String_Builder common_header;
+      String_Builder ps_text;
+      String_Builder vs_text;
+      ps_text.init();
+      vs_text.init();
+      common_header.init();
+      defer({
+        common_header.release();
+        ps_text.release();
+        vs_text.release();
+      });
+      u32 set_counter     = 0;
+      u32 binding_counter = 0;
+      common_header.putf("#version 450\n");
+      common_header.putf("#extension GL_EXT_nonuniform_qualifier : require\n");
+      common_header.putf(R"(
+#define float2 vec2
+#define float3 vec3
+#define float4 vec4
+#define int2 ivec2
+#define int3 ivec3
+#define int4 ivec4
+#define uint2 uvec2
+#define uint3 uvec3
+#define uint4 uvec4
+#define float2x2 mat2
+#define float3x3 mat3
+#define float4x4 mat4
+
+)");
+      { // One uniform buffer
+        VkDescriptorSetLayoutBinding set_binding;
+        set_binding.binding            = 0;
+        set_binding.descriptorCount    = 1;
+        set_binding.descriptorType     = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        set_binding.pImmutableSamplers = NULL;
+        set_binding.stageFlags         = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+        set_bindings.push(set_binding);
+      }
+      u32 uniform_offset = 0;
+      common_header.putf("layout(set = %i, binding = %i, std140) uniform UBO_t {\n", set_counter,
+                         binding_counter);
+      uniform_table.iter_values([&](Shader_Builder::Uniform &uniform) {
+        ASSERT_ALWAYS(uniform.count == 1);
+        ASSERT_ALWAYS(uniform.layout == Shader_Builder::Layout_t::NONE);
+        uniform_slots.insert(uniform.name, uniform_offset);
+        common_header.putf("  %.*s %.*s;\n", STRF(uniform.type), STRF(uniform.name));
+        uniform_offset += parse_size(uniform.type);
+      });
+      common_header.putf("} ubo;\n");
+      binding_counter += 1;
+      global_table.iter_values([&](Shader_Builder::Global &glob) {
+        {
+          ASSERT_ALWAYS(set_counter == 0 && "One set for now");
+          VkDescriptorSetLayoutBinding set_binding;
+          set_binding.binding            = binding_counter;
+          set_binding.descriptorCount    = glob.count;
+          set_binding.descriptorType     = glob.get_desc_type();
+          set_binding.pImmutableSamplers = NULL;
+          set_binding.stageFlags         = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+          set_bindings.push(set_binding);
+        }
+        global_slots.insert(relocate_cstr(glob.name), Pair<u32, u32>{set_counter, binding_counter});
+        print_global(common_header, glob, set_counter, binding_counter);
+      });
+      string_ref header = common_header.get_str();
+      ps_text.putf("%.*s", STRF(header));
+      vs_text.putf("%.*s", STRF(header));
+      ito(psbuilder.inputs.size) {
+        auto &input = psbuilder.inputs[i];
+        ps_text.putf("layout(location = %i) in %.*s %.*s;\n", i, STRF(input.type),
+                     STRF(input.name));
+      }
+      ito(psbuilder.outputs.size) {
+        auto &output = psbuilder.outputs[i];
+        ps_text.putf("layout(location = %i) out %.*s _rt%i;\n", i, STRF(output.type),
+                     output.target);
+      }
+      ito(vsbuilder.inputs.size) {
+        auto &input = vsbuilder.inputs[i];
+        vs_text.putf("layout(location = %i) in %.*s %.*s;\n", input.location, STRF(input.type),
+                     STRF(input.name));
+      }
+      ito(vsbuilder.outputs.size) {
+        auto &output = vsbuilder.outputs[i];
+        vs_text.putf("layout(location = %i) out %.*s %.*s;\n", i, STRF(output.type),
+                     STRF(output.name));
+      }
+      preprocess_shader(ps_text, psbuilder);
+      preprocess_shader(vs_text, vsbuilder);
+      vs_module = compile_glsl(device, vs_text.get_str(), shaderc_glsl_vertex_shader);
+      ps_module = compile_glsl(device, ps_text.get_str(), shaderc_glsl_fragment_shader);
+    }
+    VkPipelineShaderStageCreateInfo stages[2];
+    {
+      VkPipelineShaderStageCreateInfo stage;
+      stage.stage  = VK_SHADER_STAGE_VERTEX_BIT;
+      stage.module = vs_module;
+      stage.pName  = "main";
+      stages[0]    = stage;
     }
     {
-      Shader_Builder builder;
-      builder.init();
-      defer(builder.release());
-      builder.eval(ps_shader.root);
-      string_ref          text = builder.get_str();
-      shaderc_shader_kind kind = builder.kind;
-      ASSERT_ALWAYS(kind == shaderc_glsl_fragment_shader);
-      ps_module = compile_glsl(device, text, kind);
-      VkPipelineShaderStageCreateInfo shader_stage;
-      shader_stage.stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
-      shader_stage.module = ps_module;
-      shader_stage.pName  = "main";
-      stages.push(vs_shader_stage);
+      VkPipelineShaderStageCreateInfo stage;
+      stage.stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
+      stage.module = ps_module;
+      stage.pName  = "main";
+      stages[1]    = stage;
     }
-    //    {
+    {
+      VkDescriptorSetLayoutBindingFlagsCreateInfo binding_infos;
+      SmallArray<VkDescriptorBindingFlags, 8>     binding_flags;
+      binding_flags.init();
+      defer(binding_flags.release());
+      ito(set_bindings.size) {
+        if (set_bindings[i].descriptorCount > 1) {
+          binding_flags.push(VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT);
+        } else {
+          binding_flags.push(0);
+        }
+      }
+      binding_infos.bindingCount  = binding_flags.size;
+      binding_infos.pBindingFlags = &binding_flags[0];
+      binding_infos.pNext         = NULL;
+      binding_infos.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
 
-    //    }
-    //    {
-    //      VkPipelineShaderStageCreateInfo vs_shader_stage;
-    //      vs_shader_stage.stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
-    //      vs_shader_stage.module = ps_shader.module;
-    //      vs_shader_stage.pName  = "main";
-    //      stages.push(vs_shader_stage);
-    //    }
-    //    ito(vs_shader.resources) {
-    //      Shader::Resource_Slot &res = vs_shader.resources[i];
-    //      resource_slots.insert(res.name)
-    //    }
+      VkDescriptorSetLayoutCreateInfo set_layout_create_info;
+      MEMZERO(set_layout_create_info);
+      set_layout_create_info.bindingCount = set_bindings.size;
+      set_layout_create_info.pBindings    = &set_bindings[0];
+      set_layout_create_info.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+      set_layout_create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+      set_layout_create_info.pNext = (void *)&binding_infos;
+      VkDescriptorSetLayout set_layout;
+      VK_ASSERT_OK(vkCreateDescriptorSetLayout(device, &set_layout_create_info, NULL, &set_layout));
+      set_layouts.push(set_layouts);
+    }
+    // VkPushConstantRange push_range;
+    // MEMZERO(push_range);
+    // push_range.offset = 0;
+    // push_range.size = ???
+    {
+      VkPipelineLayoutCreateInfo pipe_layout_info;
+      MEMZERO(pipe_layout_info);
+      pipe_layout_info.sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+      pipe_layout_info.pSetLayouts    = &set_layouts[0];
+      pipe_layout_info.setLayoutCount = set_layouts.size;
+      VK_ASSERT_OK(vkCreatePipelineLayout(device, &pipe_layout_info, NULL, &pipeline_layout));
+    }
+    {
+      VkGraphicsPipelineCreateInfo info;
+      MEMZERO(info);
+      info.layout = pipeline_layout;
+      SmallArray<VkPipelineColorBlendAttachmentState, 4> blend_states;
+      blend_states.init();
+      defer({ blend_states.release(); });
+      // @TODO Add blend states
+      ito(pass.output.size) {
+        VkPipelineColorBlendAttachmentState blend_state;
+        MEMZERO(blend_state);
+        blend_state.colorWriteMask =   //
+            VK_COLOR_COMPONENT_R_BIT | //
+            VK_COLOR_COMPONENT_G_BIT | //
+            VK_COLOR_COMPONENT_B_BIT | //
+            VK_COLOR_COMPONENT_A_BIT;  //
+        blend_state.blendEnable = VK_FALSE;
+        blend_states.push(blend_state);
+      }
+      VkPipelineColorBlendStateCreateInfo blend_create_info;
+      MEMZERO(blend_create_info);
+      blend_create_info.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+      blend_create_info.attachmentCount = pass.output.size;
+      blend_create_info.logicOpEnable   = VK_FALSE;
+      blend_create_info.pAttachments    = &blend_states[0];
+      info.pColorBlendState             = &blend_create_info;
+
+      VkPipelineDepthStencilStateCreateInfo ds_create_info;
+      MEMZERO(ds_create_info);
+      ds_create_info.sType            = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+      ds_create_info.depthTestEnable  = pipeline_info.enable_depth_test ? VK_TRUE : VK_FALSE;
+      ds_create_info.depthCompareOp   = pipeline_info.cmp_op;
+      ds_create_info.depthWriteEnable = pipeline_info.enable_depth_write;
+      ds_create_info.maxDepthBounds   = pipeline_info.max_depth;
+      info.pDepthStencilState         = &ds_create_info;
+
+      VkPipelineRasterizationStateCreateInfo rs_create_info;
+      MEMZERO(rs_create_info);
+      rs_create_info.sType           = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+      rs_create_info.cullMode        = pipeline_info.cull_mode;
+      rs_create_info.frontFace       = pipeline_info.front_face;
+      rs_create_info.lineWidth       = pipeline_info.line_width;
+      rs_create_info.polygonMode     = pipeline_info.polygon_mode;
+      rs_create_info.depthBiasEnable = pipeline_info.depth_bias_const != 0.0f;
+      rs_create_info.depthBiasConstantFactor = pipeline_info.depth_bias_const;
+      info.pRasterizationState               = &rs_create_info;
+
+      VkDynamicState dynamic_states[] = {
+          VK_DYNAMIC_STATE_VIEWPORT,
+          VK_DYNAMIC_STATE_SCISSOR,
+      };
+      VkPipelineDynamicStateCreateInfo dy_create_info;
+      MEMZERO(dy_create_info);
+      dy_create_info.sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+      dy_create_info.dynamicStateCount = ARRAY_SIZE(dynamic_states);
+      dy_create_info.pDynamicStates    = dynamic_states;
+      info.pDynamicState               = &dy_create_info;
+
+      VkPipelineMultisampleStateCreateInfo ms_state;
+      MEMZERO(ms_state);
+      ms_state.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+      ms_state.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+      info.pMultisampleState        = &ms_state;
+
+      VkPipelineInputAssemblyStateCreateInfo ia_create_info;
+      MEMZERO(ia_create_info);
+      ia_create_info.sType     = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+      ia_create_info.topology  = pipeline_info.topology;
+      info.pInputAssemblyState = &ia_create_info;
+
+      VkPipelineVertexInputStateCreateInfo vs_create_info;
+      MEMZERO(vs_create_info);
+      vs_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+      vs_create_info.pVertexAttributeDescriptions    = pipeline_info.attributes;
+      vs_create_info.vertexAttributeDescriptionCount = pipeline_info.num_attributes;
+      vs_create_info.pVertexBindingDescriptions      = pipeline_info.bindings;
+      vs_create_info.vertexAttributeDescriptionCount = pipeline_info.num_bindings;
+      info.pVertexInputState                         = &vs_create_info;
+
+      info.renderPass = pass.pass;
+
+      VK_ASSERT_OK(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &info, NULL, &pipeline));
+    }
   }
 };
 
@@ -575,8 +1170,8 @@ struct Window {
   } images;
   struct Shader_Array : Resource_Array<Shader, Shader_Array> {
     Window *wnd = NULL;
-    void release_item(Shader &shader) { vkDestroyShaderModule(wnd->device, shader.module, NULL); }
-    void init(Window *wnd) {
+    void    release_item(Shader &shader) { (void)shader; }
+    void    init(Window *wnd) {
       this->wnd = wnd;
       Resource_Array::init();
     }
@@ -729,14 +1324,18 @@ struct Window {
       mem_chunks.push(new_chunk);
     }
   finally:
-    if (initial_data != NULL) {
-      ASSERT_DEBUG(info.mem_bits & (i32)rd::Memory_Bits::MAPPABLE);
+    (void)0;
+    {
       Mem_Chunk &chunk = mem_chunks[new_buf.mem_chunk_index];
-      void *     data  = NULL;
-      VK_ASSERT_OK(
-          vkMapMemory(device, chunk.mem, new_buf.mem_offset, new_buf.create_info.size, 0, &data));
-      memcpy(data, initial_data, new_buf.create_info.size);
-      vkUnmapMemory(device, chunk.mem);
+      vkBindBufferMemory(device, new_buf.buffer, chunk.mem, new_buf.mem_offset);
+      if (initial_data != NULL) {
+        ASSERT_DEBUG(info.mem_bits & (i32)rd::Memory_Bits::MAPPABLE);
+        void *data = NULL;
+        VK_ASSERT_OK(
+            vkMapMemory(device, chunk.mem, new_buf.mem_offset, new_buf.create_info.size, 0, &data));
+        memcpy(data, initial_data, new_buf.create_info.size);
+        vkUnmapMemory(device, chunk.mem);
+      }
     }
     return {buffers.push(new_buf), (i32)rd::Type::Buffer};
   }
@@ -778,6 +1377,7 @@ struct Window {
   Resource_ID alloc_shader(List *root) {
     Shader sh;
     sh.root = root;
+    sh.hash = hash_of(root->get_umbrella_string());
     return {shaders.push(sh), (i32)rd::Type::Shader};
   }
 
@@ -792,6 +1392,11 @@ struct Window {
   }
 
   void VS_bind_shader(Resource_ID res_id) {
+    if (res_id.is_null()) {
+      graphics_state.vs      = ID{0};
+      graphics_state.vs_hash = 0;
+      return;
+    }
     ASSERT_DEBUG(res_id.type == (i32)rd::Type::Shader);
     Shader &sh             = shaders[res_id.id];
     graphics_state.vs      = res_id.id;
@@ -799,6 +1404,11 @@ struct Window {
   }
 
   void PS_bind_shader(Resource_ID res_id) {
+    if (res_id.is_null()) {
+      graphics_state.ps      = ID{0};
+      graphics_state.ps_hash = 0;
+      return;
+    }
     ASSERT_DEBUG(res_id.type == (i32)rd::Type::Shader);
     Shader &sh             = shaders[res_id.id];
     graphics_state.ps      = res_id.id;
@@ -808,6 +1418,9 @@ struct Window {
   void IA_set_topology(VkPrimitiveTopology topo) { graphics_state.topology = topo; }
 
   void IA_bind_index_buffer(Resource_ID res_id, u32 offset, VkFormat format) {
+    if (res_id.is_null()) {
+      return;
+    }
     ASSERT_DEBUG(res_id.type == (i32)rd::Type::Buffer);
     Buffer &    buf = buffers[res_id.id];
     VkIndexType type;
@@ -821,6 +1434,9 @@ struct Window {
 
   void IA_bind_vertex_buffer(Resource_ID res_id, u32 binding, u32 offset, u32 stride,
                              VkVertexInputRate rate) {
+    if (res_id.is_null()) {
+      return;
+    }
     ASSERT_DEBUG(res_id.type == (i32)rd::Type::Buffer);
     Buffer &     buf     = buffers[res_id.id];
     VkDeviceSize doffset = (VkDeviceSize)offset;
@@ -848,7 +1464,16 @@ struct Window {
     graphics_state.cull_mode  = cm;
   }
 
-  void bind_graphics_pipeline() {}
+  void bind_graphics_pipeline() {
+    if (!pipeline_cache.contains(graphics_state)) {
+      Graphics_Pipeline_Wrapper gw;
+      ASSERT_DEBUG(!graphics_state.ps.is_null());
+      ASSERT_DEBUG(!graphics_state.vs.is_null());
+      Shader &ps = shaders[graphics_state.ps];
+      Shader &vs = shaders[graphics_state.vs];
+      gw.init(device, vs, ps, graphics_state);
+    }
+  }
 
   void draw_indexed_instanced(u32 index_count, u32 instance_count, u32 start_index,
                               i32 start_vertex, u32 start_instance) {
@@ -857,14 +1482,14 @@ struct Window {
                      start_instance);
   }
 
-  u32 shader_get_input_location(Resource_ID res_id, string_ref name) {
-    ASSERT_DEBUG(res_id.type == (i32)rd::Type::Shader);
-    Shader &sh = shaders[res_id.id];
-    ito(sh.attributes.size) {
-      if (sh.attributes[i].name == name) return sh.attributes[i].location;
-    }
-    TRAP;
-  }
+  //  u32 shader_get_input_location(Resource_ID res_id, string_ref name) {
+  //    ASSERT_DEBUG(res_id.type == (i32)rd::Type::Shader);
+  //    Shader &sh = shaders[res_id.id];
+  //    ito(sh.attributes.size) {
+  //      if (sh.attributes[i].name == name) return sh.attributes[i].location;
+  //    }
+  //    TRAP;
+  //  }
 
   void release_swapchain() {
     if (swapchain != VK_NULL_HANDLE) {
@@ -1116,7 +1741,8 @@ struct Window {
       //      vkGetPhysicalDeviceQueueFamilyProperties2KHR(physdevice_handles[i],
       //                                                   &num_queue_family_properties, NULL);
       //      vkGetPhysicalDeviceQueueFamilyProperties2KHR(
-      //          physdevice_handles[i], &num_queue_family_properties, queue_family_properties2KHR);
+      //          physdevice_handles[i], &num_queue_family_properties,
+      //          queue_family_properties2KHR);
       //    }
     }
     char const *       device_extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
@@ -1318,7 +1944,66 @@ struct Renderign_Evaluator final : public IEvaluator {
   Window             wnd;
   Pool<Render_Value> rd_values;
   Pool<>             tmp_values;
-  void               init() {
+  // scratch state
+  struct Scratch_State {
+    string_ref        name;
+    i32               index_count;
+    i32               instance_count;
+    i32               start_index;
+    i32               start_vertex;
+    i32               start_innstance;
+    i32               offset;
+    i32               binding;
+    i32               location;
+    i32               stride;
+    VkVertexInputRate rate;
+    VkFormat          format;
+    VkFrontFace       front_face;
+    VkCullModeFlags   cull_mode;
+    void              clear() { memset(this, 0, sizeof(*this)); }
+    void              eval(List *l) {
+      if (l->child != NULL) {
+        eval(l->child);
+      } else if (l->cmp_symbol("offset")) {
+        ASSERT_DEBUG(parse_decimal_int(l->next->symbol.ptr, l->next->symbol.len, &offset));
+      } else if (l->cmp_symbol("binding")) {
+        ASSERT_DEBUG(parse_decimal_int(l->next->symbol.ptr, l->next->symbol.len, &binding));
+      } else if (l->cmp_symbol("stride")) {
+        ASSERT_DEBUG(parse_decimal_int(l->next->symbol.ptr, l->next->symbol.len, &stride));
+      } else if (l->cmp_symbol("location")) {
+        ASSERT_DEBUG(parse_decimal_int(l->next->symbol.ptr, l->next->symbol.len, &location));
+      } else if (l->cmp_symbol("format")) {
+        format = parse_format(l->next->symbol);
+      } else if (l->cmp_symbol("name")) {
+        name = l->next->symbol;
+      } else if (l->cmp_symbol("rate")) {
+        if (l->next->cmp_symbol("PER_VERTEX")) {
+          rate = VK_VERTEX_INPUT_RATE_VERTEX;
+        } else if (l->next->cmp_symbol("PER_INSTANCE")) {
+          rate = VK_VERTEX_INPUT_RATE_INSTANCE;
+        } else {
+          TRAP;
+        }
+      } else if (l->cmp_symbol("front_face")) {
+        if (l->next->cmp_symbol("CCW")) {
+          front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        } else if (l->next->cmp_symbol("CW")) {
+          front_face = VK_FRONT_FACE_CLOCKWISE;
+        } else {
+          TRAP;
+        }
+      } else if (l->cmp_symbol("cull_mode")) {
+        if (l->next->cmp_symbol("NONE")) {
+          cull_mode = VK_CULL_MODE_NONE;
+        } else if (l->next->cmp_symbol("FRONT")) {
+          cull_mode = VK_CULL_MODE_FRONT_BIT;
+        } else {
+          TRAP;
+        }
+      }
+    }
+  } scratch;
+  void init() {
     rd_values  = Pool<Render_Value>::create(1 << 10);
     tmp_values = Pool<>::create(1 << 10);
     wnd.init();
@@ -1333,11 +2018,13 @@ struct Renderign_Evaluator final : public IEvaluator {
     state->enter_scope();
     tmp_values.enter_scope();
     rd_values.enter_scope();
+    string_storage.enter_scope();
   }
   void exit_scope() {
     state->exit_scope();
     tmp_values.exit_scope();
     rd_values.exit_scope();
+    string_storage.exit_scope();
   }
   void release() override {
     wnd.release();
@@ -1531,51 +2218,7 @@ struct Renderign_Evaluator final : public IEvaluator {
       return NULL;
     } else if (l->cmp_symbol("create_shader")) {
       return wrap_resource(wnd.alloc_shader(l));
-    }
-    // else if (l->cmp_symbol("build_shader")) {
-    //   Shader_Builder builder;
-    //   builder.init();
-    //   builder.eval(l);
-    //   string_ref          text = move_cstr(builder.get_str());
-    //   shaderc_shader_kind kind = builder.kind;
-    //   builder.release();
-    //   return wrap_shader_source(text, kind);
-    // } else if (l->cmp_symbol("compile_shader")) {
-    //   SmallArray<Value *, 4> args;
-    //   args.init();
-    //   defer(args.release());
-    //   eval_args_and_collect(l->next, args);
-    //   ASSERT_EVAL(args.size == 1);
-    //   ASSERT_EVAL(args[0]->type == (i32)Value::Value_t::ANY &&
-    //               args[0]->any_type == (i32)Render_Value_t::SHADER_SOURCE);
-    //   Render_Value *            val_1    = (Render_Value *)args[0]->any;
-    //   string_ref                text     = val_1->shsrc.text;
-    //   shaderc_shader_kind       kind     = val_1->shsrc.kind;
-    //   shaderc_compiler_t        compiler = shaderc_compiler_initialize();
-    //   shaderc_compile_options_t options  = shaderc_compile_options_initialize();
-    //   shaderc_compile_options_set_source_language(options, shaderc_source_language_glsl);
-    //   shaderc_compile_options_set_target_spirv(options, shaderc_spirv_version_1_3);
-    //   shaderc_compile_options_set_target_env(options, shaderc_target_env_vulkan,
-    //                                          shaderc_env_version_vulkan_1_2);
-    //   shaderc_compilation_result_t result =
-    //       shaderc_compile_into_spv(compiler, text.ptr, text.len, kind, "tmp.lsp", "main",
-    //       options);
-    //   defer({
-    //     shaderc_result_release(result);
-    //     shaderc_compiler_release(compiler);
-    //     shaderc_compile_options_release(options);
-    //   });
-    //   if (shaderc_result_get_compilation_status(result) != shaderc_compilation_status_success) {
-    //     state->push_error("%.*s\n", STRF(text));
-    //     state->push_error(shaderc_result_get_error_message(result));
-    //     TRAP;
-    //   }
-    //   size_t      len    = shaderc_result_get_length(result);
-    //   u32 *       spv    = (u32 *)shaderc_result_get_bytes(result);
-    //   Resource_ID res_id = wnd.alloc_shader(len, spv);
-    //   return wrap_resource(res_id);
-    // }
-    else if (l->cmp_symbol("VS_bind_shader")) {
+    } else if (l->cmp_symbol("VS_bind_shader")) {
       SmallArray<Value *, 1> args;
       args.init();
       defer(args.release());
@@ -1586,6 +2229,94 @@ struct Renderign_Evaluator final : public IEvaluator {
       Render_Value *rval = (Render_Value *)args[0]->any;
       wnd.VS_bind_shader(rval->res_id);
       return NULL;
+    } else if (l->cmp_symbol("PS_bind_shader")) {
+      SmallArray<Value *, 1> args;
+      args.init();
+      defer(args.release());
+      eval_args_and_collect(l->next, args);
+      ASSERT_EVAL(args.size = 1);
+      ASSERT_EVAL(args[0]->type == (i32)Value::Value_t::ANY &&
+                  args[0]->any_type == (i32)Render_Value_t::RESOURCE_ID);
+      Render_Value *rval = (Render_Value *)args[0]->any;
+      wnd.PS_bind_shader(rval->res_id);
+      return NULL;
+    } else if (l->cmp_symbol("IA_set_topology")) {
+      SmallArray<Value *, 1> args;
+      args.init();
+      defer(args.release());
+      eval_args_and_collect(l->next, args);
+      ASSERT_EVAL(args.size = 1);
+      ASSERT_EVAL(args[0]->type == (i32)Value::Value_t::SYMBOL);
+      VkPrimitiveTopology topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+      if (args[0]->str == stref_s("TRIANGLE_LIST")) {
+        topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+      } else if (args[0]->str == stref_s("LINE_LIST")) {
+        topo = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+      } else {
+        TRAP;
+      }
+      wnd.IA_set_topology(topo);
+      return NULL;
+    } else if (l->cmp_symbol("IA_bind_index_buffer")) {
+      Value *buf = global_eval(l->next).unwrap();
+      ASSERT_EVAL(buf != NULL && buf->type == (i32)Value::Value_t::ANY &&
+                  buf->any_type == (i32)Render_Value_t::RESOURCE_ID);
+      Render_Value *rval = (Render_Value *)buf->any;
+      scratch.clear();
+      List *cur = l->next->next;
+      while (cur != NULL) {
+        scratch.eval(cur);
+        cur = cur->next;
+      }
+      wnd.IA_bind_index_buffer(rval->res_id, scratch.offset, scratch.format);
+      return NULL;
+    } else if (l->cmp_symbol("IA_bind_vertex_buffer")) {
+      Value *buf = global_eval(l->next).unwrap();
+      ASSERT_EVAL(buf != NULL && buf->type == (i32)Value::Value_t::ANY &&
+                  buf->any_type == (i32)Render_Value_t::RESOURCE_ID);
+      Render_Value *rval = (Render_Value *)buf->any;
+      scratch.clear();
+      List *cur = l->next->next;
+      while (cur != NULL) {
+        scratch.eval(cur);
+        cur = cur->next;
+      }
+      wnd.IA_bind_vertex_buffer(rval->res_id, scratch.binding, scratch.offset, scratch.stride,
+                                scratch.rate);
+      return NULL;
+    } else if (l->cmp_symbol("IA_bind_attribute")) {
+      scratch.clear();
+      List *cur = l->next->next;
+      while (cur != NULL) {
+        scratch.eval(cur);
+        cur = cur->next;
+      }
+      wnd.IA_bind_attribute(scratch.location, scratch.binding, scratch.offset, scratch.format);
+      return NULL;
+    } else if (l->cmp_symbol("IA_set_cull_mode")) {
+      scratch.clear();
+      List *cur = l->next->next;
+      while (cur != NULL) {
+        scratch.eval(cur);
+        cur = cur->next;
+      }
+      wnd.IA_set_cull_mode(scratch.front_face, scratch.cull_mode);
+      return NULL;
+    } else if (l->cmp_symbol("draw_indexed_instanced")) {
+      scratch.clear();
+      List *cur = l->next->next;
+      while (cur != NULL) {
+        scratch.eval(cur);
+        cur = cur->next;
+      }
+      wnd.draw_indexed_instanced(scratch.index_count, scratch.instance_count, scratch.start_index,
+                                 scratch.start_vertex, scratch.start_innstance);
+      return NULL;
+    } else if (l->cmp_symbol("clear_state")) {
+      wnd.graphics_state.reset();
+      return NULL;
+    } else if (l->cmp_symbol("nil")) {
+      return wrap_resource(Resource_ID{{0}, 0});
     }
     if (prev != NULL) return prev->eval(l);
     return {NULL, false};

@@ -462,7 +462,7 @@ void parse_and_eval(string_ref text) {
   list_allocator.state = &state;
   List *root           = List::parse(text, list_allocator);
   if (root == NULL) {
-    state.push_error("Couldn't parse");
+    push_error("Couldn't parse");
     return;
   }
   root->dump_list_graph();

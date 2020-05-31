@@ -892,6 +892,14 @@ struct Hash_Table {
       }
     }
   }
+  template <typename F> void iter_values(F f) {
+    ito(set.arr.size) {
+      auto &item = set.arr[i];
+      if (item.hash != 0) {
+        f(item.key.value);
+      }
+    }
+  }
 };
 
 #endif

@@ -515,26 +515,6 @@ struct Evaluator_State {
     new_ptr[old.len]   = '\0';
     return new_ref;
   }
-
-  void push_warning(char const *fmt, ...) {
-    fprintf(stdout, "[WARNING] ");
-    va_list args;
-    va_start(args, fmt);
-    vfprintf(stdout, fmt, args);
-    va_end(args);
-    fprintf(stdout, "\n");
-    fflush(stdout);
-  }
-
-  void push_error(char const *fmt, ...) {
-    fprintf(stdout, "[ERROR] ");
-    va_list args;
-    va_start(args, fmt);
-    vfprintf(stdout, fmt, args);
-    va_end(args);
-    fprintf(stdout, "\n");
-    fflush(stdout);
-  }
 };
 
 struct Match {
@@ -600,7 +580,7 @@ struct IEvaluator {
   do {                                                                                             \
     if (!(x)) {                                                                                    \
       set_error();                                                                                 \
-      state->push_error(#x);                                                                       \
+      push_error(#x);                                                                       \
       abort();                                                                                     \
       return NULL;                                                                                 \
     }                                                                                              \
@@ -612,5 +592,25 @@ struct IEvaluator {
       return NULL;                                                                                 \
     }                                                                                              \
   } while (0)
+
+static inline void push_warning(char const *fmt, ...) {
+  fprintf(stdout, "[WARNING] ");
+  va_list args;
+  va_start(args, fmt);
+  vfprintf(stdout, fmt, args);
+  va_end(args);
+  fprintf(stdout, "\n");
+  fflush(stdout);
+}
+
+static inline void push_error(char const *fmt, ...) {
+  fprintf(stdout, "[ERROR] ");
+  va_list args;
+  va_start(args, fmt);
+  vfprintf(stdout, fmt, args);
+  va_end(args);
+  fprintf(stdout, "\n");
+  fflush(stdout);
+}
 
 #endif // SCRIPT_HPP
