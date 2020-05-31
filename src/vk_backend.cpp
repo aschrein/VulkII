@@ -1209,7 +1209,7 @@ struct Window {
       Resource_Array::init();
     }
   } images;
-  struct BufferView_Array : Resource_Array<Buffer, BufferView_Array> {
+  struct BufferView_Array : Resource_Array<BufferView, BufferView_Array> {
     Window *wnd = NULL;
     void    release_item(BufferView &buf) {
       vkDestroyBufferView(wnd->device, buf.view, NULL);
@@ -1272,6 +1272,7 @@ struct Window {
       Resource_Array::init();
     }
   } pipelines;
+  ID                                                             cur_pass;
   Hash_Table<string_ref, ID>                                     named_render_passes;
   Graphics_Pipeline_State                                        graphics_state;
   Hash_Table<string_ref, Resource_ID>                            named_resources;
@@ -1285,6 +1286,11 @@ struct Window {
     buffers.init(this);
     images.init(this);
     shaders.init(this);
+    buffer_views.init(this);
+    image_views.init(this);
+    render_passes.init(this);
+    rts.init(this);
+    pipelines.init(this);
   }
 
   void release() {
@@ -1294,6 +1300,11 @@ struct Window {
     images.release();
     named_render_passes.release();
     shaders.release();
+    buffer_views.release();
+    image_views.release();
+    render_passes.release();
+    rts.release();
+    pipelines.release();
     ito(mem_chunks.size) mem_chunks[i].release(device);
     mem_chunks.release();
     vkDeviceWaitIdle(device);
@@ -1471,11 +1482,12 @@ struct Window {
 
   void invalidate_cache() {}
 
-  void create_render_pass(string_ref name, u32 width, u32 height, string_ref *deps, u32 num_deps,
-                          string_ref *rts_names, rd::RT *rts, u32 num_rts, List *src) {
-    TMP_STORAGE_SCOPE;
+  Resource_ID create_render_pass(string_ref name, u32 width, u32 height, string_ref *deps,
+                                 u32 num_deps, string_ref *rts_names, rd::RT *rts, u32 num_rts,
+                                 List *src) {
     if (named_render_passes.contains(name)) {
-      Render_Pass &pass       = render_passes[named_render_passes.get(name)];
+      ID           pass_id    = named_render_passes.get(name);
+      Render_Pass &pass       = render_passes[pass_id];
       bool         invalidate = false;
       if (                              //
           pass.width != width ||        //
@@ -1486,11 +1498,11 @@ struct Window {
       }
 
       if (invalidate) {
-        render_passes.remove(pass.get_id(), 3);
+        render_passes.remove(pass_id, 3);
         invalidate_cache();
         goto make_new;
       } else
-        return;
+        return {pass_id, (i32)rd::Type::RenderPass};
     }
 
   make_new:
@@ -1561,13 +1573,72 @@ struct Window {
       }
       attachments.push(attachment);
     }
+    VkRenderPassCreateInfo cinfo;
+    MEMZERO(cinfo);
+    cinfo.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    cinfo.attachmentCount = attachments.size;
+    cinfo.pAttachments    = &attachments[0];
+
+    VkSubpassDescription  subpass;
+    VkAttachmentReference depth_attachment;
+    MEMZERO(subpass);
+    subpass.pipelineBindPoint    = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = refs.size;
+    subpass.pColorAttachments    = &refs[0];
+    if (!pass.depth_target.is_null()) {
+      MEMZERO(depth_attachment);
+      depth_attachment.attachment     = depth_attachment_id;
+      depth_attachment.layout         = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+      subpass.pDepthStencilAttachment = &depth_attachment;
+    }
+    cinfo.pSubpasses   = &subpass;
+    cinfo.subpassCount = 1;
+
+    VkSubpassDependency dependency;
+    MEMZERO(dependency);
+    dependency.srcSubpass    = VK_SUBPASS_EXTERNAL;
+    dependency.dstSubpass    = 0;
+    dependency.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.srcAccessMask = 0;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+    cinfo.pDependencies   = &dependency;
+    cinfo.dependencyCount = 1;
+
+    VK_ASSERT_OK(vkCreateRenderPass(device, &cinfo, NULL, &pass.pass));
+
+    {
+      SmallArray<VkImageView, 8> views;
+      views.init();
+      defer(views.release());
+      ito(pass.rts.size) {
+        Resource_ID res_id = named_resources.get(pass.rts[i]);
+        ASSERT_ALWAYS(res_id.type == (i32)rd::Type::RT);
+        RT &       rt   = this->rts[res_id.id];
+        ImageView &view = image_views[rt.view_id];
+        views.push(view.view);
+      }
+      VkFramebufferCreateInfo info;
+      MEMZERO(info);
+      info.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+      info.attachmentCount = views.size;
+      info.width           = width;
+      info.height          = height;
+      info.layers          = 1;
+      info.pAttachments    = &views[0];
+      info.renderPass      = pass.pass;
+      VK_ASSERT_OK(vkCreateFramebuffer(device, &info, NULL, &pass.fb));
+    }
+    return {render_passes.push(pass), (i32)rd::Type::RenderPass};
   }
 
   Resource_ID create_rt(rd::RT desc, u32 width, u32 height) {
-    Resource_ID image      = create_image(width, height, 1, 1, 1, to_vk_format(desc.format),
-                                     desc.type == rd::RT_t::Color ? (i32)rd::Image_Usage_Bits::USAGE_RT
-                                                                  : (i32)rd::Image_Usage_Bits::USAGE_DT,
-                                     (i32)rd::Memory_Bits::DEVICE);
+    Resource_ID image =
+        create_image(width, height, 1, 1, 1, to_vk_format(desc.format),
+                     desc.type == rd::RT_t::Color ? (i32)rd::Image_Usage_Bits::USAGE_RT
+                                                  : (i32)rd::Image_Usage_Bits::USAGE_DT,
+                     (i32)rd::Memory_Bits::DEVICE);
     Resource_ID image_view = create_image_view(image, 0, 1, 0, 1);
     RT          rt;
     rt.img_id  = image.id;
@@ -1692,7 +1763,7 @@ struct Window {
                      reqs.memoryTypeBits);
 
       ASSERT_DEBUG(new_chunk.has_space(reqs.size));
-      u32 offset              = new_chunk.alloc(reqs.alignment, reqs.size);
+      u32 offset                = new_chunk.alloc(reqs.alignment, reqs.size);
       new_image.mem_chunk_index = (u32)mem_chunks.size;
       new_image.mem_offset      = offset;
       mem_chunks.push(new_chunk);
@@ -1809,7 +1880,9 @@ struct Window {
       ASSERT_DEBUG(!graphics_state.vs.is_null());
       Shader &ps = shaders[graphics_state.ps];
       Shader &vs = shaders[graphics_state.vs];
-      gw.init(device, vs, ps, graphics_state);
+      ASSERT_DEBUG(!cur_pass.is_null());
+      Render_Pass &pass = render_passes[cur_pass];
+      gw.init(device, pass, vs, ps, graphics_state);
     }
   }
 
@@ -2155,6 +2228,11 @@ struct Window {
     buffers.tick();
     images.tick();
     shaders.tick();
+    buffer_views.tick();
+    image_views.tick();
+    render_passes.tick();
+    rts.tick();
+    pipelines.tick();
   restart:
     update_surface_size();
     if (window_width != (i32)sc_extent.width || window_height != (i32)sc_extent.height) {
@@ -2465,6 +2543,11 @@ struct Renderign_Evaluator final : public IEvaluator {
       wnd.buffers.dump();
       wnd.images.dump();
       wnd.shaders.dump();
+      wnd.buffer_views.dump();
+      wnd.image_views.dump();
+      wnd.render_passes.dump();
+      wnd.rts.dump();
+      wnd.pipelines.dump();
       fprintf(stdout, "num mem chunks: %i\n", (i32)wnd.mem_chunks.size);
       ito(wnd.mem_chunks.size) wnd.mem_chunks[i].dump();
       return NULL;
