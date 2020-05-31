@@ -19,7 +19,7 @@ struct Resource_ID {
 
 namespace rd {
 enum class RT_t { Color, Depth };
-enum class Type { RT, Image, Buffer, Shader, Dummy };
+enum class Type { RT, Image, Buffer, ImageView, BufferView, Pass, Shader, Pipe, Dummy };
 enum class Cmp_t { LT, LE, GT, GE, EQ };
 enum class Primitive_t { TRIANGLE_LIST, LINE_LIST };
 enum class Front_Face { CW, CCW };
@@ -39,6 +39,7 @@ enum class Format {
   RGB32_FLOAT,
   RG32_FLOAT,
   R32_FLOAT,
+  D32_FLOAT,
 };
 
 enum class Buffer_Usage_Bits : uint32_t {
@@ -52,6 +53,8 @@ enum class Buffer_Usage_Bits : uint32_t {
 enum class Image_Usage_Bits : uint32_t {
   USAGE_SAMPLED = 1,
   USAGE_UAV     = 2,
+  USAGE_RT      = 4,
+  USAGE_DT      = 8,
 };
 
 enum class Memory_Bits : uint32_t {

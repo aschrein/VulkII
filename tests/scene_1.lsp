@@ -78,38 +78,51 @@
     )
     (render-loop
       (start_frame)
-      ; start rendering
-      (VS_bind_shader vs)
-      (PS_bind_shader ps)
-      (IA_set_topology TRIANGLE_LIST)
-      (IA_bind_index_buffer index_buf
-        (offset 0)
-        (format R32_UINT)
+      (start_render_pass "initial"
+        (width  #)
+        (height #)
+        (produce
+          (target COLOR)
+          (format RGBA32_FLOAT)
+        )
+        (produce
+          (target DEPTH)
+          (format D32_FLOAT)
+        )
+        (body
+          (VS_bind_shader vs)
+          (PS_bind_shader ps)
+          (IA_set_topology TRIANGLE_LIST)
+          (IA_bind_index_buffer index_buf
+            (offset 0)
+            (format R32_UINT)
+          )
+          (IA_bind_vertex_buffer vertex_buf
+            (binding 0)
+            (offset  0)
+            (stride  12)
+            (rate    PER_VERTEX)
+          )
+          (IA_bind_attribute
+            (location 0)
+            (binding  0)
+            (offset   0)
+            (format   RGB32_FLOAT)
+          )
+          (IA_set_cull_mode
+            (front_face CW)
+            (cull_mode NONE)
+          )
+          (draw_indexed_instanced
+            (index_count    3)
+            (instance_count 1)
+            (start_index    0)
+            (start_vertex   0)
+            (start_instace  0)
+          )
+          (clear_state)
+        )
       )
-      (IA_bind_vertex_buffer vertex_buf
-        (binding 0)
-        (offset  0)
-        (stride  12)
-        (rate    PER_VERTEX)
-      )
-      (IA_bind_attribute
-        (location 0)
-        (binding  0)
-        (offset   0)
-        (format   RGB32_FLOAT)
-      )
-      (IA_set_cull_mode
-        (front_face CW)
-        (cull_mode NONE)
-      )
-      (draw_indexed_instanced
-        (index_count    3)
-        (instance_count 1)
-        (start_index    0)
-        (start_vertex   0)
-        (start_instace  0)
-      )
-      (clear_state)
       ; end rendering
 ;;      (print "next frame")
       (show_stats)
