@@ -62,10 +62,10 @@ enum class Memory_Bits : uint32_t {
   DEVICE   = 2,
 };
 
-struct RT {
-  Format format;
-  RT_t   type;
-};
+//struct RT {
+//  Format format;
+//  RT_t   type;
+//};
 
 struct Image {
   Format format;
@@ -80,15 +80,15 @@ struct Buffer {
   u32 size;
 };
 
-struct Resource {
-  string_ref name;
-  Type       type;
-  union {
-    Buffer buffer_info;
-    Image  image_info;
-    RT     rt_info;
-  };
-};
+//struct Resource {
+//  string_ref name;
+//  Type       type;
+//  union {
+//    Buffer buffer_info;
+//    Image  image_info;
+//    RT     rt_info;
+//  };
+//};
 
 struct Buffer_Ref {
   ID  buf_id;

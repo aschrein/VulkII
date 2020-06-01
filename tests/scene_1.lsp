@@ -81,12 +81,14 @@
       (start_render_pass "initial"
         (width  #)
         (height #)
-        (produce
-          (target COLOR)
+        (add_render_target
+          (name "initial/color")
+          (rt_type COLOR)
           (format RGBA32_FLOAT)
         )
-        (produce
-          (target DEPTH)
+        (add_render_target
+          (name "initial/depth")
+          (rt_type DEPTH)
           (format D32_FLOAT)
         )
         (body

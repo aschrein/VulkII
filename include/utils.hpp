@@ -344,6 +344,30 @@ struct string_ref {
   string_ref  substr(size_t offset, size_t new_len) { return string_ref{ptr + offset, new_len}; }
 };
 
+static inline i32 str_match(char const *cur, char const *patt) {
+  i32 i = 0;
+  while (true) {
+    if (cur[i] == '\0' || patt[i] == '\0') return i;
+    if (cur[i] == patt[i]) {
+      i++;
+    } else {
+      return -1;
+    }
+  }
+}
+
+static inline i32 str_find(char const *cur, size_t maxlen, char c) {
+  size_t i = 0;
+  while (true) {
+    if (i == maxlen) return -1;
+    if (cur[i] == '\0') return -1;
+    if (cur[i] == c) {
+      return (i32)i;
+    }
+    i++;
+  }
+}
+
 // for printf
 #define STRF(str) (i32) str.len, str.ptr
 
@@ -729,7 +753,7 @@ struct Hash_Set {
     for (; attempt_id < MAX_ATTEMPTS; ++attempt_id) {
       uint64_t id = hash % size;
       if (hash != 0) {
-        if (arr.ptr[id].key == key) {
+        if (arr.ptr[id].hash != 0 && arr.ptr[id].key == key) {
           return (i32)id;
         }
       }
@@ -878,7 +902,7 @@ struct Hash_Table {
     return &set.arr[id].key.value;
   }
 
-  bool remove(K key) { return set.remove(Map_Pair<K, V>{.key = key, .value = {}}); }
+  void remove(K key) { return set.remove(Map_Pair<K, V>{.key = key, .value = {}}); }
 
   bool insert(K key, V value) { return set.insert(Map_Pair<K, V>{.key = key, .value = value}); }
 
