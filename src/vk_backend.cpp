@@ -457,6 +457,37 @@ struct Image : public Ref_Cnt {
   VkImageAspectFlags aspect;
   VkImage            image;
   VkImageCreateInfo  create_info;
+  bool               is_depth_image() {
+    switch (create_info.format) {
+    case VK_FORMAT_D16_UNORM:
+    case VK_FORMAT_D16_UNORM_S8_UINT:
+    case VK_FORMAT_D24_UNORM_S8_UINT:
+    case VK_FORMAT_D32_SFLOAT:
+    case VK_FORMAT_D32_SFLOAT_S8_UINT: return true;
+    default: return false;
+    }
+  }
+  void barrier(VkCommandBuffer cmd, VkAccessFlags new_access_flags, VkImageLayout new_layout) {
+    VkImageMemoryBarrier bar;
+    MEMZERO(bar);
+    bar.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    bar.srcAccessMask                   = access_flags;
+    bar.dstAccessMask                   = new_access_flags;
+    bar.oldLayout                       = layout;
+    bar.newLayout                       = new_layout;
+    bar.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+    bar.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+    bar.image                           = image;
+    bar.subresourceRange.aspectMask     = aspect;
+    bar.subresourceRange.baseArrayLayer = 0;
+    bar.subresourceRange.baseMipLevel   = 0;
+    bar.subresourceRange.layerCount     = create_info.arrayLayers;
+    bar.subresourceRange.levelCount     = create_info.mipLevels;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &bar);
+    layout       = new_layout;
+    access_flags = new_access_flags;
+  }
 };
 
 struct ImageView : public Slot {
@@ -548,7 +579,6 @@ struct Graphics_Pipeline_State {
   ID                                ps, vs;
   u64                               ps_hash, vs_hash;
   ID                                pass;
-  u64                               dummy; // used for hashing to emulate C string
   bool                              operator==(const Graphics_Pipeline_State &that) const {
     return memcmp(this, &that, sizeof(*this)) == 0;
   }
@@ -557,7 +587,9 @@ struct Graphics_Pipeline_State {
   }
 };
 
-u64 hash_of(Graphics_Pipeline_State const &state) { return hash_of((char const *)&state); }
+u64 hash_of(Graphics_Pipeline_State const &state) {
+  return hash_of(string_ref{(char const *)&state, sizeof(state)});
+}
 
 struct Shader : public Ref_Cnt {
   List *root;
@@ -772,9 +804,10 @@ struct Graphics_Pipeline_Wrapper : public Slot {
     uniform_slots.init();
     global_slots.init();
     (void)pipeline_info;
-    SmallArray<VkDescriptorSetLayoutBinding, 8> set_bindings;
-    set_bindings.init();
-    defer(set_bindings.release());
+    constexpr u32                MAX_BINDINGS = 0x40;
+    VkDescriptorBindingFlags     binding_flags[MAX_BINDINGS];
+    u32                          num_bindings = 0;
+    VkDescriptorSetLayoutBinding set_bindings[MAX_BINDINGS];
     {
       Shader_Builder vsbuilder;
       vsbuilder.init();
@@ -856,7 +889,7 @@ struct Graphics_Pipeline_Wrapper : public Slot {
         set_binding.descriptorType     = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         set_binding.pImmutableSamplers = NULL;
         set_binding.stageFlags         = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
-        set_bindings.push(set_binding);
+        set_bindings[num_bindings++]   = set_binding;
       }
       u32 uniform_offset = 0;
       common_header.putf("layout(set = %i, binding = %i, std140) uniform UBO_t {\n", set_counter,
@@ -879,7 +912,7 @@ struct Graphics_Pipeline_Wrapper : public Slot {
           set_binding.descriptorType     = glob.get_desc_type();
           set_binding.pImmutableSamplers = NULL;
           set_binding.stageFlags         = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
-          set_bindings.push(set_binding);
+          set_bindings[num_bindings++]   = set_binding;
         }
         global_slots.insert(relocate_cstr(glob.name), Pair<u32, u32>{set_counter, binding_counter});
         print_global(common_header, glob, set_counter, binding_counter);
@@ -915,6 +948,8 @@ struct Graphics_Pipeline_Wrapper : public Slot {
     VkPipelineShaderStageCreateInfo stages[2];
     {
       VkPipelineShaderStageCreateInfo stage;
+      MEMZERO(stage);
+      stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
       stage.stage  = VK_SHADER_STAGE_VERTEX_BIT;
       stage.module = vs_module;
       stage.pName  = "main";
@@ -922,6 +957,8 @@ struct Graphics_Pipeline_Wrapper : public Slot {
     }
     {
       VkPipelineShaderStageCreateInfo stage;
+      MEMZERO(stage);
+      stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
       stage.stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
       stage.module = ps_module;
       stage.pName  = "main";
@@ -929,24 +966,23 @@ struct Graphics_Pipeline_Wrapper : public Slot {
     }
     {
       VkDescriptorSetLayoutBindingFlagsCreateInfo binding_infos;
-      SmallArray<VkDescriptorBindingFlags, 8>     binding_flags;
-      binding_flags.init();
-      defer(binding_flags.release());
-      ito(set_bindings.size) {
+
+      ito(num_bindings) {
         if (set_bindings[i].descriptorCount > 1) {
-          binding_flags.push(VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT);
+          binding_flags[i] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
         } else {
-          binding_flags.push(0);
+          binding_flags[i] = 0;
         }
       }
-      binding_infos.bindingCount  = binding_flags.size;
+      ASSERT_DEBUG(num_bindings < MAX_BINDINGS);
+      binding_infos.bindingCount  = num_bindings;
       binding_infos.pBindingFlags = &binding_flags[0];
       binding_infos.pNext         = NULL;
       binding_infos.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
 
       VkDescriptorSetLayoutCreateInfo set_layout_create_info;
       MEMZERO(set_layout_create_info);
-      set_layout_create_info.bindingCount = set_bindings.size;
+      set_layout_create_info.bindingCount = num_bindings;
       set_layout_create_info.pBindings    = &set_bindings[0];
       set_layout_create_info.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
       set_layout_create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -970,10 +1006,10 @@ struct Graphics_Pipeline_Wrapper : public Slot {
     {
       VkGraphicsPipelineCreateInfo info;
       MEMZERO(info);
+      info.sType  = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
       info.layout = pipeline_layout;
-      SmallArray<VkPipelineColorBlendAttachmentState, 4> blend_states;
-      blend_states.init();
-      defer({ blend_states.release(); });
+      VkPipelineColorBlendAttachmentState blend_states[0x10];
+      u32                                 num_blend_states = 0;
       // @TODO Add blend states
       ito(pass.rts.size) {
         VkPipelineColorBlendAttachmentState blend_state;
@@ -983,13 +1019,14 @@ struct Graphics_Pipeline_Wrapper : public Slot {
             VK_COLOR_COMPONENT_G_BIT | //
             VK_COLOR_COMPONENT_B_BIT | //
             VK_COLOR_COMPONENT_A_BIT;  //
-        blend_state.blendEnable = VK_FALSE;
-        blend_states.push(blend_state);
+        blend_state.blendEnable          = VK_FALSE;
+        blend_states[num_blend_states++] = blend_state;
       }
+      if (!pass.depth_target.is_null()) num_blend_states--;
       VkPipelineColorBlendStateCreateInfo blend_create_info;
       MEMZERO(blend_create_info);
       blend_create_info.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-      blend_create_info.attachmentCount = pass.rts.size;
+      blend_create_info.attachmentCount = num_blend_states;
       blend_create_info.logicOpEnable   = VK_FALSE;
       blend_create_info.pAttachments    = &blend_states[0];
       info.pColorBlendState             = &blend_create_info;
@@ -1002,6 +1039,17 @@ struct Graphics_Pipeline_Wrapper : public Slot {
       ds_create_info.depthWriteEnable = pipeline_info.enable_depth_write;
       ds_create_info.maxDepthBounds   = pipeline_info.max_depth;
       info.pDepthStencilState         = &ds_create_info;
+
+      VkViewport viewports[] = {VkViewport{0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f}};
+      VkRect2D   scissors[]  = {VkRect2D{{0, 0}, {1, 1}}};
+      VkPipelineViewportStateCreateInfo vp_create_info;
+      MEMZERO(vp_create_info);
+      vp_create_info.sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+      vp_create_info.pViewports    = viewports;
+      vp_create_info.viewportCount = 1;
+      vp_create_info.pScissors     = scissors;
+      vp_create_info.scissorCount  = 1;
+      info.pViewportState          = &vp_create_info;
 
       VkPipelineRasterizationStateCreateInfo rs_create_info;
       MEMZERO(rs_create_info);
@@ -1043,11 +1091,12 @@ struct Graphics_Pipeline_Wrapper : public Slot {
       vs_create_info.pVertexAttributeDescriptions    = pipeline_info.attributes;
       vs_create_info.vertexAttributeDescriptionCount = pipeline_info.num_attributes;
       vs_create_info.pVertexBindingDescriptions      = pipeline_info.bindings;
-      vs_create_info.vertexAttributeDescriptionCount = pipeline_info.num_bindings;
+      vs_create_info.vertexBindingDescriptionCount   = pipeline_info.num_bindings;
       info.pVertexInputState                         = &vs_create_info;
 
       info.renderPass = pass.pass;
-
+      info.pStages    = stages;
+      info.stageCount = 2;
       VK_ASSERT_OK(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &info, NULL, &pipeline));
     }
   }
@@ -1264,11 +1313,11 @@ struct Window {
       Resource_Array::init();
     }
   } pipelines;
-  ID                                                             cur_pass;
-  Hash_Table<string_ref, ID>                                     named_render_passes;
-  Graphics_Pipeline_State                                        graphics_state;
-  Hash_Table<string_ref, Resource_ID>                            named_resources;
-  Hash_Table<Graphics_Pipeline_State, Graphics_Pipeline_Wrapper> pipeline_cache;
+  ID                                      cur_pass;
+  Hash_Table<string_ref, ID>              named_render_passes;
+  Graphics_Pipeline_State                 graphics_state;
+  Hash_Table<string_ref, Resource_ID>     named_resources;
+  Hash_Table<Graphics_Pipeline_State, ID> pipeline_cache;
 
   void init_ds() {
     named_resources.init();
@@ -1853,7 +1902,13 @@ struct Window {
       ASSERT_DEBUG(!cur_pass.is_null());
       Render_Pass &pass = render_passes[cur_pass];
       gw.init(device, pass, vs, ps, graphics_state);
+      ID pipe_id = pipelines.push(gw);
+      pipeline_cache.insert(graphics_state, pipe_id);
     }
+    ID pipe_id = pipeline_cache.get(graphics_state);
+    ASSERT_DEBUG(!pipe_id.is_null());
+    Graphics_Pipeline_Wrapper &gw = pipelines[pipe_id];
+    vkCmdBindPipeline(cmd_buffers[cmd_index], VK_PIPELINE_BIND_POINT_GRAPHICS, gw.pipeline);
   }
 
   void draw_indexed_instanced(u32 index_count, u32 instance_count, u32 start_index,
@@ -2055,13 +2110,13 @@ struct Window {
 
     const char *layerNames[] = {//
                                 // "VK_LAYER_LUNARG_standard_validation" // [Deprecated]
-                                "VK_LAYER_KHRONOS_validation", NULL};
+                                "VK_LAYER_KHRONOS_validation"};
 
     VkInstanceCreateInfo info;
     MEMZERO(info);
     info.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     info.pApplicationInfo        = &app_info;
-    info.enabledLayerCount       = ARRAY_SIZE(layerNames) - 1;
+    info.enabledLayerCount       = ARRAY_SIZE(layerNames);
     info.ppEnabledLayerNames     = layerNames;
     info.enabledExtensionCount   = num_instance_extensions;
     info.ppEnabledExtensionNames = instance_extensions;
@@ -2126,29 +2181,50 @@ struct Window {
       //          queue_family_properties2KHR);
       //    }
     }
-    char const *       device_extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
-    VkDeviceCreateInfo deviceCreateInfo;
-    MEMZERO(deviceCreateInfo);
-    deviceCreateInfo.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    deviceCreateInfo.queueCreateInfoCount    = 1;
-    deviceCreateInfo.pQueueCreateInfos       = 0;
-    deviceCreateInfo.enabledLayerCount       = 0;
-    deviceCreateInfo.ppEnabledLayerNames     = 0;
-    deviceCreateInfo.enabledExtensionCount   = ARRAY_SIZE(device_extensions);
-    deviceCreateInfo.ppEnabledExtensionNames = device_extensions;
-    deviceCreateInfo.pEnabledFeatures        = 0;
-    float                   priority         = 1.0f;
+    physdevice                             = graphics_device_id;
+    char const *       device_extensions[] = {"VK_EXT_descriptor_indexing", "VK_EXT_debug_marker",
+                                       VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    VkDeviceCreateInfo device_create_info;
+    MEMZERO(device_create_info);
+    device_create_info.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    device_create_info.queueCreateInfoCount    = 1;
+    device_create_info.pQueueCreateInfos       = 0;
+    device_create_info.enabledLayerCount       = ARRAY_SIZE(layerNames);
+    device_create_info.ppEnabledLayerNames     = layerNames;
+    device_create_info.enabledExtensionCount   = ARRAY_SIZE(device_extensions);
+    device_create_info.ppEnabledExtensionNames = device_extensions;
+    device_create_info.pEnabledFeatures        = 0;
+    float                   priority           = 1.0f;
     VkDeviceQueueCreateInfo queue_create_info;
     MEMZERO(queue_create_info);
-    queue_create_info.sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-    queue_create_info.queueFamilyIndex = graphics_queue_id;
-    queue_create_info.queueCount       = 1;
-    queue_create_info.pQueuePriorities = &priority;
-    deviceCreateInfo.pQueueCreateInfos = &queue_create_info;
-    VK_ASSERT_OK(vkCreateDevice(graphics_device_id, &deviceCreateInfo, NULL, &device));
+    queue_create_info.sType              = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    queue_create_info.queueFamilyIndex   = graphics_queue_id;
+    queue_create_info.queueCount         = 1;
+    queue_create_info.pQueuePriorities   = &priority;
+    device_create_info.pQueueCreateInfos = &queue_create_info;
+
+    VkPhysicalDeviceFeatures2 pd_features2;
+    MEMZERO(pd_features2);
+    pd_features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    VkPhysicalDeviceDescriptorIndexingFeaturesEXT pd_index_features;
+    MEMZERO(pd_index_features);
+    pd_index_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT;
+    pd_features2.pNext      = ((void *)&pd_index_features);
+    vkGetPhysicalDeviceFeatures2(physdevice, &pd_features2);
+    ASSERT_DEBUG(pd_index_features.shaderSampledImageArrayNonUniformIndexing);
+    ASSERT_DEBUG(pd_index_features.descriptorBindingPartiallyBound);
+    ASSERT_DEBUG(pd_index_features.runtimeDescriptorArray);
+    VkPhysicalDeviceFeatures pd_features;
+    MEMZERO(pd_features);
+    vkGetPhysicalDeviceFeatures(physdevice, &pd_features);
+    ASSERT_DEBUG(pd_features.fillModeNonSolid);
+
+    device_create_info.pEnabledFeatures = &pd_features;
+
+    VK_ASSERT_OK(vkCreateDevice(graphics_device_id, &device_create_info, NULL, &device));
     vkGetDeviceQueue(device, graphics_queue_id, 0, &queue);
     ASSERT_ALWAYS(queue != VK_NULL_HANDLE);
-    physdevice = graphics_device_id;
+
     update_swapchain();
     {
       VkCommandPoolCreateInfo info;
@@ -2214,7 +2290,6 @@ struct Window {
     if (window_width != (i32)sc_extent.width || window_height != (i32)sc_extent.height) {
       update_swapchain();
     }
-
     cmd_index         = (frame_id++) % sc_image_count;
     VkResult wait_res = vkWaitForFences(device, 1, &frame_fences[cmd_index], VK_TRUE, 1000);
     if (wait_res == VK_TIMEOUT) {
@@ -2231,7 +2306,8 @@ struct Window {
     } else if (acquire_res != VK_SUCCESS) {
       TRAP;
     }
-
+  }
+  void end_frame() {
     VkCommandBufferBeginInfo begin_info;
     MEMZERO(begin_info);
     begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -2263,6 +2339,36 @@ struct Window {
     VkClearColorValue clear_color = {{1.0f, 0.0f, 0.0f, 1.0f}};
     vkCmdClearColorImage(cmd_buffers[cmd_index], sc_images[image_index],
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &srange);
+    render_passes.for_each([&](Render_Pass &pass) {
+      cur_pass = pass.id;
+      VkRenderPassBeginInfo binfo;
+      MEMZERO(binfo);
+      binfo.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+      binfo.clearValueCount = 0;
+      binfo.framebuffer     = pass.fb;
+      binfo.renderArea      = VkRect2D{{0, 0}, {pass.width, pass.height}};
+      binfo.renderPass      = pass.pass;
+      ito(pass.rts.size) {
+        Resource_ID res_id = named_resources.get(pass.rts[i]);
+        ASSERT_DEBUG(res_id.type == (i32)rd::Type::RT);
+        RT &   rt  = rts[res_id.id];
+        Image &img = images[rt.img_id];
+        if (img.is_depth_image())
+          img.barrier(cmd_buffers[cmd_index], VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                      VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        else
+          img.barrier(cmd_buffers[cmd_index], VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+      }
+      vkCmdBeginRenderPass(cmd_buffers[cmd_index], &binfo, VK_SUBPASS_CONTENTS_INLINE);
+      List *cur = pass.src;
+      while (cur != NULL) {
+        IEvaluator::get_head()->eval(cur);
+        cur = cur->next;
+      }
+
+      vkCmdEndRenderPass(cmd_buffers[cmd_index]);
+    });
     {
       VkImageMemoryBarrier bar;
       MEMZERO(bar);
@@ -2279,8 +2385,6 @@ struct Window {
                            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 1, &bar);
     }
     sc_image_layout[image_index] = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-  }
-  void end_frame() {
     vkEndCommandBuffer(cmd_buffers[cmd_index]);
     VkPipelineStageFlags stage_flags[]{VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
     VkSubmitInfo         submit_info;
