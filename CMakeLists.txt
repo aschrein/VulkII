@@ -19,6 +19,7 @@ src/main.cpp
 src/vk_backend.cpp
 )
 IF (WIN32)
+  set(SDL2_PATH ${CMAKE_SOURCE_DIR}/bin/SDL2)
   if(EXISTS "${SDL2_PATH}/lib/x64/SDL2.lib")
   else()
 	message(FATAL_ERROR "Please provide path to SLD2! e.g. -D SDL2_PATH=C:/SDL2")
@@ -30,9 +31,23 @@ IF (WIN32)
   set (LIBS "${SDL2_PATH}/lib/x64/SDL2.lib"
     "${SDL2_PATH}/lib/x64/SDL2main.lib"
     "$ENV{VULKAN_SDK}/lib/SPIRV-Tools-shared.lib"
-    "$ENV{VULKAN_SDK}/lib/libshaderc_shared.lib"
+    "$ENV{VULKAN_SDK}/lib/shaderc_shared.lib"
+    "$ENV{VULKAN_SDK}/lib/spirv-cross-core.lib"
     )
   set (INCLUDES "${SDL2_PATH}/include")
+  set_property(TARGET vulkii PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
+  set(CompilerFlags
+      CMAKE_CXX_FLAGS
+      CMAKE_CXX_FLAGS_DEBUG
+      CMAKE_CXX_FLAGS_RELEASE
+      CMAKE_C_FLAGS
+      CMAKE_C_FLAGS_DEBUG
+      CMAKE_C_FLAGS_RELEASE
+      )
+  foreach(CompilerFlag ${CompilerFlags})
+    string(REPLACE "/MDd" "/MD" ${CompilerFlag} "${${CompilerFlag}}")
+  endforeach()
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Od /GR- /EHs- /EHc- /D _HAS_ITERATOR_DEBUGGING=0 /D _ITERATOR_DEBUG_LEVEL=0")
 ELSE()
   set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
   set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} \
@@ -43,6 +58,7 @@ ELSE()
   set (LIBS SDL2 pthread ncurses z dl
     "$ENV{VULKAN_SDK}/lib/libSPIRV-Tools-shared.so"
     "$ENV{VULKAN_SDK}/lib/libshaderc_shared.so"
+    "$ENV{VULKAN_SDK}/lib/libspirv-cross-core.so"
     )
   set (INCLUDES "")
 ENDIF()

@@ -1,9 +1,7 @@
-#define UTILS_IMPL
+#define UTILS_TL_IMPL
 #include "utils.hpp"
 
-//#include <imgui.h>
-//#include <imgui/examples/imgui_impl_sdl.h>
-//#include <imgui/examples/imgui_impl_vulkan.h>
+#include <functional>
 
 #ifdef __linux__
 #define VK_USE_PLATFORM_XCB_KHR
@@ -16,351 +14,25 @@
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <SDL.h>
 #include <SDL_vulkan.h>
+#include <shaderc/shaderc.h>
+#include <spirv_cross/spirv_cross_c.h>
 #include <vulkan/vulkan.h>
 #endif
 
 #include "rendering.hpp"
 
-#define VK_ASSERT_OK(x)                                                                            \
-  do {                                                                                             \
-    VkResult __res = x;                                                                            \
-    if (__res != VK_SUCCESS) {                                                                     \
-      fprintf(stderr, "VkResult: %i\n", (i32)__res);                                               \
-      TRAP;                                                                                        \
-    }                                                                                              \
+#include <spirv_cross/spirv_cross.hpp>
+
+#define VK_ASSERT_OK(x)                                                        \
+  do {                                                                         \
+    VkResult __res = x;                                                        \
+    if (__res != VK_SUCCESS) {                                                 \
+      fprintf(stderr, "VkResult: %i\n", (i32)__res);                           \
+      TRAP;                                                                    \
+    }                                                                          \
   } while (0)
 
 Pool<char> string_storage = Pool<char>::create(1 << 20);
-
-VkFormat parse_format(string_ref str) {
-  if (str == stref_s("R16_FLOAT")) {
-    return VK_FORMAT_R16_SFLOAT;
-  } else if (str == stref_s("R32_FLOAT")) {
-    return VK_FORMAT_R32_SFLOAT;
-  } else if (str == stref_s("RGB32_FLOAT")) {
-    return VK_FORMAT_R32G32B32_SFLOAT;
-  } else if (str == stref_s("RGBA32_FLOAT")) {
-    return VK_FORMAT_R32G32B32A32_SFLOAT;
-  } else if (str == stref_s("R32_UINT")) {
-    return VK_FORMAT_R32_UINT;
-  } else if (str == stref_s("D32_FLOAT")) {
-    return VK_FORMAT_D32_SFLOAT;
-  } else {
-    TRAP;
-  }
-}
-
-char const *get_glsl_format(VkFormat format) {
-  if (format == VK_FORMAT_R16_SFLOAT) {
-    return "r16f";
-  } else if (format == VK_FORMAT_R32_SFLOAT) {
-    return "r32f";
-  } else if (format == VK_FORMAT_R32G32_SFLOAT) {
-    return "rg32f";
-  } else if (format == VK_FORMAT_R32G32B32_SFLOAT) {
-    return "rgb32f";
-  } else if (format == VK_FORMAT_R32G32B32A32_SFLOAT) {
-    return "rgba32f";
-  } else {
-    TRAP;
-  }
-}
-
-VkFormat to_vk_format(rd::Format format) {
-  switch (format) {
-  case rd::Format::R32_FLOAT: return VK_FORMAT_R32_SFLOAT;
-  case rd::Format::RG32_FLOAT: return VK_FORMAT_R32G32_SFLOAT;
-  case rd::Format::RGB32_FLOAT: return VK_FORMAT_R32G32B32_SFLOAT;
-  case rd::Format::RGBA32_FLOAT: return VK_FORMAT_R32G32B32A32_SFLOAT;
-  case rd::Format::RGB8_SNORM: return VK_FORMAT_R8G8B8_SNORM;
-  case rd::Format::RGBA8_SNORM: return VK_FORMAT_R8G8B8A8_SNORM;
-  case rd::Format::RGB8_SRGBA: return VK_FORMAT_R8G8B8_SRGB;
-  case rd::Format::RGBA8_SRGBA: return VK_FORMAT_R8G8B8A8_SRGB;
-  case rd::Format::D32_FLOAT: return VK_FORMAT_D32_SFLOAT;
-  default: TRAP;
-  }
-}
-
-struct String_Builder {
-  Pool<char> tmp_buf;
-  void       init() { tmp_buf = Pool<char>::create(1 << 20); }
-  void       release() { tmp_buf.release(); }
-  void       reset() { tmp_buf.reset(); }
-  string_ref get_str() { return string_ref{(char const *)tmp_buf.at(0), tmp_buf.cursor}; }
-  void       putf(char const *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    i32 len = vsprintf(tmp_buf.back(), fmt, args);
-    va_end(args);
-    ASSERT_ALWAYS(len > 0);
-    tmp_buf.advance(len);
-  }
-  void put_char(char c) { tmp_buf.put(&c, 1); }
-};
-
-struct Shader_Builder {
-  enum class Freq { PER_DC, PER_FRAME };
-  enum class Class_t {
-    NONE,
-    SRV,
-    UAV,
-  };
-  enum class Global_t {
-    SAMPLER,
-    BUFFER,
-    IMAGE,
-  };
-  enum class Layout_t {
-    NONE,
-    ROW_MAJOR,
-    COL_MAJOR,
-  };
-  struct Uniform {
-    string_ref name;
-    string_ref type;
-    u32        count;
-    Freq       freq;
-    Layout_t   layout;
-    bool       operator==(Uniform const &that) {
-      return                       //
-          name == that.name &&     //
-          type == that.type &&     //
-          count == that.count &&   //
-          layout == that.layout && //
-          freq == that.freq;       //
-    }
-  };
-  struct Global {
-    string_ref       name;
-    Global_t         type;
-    Class_t          clazz;
-    u32              dim;
-    VkFormat         format;
-    u32              count;
-    Freq             freq;
-    VkDescriptorType get_desc_type() {
-      if (type == Global_t::BUFFER) {
-        return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-      } else if (type == Global_t::IMAGE) {
-        if (clazz == Class_t::SRV) {
-          return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-        } else if (clazz == Class_t::UAV) {
-          return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        } else {
-          TRAP;
-        }
-      } else if (type == Global_t::SAMPLER) {
-        return VK_DESCRIPTOR_TYPE_SAMPLER;
-      } else {
-        TRAP;
-      }
-    }
-    bool operator==(Global const &that) {
-      return                       //
-          name == that.name &&     //
-          clazz == that.clazz &&   //
-          type == that.type &&     //
-          format == that.format && //
-          count == that.count &&   //
-          dim == that.dim &&       //
-          freq == that.freq;       //
-    }
-  };
-  struct Input {
-    string_ref name;
-    string_ref type;
-    u32        location;
-    bool       operator==(Input const &that) {
-      return                           //
-          name == that.name &&         //
-          location == that.location && //
-          type == that.type;           //
-    }
-  };
-  struct Output {
-    string_ref name;
-    string_ref type;
-    u32        target;
-    bool       operator==(Output const &that) {
-      return                   //
-          name == that.name && //
-          type == that.type;   //
-    }
-  };
-  struct Scratch_State {
-    string_ref name;
-    string_ref type;
-    string_ref layout;
-    string_ref clazz;
-    VkFormat   format;
-    i32        count;
-    i32        target;
-    Freq       freq;
-    i32        dim;
-    i32        location;
-    void       clear() {
-      memset(this, 0, sizeof(*this));
-      format = VK_FORMAT_UNDEFINED;
-      count  = 1;
-      dim    = 1;
-      freq   = Freq::PER_DC;
-    }
-    void eval(List *l) {
-      if (l->child != NULL) {
-        eval(l->child);
-      } else if (l->cmp_symbol("type")) {
-        type = l->next->symbol;
-      } else if (l->cmp_symbol("class")) {
-        clazz = l->next->symbol;
-      } else if (l->cmp_symbol("name")) {
-        name = l->next->symbol;
-      } else if (l->cmp_symbol("layout")) {
-        layout = l->next->symbol;
-      } else if (l->cmp_symbol("freq")) {
-        if (l->next->cmp_symbol("PER_DC")) {
-          freq = Freq::PER_DC;
-        } else if (l->next->cmp_symbol("PER_FRAME")) {
-          freq = Freq::PER_FRAME;
-        } else {
-          TRAP;
-        }
-      } else if (l->cmp_symbol("format")) {
-        format = parse_format(l->next->symbol);
-      } else if (l->cmp_symbol("count")) {
-        ASSERT_DEBUG(parse_decimal_int(l->next->symbol.ptr, l->next->symbol.len, &count));
-      } else if (l->cmp_symbol("location")) {
-        ASSERT_DEBUG(parse_decimal_int(l->next->symbol.ptr, l->next->symbol.len, &location));
-      } else if (l->cmp_symbol("dim")) {
-        ASSERT_DEBUG(parse_decimal_int(l->next->symbol.ptr, l->next->symbol.len, &dim));
-      } else if (l->cmp_symbol("target")) {
-        ASSERT_DEBUG(parse_decimal_int(l->next->symbol.ptr, l->next->symbol.len, &target));
-      }
-    }
-  } scratch;
-  SmallArray<Uniform, 8> uniforms;
-  SmallArray<Global, 8>  globals;
-  SmallArray<Input, 8>   inputs;
-  SmallArray<Output, 8>  outputs;
-
-  u32        dispatch_x, dispatch_y, dispatch_z;
-  string_ref body;
-  string_ref header;
-
-  shaderc_shader_kind kind;
-  void                init() {
-
-    uniforms.init();
-    inputs.init();
-    outputs.init();
-    globals.init();
-  }
-  void release() {
-    uniforms.release();
-    inputs.release();
-    outputs.release();
-    globals.release();
-  }
-
-  void eval(List *l) {
-    if (l->child != NULL) {
-      eval(l->child);
-    } else if (l->cmp_symbol("kind")) {
-      if (l->next->cmp_symbol("pixel")) {
-        kind = shaderc_glsl_fragment_shader;
-      } else if (l->next->cmp_symbol("compute")) {
-        kind = shaderc_glsl_compute_shader;
-      } else if (l->next->cmp_symbol("vertex")) {
-        kind = shaderc_glsl_vertex_shader;
-      } else {
-        TRAP;
-      }
-    } else if (l->cmp_symbol("create_shader")) {
-      List *cur = l->next;
-      while (cur != NULL) {
-        eval(cur);
-        cur = cur->next;
-      }
-    } else if (l->cmp_symbol("header")) {
-      header = l->next->symbol;
-    } else if (l->cmp_symbol("body")) {
-      body = l->next->symbol;
-    } else if (l->cmp_symbol("input")) {
-      scratch.clear();
-      List *cur = l->next;
-      while (cur != NULL) {
-        scratch.eval(cur);
-        cur = cur->next;
-      }
-      Input input;
-      input.name     = scratch.name;
-      input.type     = scratch.type;
-      input.location = scratch.location;
-      inputs.push(input);
-    } else if (l->cmp_symbol("output")) {
-      scratch.clear();
-      List *cur = l->next;
-      while (cur != NULL) {
-        scratch.eval(cur);
-        cur = cur->next;
-      }
-      Output output;
-      output.name   = scratch.name;
-      output.type   = scratch.type;
-      output.target = scratch.target;
-      outputs.push(output);
-    } else if (l->cmp_symbol("uniform")) {
-      scratch.clear();
-      List *cur = l->next;
-      while (cur != NULL) {
-        scratch.eval(cur);
-        cur = cur->next;
-      }
-      Uniform uniform;
-      uniform.count = scratch.count;
-      uniform.freq  = scratch.freq;
-      uniform.name  = scratch.name;
-      uniform.type  = scratch.type;
-      if (scratch.layout == stref_s("row_major")) {
-        uniform.layout = Layout_t::ROW_MAJOR;
-      } else if (l->next->cmp_symbol("col_major")) {
-        uniform.layout = Layout_t::COL_MAJOR;
-      } else {
-        uniform.layout = Layout_t::NONE;
-      }
-      uniforms.push(uniform);
-    } else if (l->cmp_symbol("global")) {
-      scratch.clear();
-      List *cur = l->next;
-      while (cur != NULL) {
-        scratch.eval(cur);
-        cur = cur->next;
-      }
-      Global glob;
-      glob.count  = scratch.count;
-      glob.format = scratch.format;
-      glob.freq   = scratch.freq;
-      glob.name   = scratch.name;
-      glob.dim    = scratch.dim;
-      if (scratch.clazz == stref_s("SRV")) {
-        glob.clazz = Class_t::SRV;
-      } else if (l->next->cmp_symbol("UAV")) {
-        glob.clazz = Class_t::UAV;
-      } else {
-        TRAP;
-      }
-      if (scratch.type == stref_s("image")) {
-        glob.type = Global_t::IMAGE;
-      } else if (l->next->cmp_symbol("buffer")) {
-        glob.type = Global_t::BUFFER;
-      } else if (l->next->cmp_symbol("sampler")) {
-        glob.type = Global_t::SAMPLER;
-      } else {
-        TRAP;
-      }
-      globals.push(glob);
-    }
-  }
-};
 
 string_ref relocate_cstr(string_ref old) {
   char *     new_ptr = string_storage.put(old.ptr, old.len + 1);
@@ -378,11 +50,15 @@ struct Slot {
   void set_index(u32 index) { id._id = index + 1; }
 };
 
-enum class Resource_Type { BUFFER, TEXTURE, RT, NONE };
-
-struct Resource_Desc : public Slot {
-  Resource_Type type;
-  u32           ref;
+enum class Resource_Type : u32 {
+  BUFFER,
+  IMAGE,
+  SHADER,
+  SAMPLER,
+  PASS,
+  BUFFER_VIEW,
+  IMAGE_VIEW,
+  NONE
 };
 
 struct Ref_Cnt : public Slot {
@@ -395,14 +71,12 @@ struct Ref_Cnt : public Slot {
   void add_reference() { ref_cnt++; }
 };
 
-// 1 <<  8 = alignment
-// 1 << 17 = num of blocks
 struct Mem_Chunk : public Ref_Cnt {
-  VkDeviceMemory        mem              = VK_NULL_HANDLE;
-  VkMemoryPropertyFlags prop_flags       = 0;
-  static constexpr u32  PAGE_SIZE        = 0x1000;
-  u32                   size             = 0;
-  u32                   cursor           = 0; // points to the next free 4kb byte block
+  VkDeviceMemory        mem        = VK_NULL_HANDLE;
+  VkMemoryPropertyFlags prop_flags = 0;
+  static constexpr u32  PAGE_SIZE  = 0x1000;
+  u32                   size       = 0;
+  u32                   cursor = 0; // points to the next free 4kb byte block
   u32                   memory_type_bits = 0;
   void                  dump() {
     fprintf(stdout, "Mem_Chunk {\n");
@@ -411,8 +85,8 @@ struct Mem_Chunk : public Ref_Cnt {
     fprintf(stdout, "  cursor : %i\n", cursor);
     fprintf(stdout, "}\n");
   }
-  void init(VkDevice device, u32 num_pages, u32 heap_index, VkMemoryPropertyFlags prop_flags,
-            u32 type_bits) {
+  void init(VkDevice device, u32 num_pages, u32 heap_index,
+            VkMemoryPropertyFlags prop_flags, u32 type_bits) {
     VkMemoryAllocateInfo info;
     MEMZERO(info);
     info.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
@@ -428,18 +102,38 @@ struct Mem_Chunk : public Ref_Cnt {
   void release(VkDevice device) { vkFreeMemory(device, mem, NULL); }
   bool has_space(u32 req_size) {
     if (ref_cnt == 0) cursor = 0;
-    return cursor + ((req_size + PAGE_SIZE - 1) / PAGE_SIZE) < size;
+    return cursor + ((req_size + PAGE_SIZE - 1) / PAGE_SIZE) <= size;
   }
   u32 alloc(u32 alignment, u32 req_size) {
+    if (ref_cnt == 0) cursor = 0;
     ASSERT_DEBUG((alignment & (alignment - 1)) == 0); // PoT
-    ASSERT_DEBUG(((alignment - 1) & PAGE_SIZE) == 0); // 4kb bytes is enough to align
+    ASSERT_DEBUG(alignment < PAGE_SIZE ||
+                 (alignment & (PAGE_SIZE - 1)) == 0); // PoT
+    if (alignment > PAGE_SIZE) {
+      u32 page_alignment = alignment / PAGE_SIZE;
+      // ASSERT_DEBUG(((alignment - 1) & PAGE_SIZE) == 0); // 4kb bytes is
+      // enough to align
+      if (cursor != 0) { // Need to align
+        cursor = (cursor + page_alignment - 1) & (page_alignment - 1);
+      }
+    }
     u32 offset = cursor;
     cursor += ((req_size + PAGE_SIZE - 1) / PAGE_SIZE);
-    ASSERT_DEBUG(cursor < size);
+    ASSERT_DEBUG(cursor <= size);
     ref_cnt++;
     return offset * PAGE_SIZE;
   }
 };
+
+struct BufferView_Flags {
+  VkFormat     format;
+  VkDeviceSize offset;
+  VkDeviceSize range;
+};
+
+u64 hash_of(BufferView_Flags const &state) {
+  return hash_of(string_ref{(char const *)&state, sizeof(state)});
+}
 
 struct Buffer : public Ref_Cnt {
   ID                 mem_chunk_id;
@@ -447,7 +141,19 @@ struct Buffer : public Ref_Cnt {
   VkBuffer           buffer;
   VkBufferCreateInfo create_info;
   VkAccessFlags      access_flags;
+  InlineArray<ID, 8> views;
 };
+
+struct ImageView_Flags {
+  VkImageViewType         viewType;
+  VkFormat                format;
+  VkComponentMapping      components;
+  VkImageSubresourceRange subresourceRange;
+};
+
+u64 hash_of(ImageView_Flags const &state) {
+  return hash_of(string_ref{(char const *)&state, sizeof(state)});
+}
 
 struct Image : public Ref_Cnt {
   ID                 mem_chunk_id;
@@ -457,6 +163,7 @@ struct Image : public Ref_Cnt {
   VkImageAspectFlags aspect;
   VkImage            image;
   VkImageCreateInfo  create_info;
+  InlineArray<ID, 8> views;
   bool               is_depth_image() {
     switch (create_info.format) {
     case VK_FORMAT_D16_UNORM:
@@ -467,49 +174,154 @@ struct Image : public Ref_Cnt {
     default: return false;
     }
   }
-  void barrier(VkCommandBuffer cmd, VkAccessFlags new_access_flags, VkImageLayout new_layout) {
+  void barrier(VkCommandBuffer cmd, VkAccessFlags new_access_flags,
+               VkImageLayout new_layout) {
     VkImageMemoryBarrier bar;
     MEMZERO(bar);
-    bar.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    bar.srcAccessMask                   = access_flags;
-    bar.dstAccessMask                   = new_access_flags;
-    bar.oldLayout                       = layout;
-    bar.newLayout                       = new_layout;
-    bar.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-    bar.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-    bar.image                           = image;
-    bar.subresourceRange.aspectMask     = aspect;
+    bar.sType                       = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    bar.srcAccessMask               = access_flags;
+    bar.dstAccessMask               = new_access_flags;
+    bar.oldLayout                   = layout;
+    bar.newLayout                   = new_layout;
+    bar.srcQueueFamilyIndex         = VK_QUEUE_FAMILY_IGNORED;
+    bar.dstQueueFamilyIndex         = VK_QUEUE_FAMILY_IGNORED;
+    bar.image                       = image;
+    bar.subresourceRange.aspectMask = aspect;
     bar.subresourceRange.baseArrayLayer = 0;
     bar.subresourceRange.baseMipLevel   = 0;
     bar.subresourceRange.layerCount     = create_info.arrayLayers;
     bar.subresourceRange.levelCount     = create_info.mipLevels;
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &bar);
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0,
+                         NULL, 1, &bar);
     layout       = new_layout;
     access_flags = new_access_flags;
   }
 };
 
 struct ImageView : public Slot {
-  ID                    img_id;
-  VkImageView           view;
-  VkImageViewCreateInfo create_info;
+  ID              img_id;
+  VkImageView     view;
+  ImageView_Flags flags;
 };
 
 struct BufferView : public Slot {
-  ID                     buf_id;
-  VkBufferView           view;
-  VkBufferViewCreateInfo create_info;
+  ID               buf_id;
+  VkBufferView     view;
+  BufferView_Flags flags;
 };
 
-struct RT : public Slot {
-  ID img_id;
-  ID view_id;
+struct Sampler : public Slot {
+  rd::Sampler_Create_Info create_info;
+  VkSampler               sampler;
 };
 
-// struct Shader_Descriptor {
-//  u32                          set;
-//  VkDescriptorSetLayoutBinding layout;
+struct Shader_Descriptor {
+  string             name;
+  u32                set;
+  u32                binding;
+  VkDescriptorType   descriptorType;
+  u32                descriptorCount;
+  VkShaderStageFlags stageFlags;
+
+  void init(string             name,            //
+            u32                set,             //
+            uint32_t           binding,         //
+            VkDescriptorType   descriptorType,  //
+            uint32_t           descriptorCount, //
+            VkShaderStageFlags stageFlags) {
+    this->name            = name;
+    this->set             = set;
+    this->binding         = binding;
+    this->descriptorType  = descriptorType;
+    this->descriptorCount = descriptorCount;
+    this->stageFlags      = stageFlags;
+  }
+  void release() {
+    name.release();
+    memset(this, 0, sizeof(*this));
+  }
+};
+
+struct Shader_Descriptor_Set {
+  Array<Shader_Descriptor> descriptors;
+  void                     init() { descriptors.init(); }
+  void                     release() {
+    ito(descriptors.size) descriptors[i].release();
+    descriptors.release();
+  }
+};
+
+static Array<u32> compile_glsl(VkDevice device, string_ref text,
+                               shaderc_shader_kind           kind,
+                               Pair<string_ref, string_ref> *defines,
+                               size_t                        num_defines) {
+  shaderc_compiler_t        compiler = shaderc_compiler_initialize();
+  shaderc_compile_options_t options  = shaderc_compile_options_initialize();
+
+  ito(num_defines) shaderc_compile_options_add_macro_definition(
+      options, defines[i].first.ptr, defines[i].first.len,
+      defines[i].second.ptr, defines[i].second.len);
+
+  shaderc_compile_options_set_source_language(options,
+                                              shaderc_source_language_glsl);
+  shaderc_compile_options_set_target_spirv(options, shaderc_spirv_version_1_3);
+  shaderc_compile_options_set_target_env(options, shaderc_target_env_vulkan,
+                                         shaderc_env_version_vulkan_1_2);
+  shaderc_compilation_result_t result = shaderc_compile_into_spv(
+      compiler, text.ptr, text.len, kind, "tmp", "main", options);
+  defer({
+    shaderc_result_release(result);
+    shaderc_compiler_release(compiler);
+    shaderc_compile_options_release(options);
+  });
+  if (shaderc_result_get_compilation_status(result) !=
+      shaderc_compilation_status_success) {
+    fprintf(stderr, "%.*s\n", STRF(text));
+    fprintf(stderr, shaderc_result_get_error_message(result));
+    TRAP;
+  }
+  size_t     len      = shaderc_result_get_length(result);
+  u32 *      bytecode = (u32 *)shaderc_result_get_bytes(result);
+  Array<u32> out;
+  out.init(bytecode, len / 4);
+  return out;
+}
+
+struct Shader_Info : public Slot {
+  rd::Stage_t stage;
+  u64         hash;
+  Array<u32>  bytecode;
+  void        init(rd::Stage_t stage, u64 hash, Array<u32> bytecode) {
+    this->hash     = hash;
+    this->stage    = stage;
+    this->bytecode = bytecode;
+  }
+  VkShaderStageFlags get_stage_bits() const {
+    switch (stage) {
+    case rd::Stage_t::COMPUTE: return VK_SHADER_STAGE_COMPUTE_BIT;
+    case rd::Stage_t::PIXEL: return VK_SHADER_STAGE_FRAGMENT_BIT;
+    case rd::Stage_t::VERTEX: return VK_SHADER_STAGE_VERTEX_BIT;
+    default: UNIMPLEMENTED; ;
+    }
+  }
+  void           release() { bytecode.release(); }
+  VkShaderModule compile(VkDevice device) {
+    VkShaderModuleCreateInfo info;
+    MEMZERO(info);
+    info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    info.codeSize = bytecode.size * 4;
+    info.flags    = 0;
+    info.pCode    = bytecode.ptr;
+    VkShaderModule module;
+    VK_ASSERT_OK(vkCreateShaderModule(device, &info, NULL, &module));
+    return module;
+  }
+};
+
+// struct RT : public Slot {
+//  ID img_id;
+//  ID view_id;
 //};
 
 // struct Attribute_Source {
@@ -518,68 +330,275 @@ struct RT : public Slot {
 //  VkFormat format;
 //};
 
-struct Pass_Input {
-  string_ref name;
-  bool       history;
-  void       relocate() { name = relocate_cstr(name); }
-};
-
-struct RT_Info {
-  VkFormat format;
-  rd::RT_t type;
-};
-
 struct Render_Pass : public Slot {
-  string_ref                name;
-  SmallArray<Pass_Input, 4> deps;
-  SmallArray<string_ref, 4> rts;
-  u32                       width;
-  u32                       height;
-  Resource_ID               depth_target;
-  VkRenderPass              pass;
-  VkFramebuffer             fb;
-  List *                    src;
+  string        name;
+  u32           width;
+  u32           height;
+  u32           num_rts;
+  Resource_ID   rts[0x10];
+  Resource_ID   depth_target;
+  VkRenderPass  pass;
+  VkFramebuffer fb;
 
-  void init() {
-    memset(this, 0, sizeof(*this));
-    deps.init();
-    rts.init();
-  }
+  void init() { memset(this, 0, sizeof(*this)); }
 
   void release(VkDevice device) {
+    name.release();
     vkDestroyRenderPass(device, pass, NULL);
     vkDestroyFramebuffer(device, fb, NULL);
-    deps.release();
-    rts.release();
     memset(this, 0, sizeof(*this));
-  }
-
-  void relocate() {
-    name = relocate_cstr(name);
-    ito(deps.size) deps[i].relocate();
-    ito(rts.size) rts[i] = relocate_cstr(rts[i]);
   }
 };
 
+VkCompareOp to_vk(rd::Cmp cmp) {
+  switch (cmp) {
+  case rd::Cmp::EQ: return VK_COMPARE_OP_EQUAL;
+  case rd::Cmp::GE: return VK_COMPARE_OP_GREATER_OR_EQUAL;
+  case rd::Cmp::GT: return VK_COMPARE_OP_GREATER;
+  case rd::Cmp::LE: return VK_COMPARE_OP_LESS_OR_EQUAL;
+  case rd::Cmp::LT: return VK_COMPARE_OP_LESS;
+  default: UNIMPLEMENTED;
+  }
+}
+
+VkFilter to_vk(rd::Filter cmp) {
+  switch (cmp) {
+  case rd::Filter::NEAREST: return VK_FILTER_NEAREST;
+  case rd::Filter::LINEAR: return VK_FILTER_LINEAR;
+  default: UNIMPLEMENTED;
+  }
+}
+
+VkSamplerAddressMode to_vk(rd::Address_Mode cmp) {
+  switch (cmp) {
+  case rd::Address_Mode::REPEAT: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+  case rd::Address_Mode::CLAMP_TO_EDGE:
+    return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+  case rd::Address_Mode::MIRRORED_REPEAT:
+    return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+  default: UNIMPLEMENTED;
+  }
+}
+
+VkCullModeFlags to_vk(rd::Cull_Mode cmp) {
+  switch (cmp) {
+  case rd::Cull_Mode::BACK: return VK_CULL_MODE_BACK_BIT;
+  case rd::Cull_Mode::FRONT: return VK_CULL_MODE_FRONT_BIT;
+  case rd::Cull_Mode::NONE: return VK_CULL_MODE_NONE;
+  default: UNIMPLEMENTED;
+  }
+}
+
+VkFrontFace to_vk(rd::Front_Face cmp) {
+  switch (cmp) {
+  case rd::Front_Face::CCW: return VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  case rd::Front_Face::CW: return VK_FRONT_FACE_CLOCKWISE;
+  default: UNIMPLEMENTED;
+  }
+}
+
+VkPolygonMode to_vk(rd::Polygon_Mode cmp) {
+  switch (cmp) {
+  case rd::Polygon_Mode::FILL: return VK_POLYGON_MODE_FILL;
+  case rd::Polygon_Mode::LINE: return VK_POLYGON_MODE_LINE;
+  default: UNIMPLEMENTED;
+  }
+}
+
+VkSampleCountFlagBits to_sample_bit(u32 num_samples) {
+  switch (num_samples) {
+  case 1: return VK_SAMPLE_COUNT_1_BIT;
+  case 2: return VK_SAMPLE_COUNT_2_BIT;
+  case 4: return VK_SAMPLE_COUNT_4_BIT;
+  case 8: return VK_SAMPLE_COUNT_8_BIT;
+  case 16: return VK_SAMPLE_COUNT_16_BIT;
+  case 32: return VK_SAMPLE_COUNT_32_BIT;
+  default: UNIMPLEMENTED;
+  }
+}
+
+VkFormat to_vk(rd::Format format) {
+  // clang-format off
+  switch (format) {
+  case rd::Format::RGBA8_UNORM     : return VK_FORMAT_R8G8B8A8_UNORM      ;
+  case rd::Format::RGBA8_SNORM     : return VK_FORMAT_R8G8B8A8_SNORM      ;
+  case rd::Format::RGBA8_SRGBA     : return VK_FORMAT_R8G8B8A8_SRGB       ;
+  case rd::Format::RGBA8_UINT      : return VK_FORMAT_R8G8B8A8_UINT       ;
+  case rd::Format::RGB8_UNORM      : return VK_FORMAT_R8G8B8_UNORM        ;
+  case rd::Format::RGB8_SNORM      : return VK_FORMAT_R8G8B8A8_SNORM      ;
+  case rd::Format::RGB8_SRGBA      : return VK_FORMAT_R8G8B8A8_SRGB       ;
+  case rd::Format::RGB8_UINT       : return VK_FORMAT_R8G8B8A8_UINT       ;
+  case rd::Format::RGBA32_FLOAT    : return VK_FORMAT_R32G32B32A32_SFLOAT ;
+  case rd::Format::RGB32_FLOAT     : return VK_FORMAT_R32G32B32_SFLOAT    ;
+  case rd::Format::RG32_FLOAT      : return VK_FORMAT_R32G32_SFLOAT       ;
+  case rd::Format::R32_FLOAT       : return VK_FORMAT_R32_SFLOAT          ;
+  case rd::Format::D32_FLOAT       : return VK_FORMAT_D32_SFLOAT          ;
+  default: UNIMPLEMENTED;
+  }
+  // clang-format on
+}
+
+VkBlendFactor to_vk(rd::Blend_Factor bf) {
+  // clang-format off
+  switch (bf) {
+  case rd::Blend_Factor::ZERO                     : return VK_BLEND_FACTOR_ZERO                     ;
+  case rd::Blend_Factor::ONE                      : return VK_BLEND_FACTOR_ONE                      ;
+  case rd::Blend_Factor::SRC_COLOR                : return VK_BLEND_FACTOR_SRC_COLOR                ;
+  case rd::Blend_Factor::ONE_MINUS_SRC_COLOR      : return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR      ;
+  case rd::Blend_Factor::DST_COLOR                : return VK_BLEND_FACTOR_DST_COLOR                ;
+  case rd::Blend_Factor::ONE_MINUS_DST_COLOR      : return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR      ;
+  case rd::Blend_Factor::SRC_ALPHA                : return VK_BLEND_FACTOR_SRC_ALPHA                ;
+  case rd::Blend_Factor::ONE_MINUS_SRC_ALPHA      : return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA      ;
+  case rd::Blend_Factor::DST_ALPHA                : return VK_BLEND_FACTOR_DST_ALPHA                ;
+  case rd::Blend_Factor::ONE_MINUS_DST_ALPHA      : return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA      ;
+  case rd::Blend_Factor::CONSTANT_COLOR           : return VK_BLEND_FACTOR_CONSTANT_COLOR           ;
+  case rd::Blend_Factor::ONE_MINUS_CONSTANT_COLOR : return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR ;
+  case rd::Blend_Factor::CONSTANT_ALPHA           : return VK_BLEND_FACTOR_CONSTANT_ALPHA           ;
+  case rd::Blend_Factor::ONE_MINUS_CONSTANT_ALPHA : return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA ;
+  default: UNIMPLEMENTED;
+  }
+  // clang-format on
+}
+
+VkBlendOp to_vk(rd::Blend_OP bf) {
+  // clang-format off
+  switch (bf) {
+  case rd::Blend_OP::ADD                     : return VK_BLEND_OP_ADD;
+  case rd::Blend_OP::MAX                     : return VK_BLEND_OP_MAX;
+  case rd::Blend_OP::MIN                     : return VK_BLEND_OP_MIN;
+  case rd::Blend_OP::REVERSE_SUBTRACT        : return VK_BLEND_OP_REVERSE_SUBTRACT;
+  case rd::Blend_OP::SUBTRACT                : return VK_BLEND_OP_SUBTRACT;
+  default: UNIMPLEMENTED;
+  }
+  // clang-format on
+}
+
+u32 to_vk_buffer_usage_bits(u32 usage_bits) {
+  u32 usage = 0;
+  if (usage_bits & (i32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST) {
+    usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  }
+  if (usage_bits & (i32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC) {
+    usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  }
+  if (usage_bits & (i32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER) {
+    usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+  }
+  if (usage_bits & (i32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER) {
+    usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+  }
+  if (usage_bits & (i32)rd::Buffer_Usage_Bits::USAGE_UAV) {
+    usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+  }
+  if (usage_bits & (i32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER) {
+    usage |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+  }
+  return usage;
+}
+
+u32 to_vk_image_usage_bits(u32 usage_flags) {
+  u32 usage = 0;
+  if (usage_flags & (i32)rd::Image_Usage_Bits::USAGE_RT) {
+    usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  }
+  if (usage_flags & (i32)rd::Image_Usage_Bits::USAGE_DT) {
+    usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+  }
+  if (usage_flags & (i32)rd::Image_Usage_Bits::USAGE_SAMPLED) {
+    usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+  }
+  if (usage_flags & (i32)rd::Image_Usage_Bits::USAGE_UAV) {
+    usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+  }
+  if (usage_flags & (i32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST) {
+    usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  }
+  if (usage_flags & (i32)rd::Image_Usage_Bits::USAGE_TRANSFER_SRC) {
+    usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+  }
+  return usage;
+}
+
+u32 to_vk_memory_bits(u32 mem_bits) {
+  u32 prop_flags = 0;
+  if (mem_bits & (i32)rd::Memory_Bits::HOST_VISIBLE) {
+    prop_flags |= VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+  }
+  if (mem_bits & (i32)rd::Memory_Bits::COHERENT) {
+    prop_flags |= VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+  }
+  if (mem_bits & (i32)rd::Memory_Bits::DEVICE_LOCAL) {
+    prop_flags |= VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+  }
+  if (mem_bits & (i32)rd::Memory_Bits::HOST_CACHED) {
+    prop_flags |= VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+  }
+  return prop_flags;
+}
+
+VkBool32 to_vk(bool b) { return b ? VK_TRUE : VK_FALSE; }
+
+VkPrimitiveTopology to_vk(rd::Primitive p) {
+  switch (p) {
+  case rd::Primitive::TRIANGLE_LIST: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  case rd::Primitive::LINE_LIST: return VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+  default: UNIMPLEMENTED;
+  }
+}
+
 struct Graphics_Pipeline_State {
-  VkVertexInputBindingDescription   bindings[0x10];
-  u32                               num_bindings;
-  VkVertexInputAttributeDescription attributes[0x10];
-  u32                               num_attributes;
-  VkCullModeFlags                   cull_mode;
-  VkFrontFace                       front_face;
-  VkPolygonMode                     polygon_mode;
-  float                             line_width;
-  bool                              enable_depth_test;
-  VkCompareOp                       cmp_op;
-  bool                              enable_depth_write;
-  float                             max_depth;
-  VkPrimitiveTopology               topology;
-  float                             depth_bias_const;
-  ID                                ps, vs;
-  u64                               ps_hash, vs_hash;
-  ID                                pass;
-  bool                              operator==(const Graphics_Pipeline_State &that) const {
+  VkVertexInputBindingDescription     bindings[0x10];
+  u32                                 num_bindings;
+  VkVertexInputAttributeDescription   attributes[0x10];
+  VkPrimitiveTopology                 topology;
+  u32                                 num_attributes;
+  rd::RS_State                        rs_state;
+  rd::DS_State                        ds_state;
+  ID                                  ps, vs;
+  ID                                  pass;
+  u32                                 num_rts;
+  VkPipelineColorBlendAttachmentState blend_states[8];
+  rd::MS_State                        ms_state;
+
+  VkPipelineDepthStencilStateCreateInfo get_ds_create_info() {
+    VkPipelineDepthStencilStateCreateInfo ds_create_info;
+    MEMZERO(ds_create_info);
+    ds_create_info.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    ds_create_info.depthTestEnable   = to_vk(ds_state.enable_depth_test);
+    ds_create_info.depthCompareOp    = to_vk(ds_state.cmp_op);
+    ds_create_info.depthWriteEnable  = to_vk(ds_state.enable_depth_write);
+    ds_create_info.maxDepthBounds    = ds_state.max_depth;
+    ds_create_info.stencilTestEnable = VK_FALSE;
+    return ds_create_info;
+  }
+  VkPipelineRasterizationStateCreateInfo get_rs_create_info() {
+    VkPipelineRasterizationStateCreateInfo rs_create_info;
+    MEMZERO(rs_create_info);
+    rs_create_info.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rs_create_info.cullMode                = to_vk(rs_state.cull_mode);
+    rs_create_info.frontFace               = to_vk(rs_state.front_face);
+    rs_create_info.lineWidth               = rs_state.line_width;
+    rs_create_info.polygonMode             = to_vk(rs_state.polygon_mode);
+    rs_create_info.depthBiasEnable         = rs_state.depth_bias != 0.0f;
+    rs_create_info.depthBiasConstantFactor = rs_state.depth_bias;
+    return rs_create_info;
+  }
+  VkPipelineMultisampleStateCreateInfo get_ms_create_info() {
+    VkPipelineMultisampleStateCreateInfo ms_create_info;
+    MEMZERO(ms_create_info);
+    ms_create_info.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    ms_create_info.rasterizationSamples  = to_sample_bit(ms_state.num_samples);
+    ms_create_info.alphaToCoverageEnable = to_vk(ms_state.alpha_to_coverage);
+    ms_create_info.alphaToOneEnable      = to_vk(ms_state.alpha_to_one);
+    ms_create_info.minSampleShading      = ms_state.min_sample_shading;
+    ms_create_info.pSampleMask           = &ms_state.sample_mask;
+    ms_create_info.sampleShadingEnable   = to_vk(ms_state.sample_shading);
+    return ms_create_info;
+  }
+  bool operator==(const Graphics_Pipeline_State &that) const {
     return memcmp(this, &that, sizeof(*this)) == 0;
   }
   void reset() {
@@ -591,380 +610,82 @@ u64 hash_of(Graphics_Pipeline_State const &state) {
   return hash_of(string_ref{(char const *)&state, sizeof(state)});
 }
 
-struct Shader : public Ref_Cnt {
-  List *root;
-  //  VkShaderModule module;
-  u64 hash;
-  //  struct Vertex_Attribute {
-  //    string_ref name;
-  //    VkFormat   format;
-  //    u32        location;
-  //  };
-  //  struct Shader_Input {
-  //    string_ref name;
-  //    VkFormat   format;
-  //    u32        location;
-  //  };
-  //  struct Resource_Slot {
-  //    string_ref name;
-  //    u32        size;
-  //    u32        set;
-  //    u32        binding;
-  //  };
-  //  SmallArray<Vertex_Attribute, 4> attributes;
-  //  SmallArray<Shader_Input, 4>     inputs;
-  //  SmallArray<Shader_Input, 4>     outputs;
-  //  SmallArray<Resource_Slot, 4>    resources;
+struct Descriptor_Pool {
+  VkDevice         device;
+  VkDescriptorPool pool;
+  void             init(VkDevice device) {
+    VkDescriptorPoolSize aPoolSizes[] = {
+        {VK_DESCRIPTOR_TYPE_SAMPLER, 10000},                //
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 10000}, //
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 10000},          //
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 10000},         //
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 10000},         //
+    };
+    VkDescriptorPoolCreateInfo info;
+    MEMZERO(info);
+    info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    info.poolSizeCount = ARRAY_SIZE(aPoolSizes);
+    info.pPoolSizes    = aPoolSizes;
+    info.maxSets       = 1 << 14;
+    VK_ASSERT_OK(vkCreateDescriptorPool(device, &info, NULL, &pool));
+    this->device = device;
+  }
+  VkDescriptorSet allocate(VkDescriptorSetLayout layout) {
+    VkDescriptorSet             set;
+    VkDescriptorSetAllocateInfo info;
+    MEMZERO(info);
+    info.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    info.descriptorPool     = pool;
+    info.descriptorSetCount = 1;
+    info.pSetLayouts        = &layout;
+    info.pNext              = NULL;
+    VK_ASSERT_OK(vkAllocateDescriptorSets(device, &info, &set));
+    return set;
+  }
+  void reset() { vkResetDescriptorPool(device, pool, 0); }
+  void release() { vkDestroyDescriptorPool(device, pool, NULL); }
 };
 
-struct Graphics_Pipeline_Wrapper : public Slot {
-  VkDescriptorSetLayout                                           set_layouts[4];
-  u32                                                             num_set_layouts;
-  VkPipelineLayout                                                pipeline_layout;
-  VkPipeline                                                      pipeline;
-  Hash_Table<string_ref, Pair<u32, u32>, Default_Allocator, 0x10> global_slots;
-  Hash_Table<string_ref, u32, Default_Allocator, 0x10>            uniform_slots;
-  VkShaderModule                                                  vs_module;
-  VkShaderModule                                                  ps_module;
-  u32                                                             uniform_size;
-  u32                                                             push_constants_size;
-
+struct Shader_Reflection {
+  template <typename K, typename V>
+  using Table = Hash_Table<K, V, Default_Allocator, 0x10>;
+  Table<u32, Table<u32, Shader_Descriptor>> set_table;
+  u32                                       push_constants_size;
+  Table<u32, VkDescriptorSetLayout>         baked_layouts;
+  void                                      init() {
+    set_table.init();
+    baked_layouts.init();
+    push_constants_size = 0;
+  }
   void release(VkDevice device) {
-    ito(num_set_layouts) vkDestroyDescriptorSetLayout(device, set_layouts[i], NULL);
-    vkDestroyPipelineLayout(device, pipeline_layout, NULL);
-    vkDestroyPipeline(device, pipeline, NULL);
-    vkDestroyShaderModule(device, vs_module, NULL);
-    vkDestroyShaderModule(device, ps_module, NULL);
-    global_slots.release();
-    uniform_slots.release();
-  }
-
-  static VkShaderModule compile_glsl(VkDevice device, string_ref text, shaderc_shader_kind kind) {
-    shaderc_compiler_t        compiler = shaderc_compiler_initialize();
-    shaderc_compile_options_t options  = shaderc_compile_options_initialize();
-    shaderc_compile_options_set_source_language(options, shaderc_source_language_glsl);
-    shaderc_compile_options_set_target_spirv(options, shaderc_spirv_version_1_3);
-    shaderc_compile_options_set_target_env(options, shaderc_target_env_vulkan,
-                                           shaderc_env_version_vulkan_1_2);
-    shaderc_compilation_result_t result =
-        shaderc_compile_into_spv(compiler, text.ptr, text.len, kind, "tmp.lsp", "main", options);
-    defer({
-      shaderc_result_release(result);
-      shaderc_compiler_release(compiler);
-      shaderc_compile_options_release(options);
+    set_table.iter_values(
+        [](Table<u32, Shader_Descriptor> &val) { val.release(); });
+    set_table.release();
+    baked_layouts.iter_values([device](VkDescriptorSetLayout &val) {
+      vkDestroyDescriptorSetLayout(device, val, NULL);
     });
-    if (shaderc_result_get_compilation_status(result) != shaderc_compilation_status_success) {
-      push_error("%.*s\n", STRF(text));
-      push_error(shaderc_result_get_error_message(result));
-      TRAP;
-    }
-    size_t                   len      = shaderc_result_get_length(result);
-    u32 *                    bytecode = (u32 *)shaderc_result_get_bytes(result);
-    VkShaderModuleCreateInfo info;
-    MEMZERO(info);
-    info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    info.codeSize = len;
-    info.flags    = 0;
-    info.pCode    = bytecode;
-    VkShaderModule module;
-    VK_ASSERT_OK(vkCreateShaderModule(device, &info, NULL, &module));
-    return module;
+    baked_layouts.release();
   }
+  Array<VkDescriptorSetLayout> create_layouts(VkDevice device) {
 
-  static void print_global(String_Builder &builder, Shader_Builder::Global &glob, u32 &set_counter,
-                           u32 &binding_counter) {
-    if (glob.type == Shader_Builder::Global_t::IMAGE) {
-      if (glob.clazz == Shader_Builder::Class_t::SRV) {
-        if (glob.dim == 2) {
-          if (glob.count == 1) {
-            builder.putf("layout(set = %i, binding = %i) texture2D %.*s;\n", set_counter,
-                         binding_counter, STRF(glob.name));
-            binding_counter += 1;
-          } else {
-            ASSERT_ALWAYS(glob.count > 1);
-            builder.putf("layout(set = %i, binding = %i) texture2D %.*s[%i];\n", set_counter,
-                         binding_counter, STRF(glob.name), glob.count);
-            binding_counter += glob.count;
-          }
-        } else {
-          TRAP;
-        }
-      } else if (glob.clazz == Shader_Builder::Class_t::UAV) {
-        if (glob.dim == 2) {
-          if (glob.count == 1) {
-            builder.putf("layout(set = %i, binding = %i, %s) image2D %.*s;\n", set_counter,
-                         binding_counter, get_glsl_format(glob.format), STRF(glob.name));
-            binding_counter += 1;
-          } else {
-            ASSERT_ALWAYS(glob.count > 1);
-            builder.putf("layout(set = %i, binding = %i, %s) image2D %.*s[%i];\n", set_counter,
-                         binding_counter, get_glsl_format(glob.format), STRF(glob.name),
-                         glob.count);
-            binding_counter += glob.count;
-          }
-        } else {
-          TRAP;
-        }
-      } else {
-        TRAP;
-      }
-    } else {
-      TRAP;
-    }
-  }
-
-  static void preprocess_shader(String_Builder &builder, Shader_Builder &shb) {
-    char const *cur       = shb.body.ptr;
-    char const *end       = cur + shb.body.len;
-    size_t      total_len = 0;
-    while (cur != end && total_len < shb.body.len) {
-      if (*cur == '@') {
-        cur++;
-        total_len += 1;
-        i32 match_len = -1;
-        if ((match_len = str_match(cur, "EXPORT_COLOR0<")) > 0) {
-          cur += match_len;
-          total_len += match_len;
-          i32 symbol_len = str_find(cur, 0x100, '>');
-          ASSERT_ALWAYS(symbol_len > 0);
-          builder.putf("_rt0 = %.*s;", symbol_len, cur);
-          cur += symbol_len + 1;
-          total_len += symbol_len + 1;
-        } else if ((match_len = str_match(cur, "EXPORT_POSITION<")) > 0) {
-          cur += match_len;
-          total_len += match_len;
-          i32 symbol_len = str_find(cur, 0x100, '>');
-          ASSERT_ALWAYS(symbol_len > 0);
-          builder.putf("gl_Position = %.*s;", symbol_len, cur);
-          cur += symbol_len + 1;
-          total_len += symbol_len + 1;
-        } else if ((match_len = str_match(cur, "ENTRY")) > 0) {
-          cur += match_len;
-          total_len += match_len;
-          builder.putf("void main()");
-        } else if ((match_len = str_match(cur, "GLOBAL<")) > 0) {
-          cur += match_len;
-          total_len += match_len;
-          i32 symbol_len = str_find(cur, 0x100, '>');
-          ASSERT_ALWAYS(symbol_len > 0);
-          builder.putf("%.*s", symbol_len, cur);
-          cur += symbol_len + 1;
-          total_len += symbol_len + 1;
-        } else if ((match_len = str_match(cur, "UNIFORM<")) > 0) {
-          cur += match_len;
-          total_len += match_len;
-          i32 symbol_len = str_find(cur, 0x100, '>');
-          ASSERT_ALWAYS(symbol_len > 0);
-          builder.putf("ubo.%.*s", symbol_len, cur);
-          cur += symbol_len + 1;
-          total_len += symbol_len + 1;
-        } else {
-          TRAP;
-        }
-      } else {
-        builder.put_char(*cur);
-        cur += 1;
-        total_len += 1;
-      }
-    }
-  }
-
-  static u32 parse_size(string_ref type) {
-    if (                             //
-        type == stref_s("float") ||  //
-        type == stref_s("float2") || //
-        type == stref_s("float3") || //
-        type == stref_s("float4") || //
-        type == stref_s("int") ||    //
-        type == stref_s("int2") ||   //
-        type == stref_s("int3") ||   //
-        type == stref_s("int4") ||   //
-        type == stref_s("uint") ||   //
-        type == stref_s("uint2") ||  //
-        type == stref_s("uint3") ||  //
-        type == stref_s("uint4")     //
-    ) {
-      return 16;
-    } else if (type == stref_s("float2x2")) {
-      return 16 * 2;
-    } else if (type == stref_s("float3x3")) {
-      return 16 * 3;
-    } else if (type == stref_s("float4x4")) {
-      return 16 * 4;
-    } else {
-      TRAP;
-    }
-  }
-
-  void init(VkDevice                 device,    //
-            Render_Pass &            pass,      //
-            Shader &                 vs_shader, //
-            Shader &                 ps_shader, //
-            Graphics_Pipeline_State &pipeline_info) {
-    uniform_slots.init();
-    global_slots.init();
-    (void)pipeline_info;
-    constexpr u32                MAX_BINDINGS = 0x40;
-    VkDescriptorBindingFlags     binding_flags[MAX_BINDINGS];
-    u32                          num_bindings = 0;
-    VkDescriptorSetLayoutBinding set_bindings[MAX_BINDINGS];
-    {
-      Shader_Builder vsbuilder;
-      vsbuilder.init();
-      defer(vsbuilder.release());
-      Shader_Builder psbuilder;
-      psbuilder.init();
-      defer(psbuilder.release());
-
-      vsbuilder.eval(vs_shader.root);
-      psbuilder.eval(ps_shader.root);
-      ASSERT_ALWAYS(vsbuilder.outputs.size == psbuilder.inputs.size);
-      Hash_Table<string_ref, Shader_Builder::Uniform> uniform_table;
-      Hash_Table<string_ref, Shader_Builder::Global>  global_table;
-      uniform_table.init();
-      global_table.init();
-      defer({
-        global_table.release();
-        uniform_table.release();
+    Array<VkDescriptorSetLayout> out;
+    out.init();
+    set_table.iter_pairs([&](u32                            set_index,
+                             Table<u32, Shader_Descriptor> &binding_table) {
+      constexpr u32                MAX_BINDINGS = 0x40;
+      VkDescriptorBindingFlags     binding_flags[MAX_BINDINGS];
+      u32                          num_bindings = 0;
+      VkDescriptorSetLayoutBinding set_bindings[MAX_BINDINGS];
+      binding_table.iter_values([&](Shader_Descriptor &val) {
+        VkDescriptorSetLayoutBinding binding_info;
+        MEMZERO(binding_info);
+        binding_info.binding            = val.binding;
+        binding_info.descriptorCount    = val.descriptorCount;
+        binding_info.descriptorType     = val.descriptorType;
+        binding_info.pImmutableSamplers = NULL;
+        binding_info.stageFlags         = val.stageFlags;
+        set_bindings[num_bindings++]    = binding_info;
       });
-      ito(vsbuilder.uniforms.size) {
-        auto &uniform = vsbuilder.uniforms[i];
-        uniform_table.insert(uniform.name, uniform);
-      }
-      ito(psbuilder.uniforms.size) {
-        Shader_Builder::Uniform &uniform = psbuilder.uniforms[i];
-        if (uniform_table.contains(uniform.name)) {
-          ASSERT_ALWAYS(uniform == uniform_table.get(uniform.name));
-        } else {
-          uniform_table.insert(uniform.name, uniform);
-        }
-      }
-      ito(vsbuilder.globals.size) {
-        Shader_Builder::Global &glob = vsbuilder.globals[i];
-        global_table.insert(glob.name, glob);
-      }
-      ito(psbuilder.globals.size) {
-        auto &glob = psbuilder.globals[i];
-        if (global_table.contains(glob.name)) {
-          ASSERT_ALWAYS(glob == global_table.get(glob.name));
-        } else {
-          global_table.insert(glob.name, glob);
-        }
-      }
-
-      String_Builder common_header;
-      String_Builder ps_text;
-      String_Builder vs_text;
-      ps_text.init();
-      vs_text.init();
-      common_header.init();
-      defer({
-        common_header.release();
-        ps_text.release();
-        vs_text.release();
-      });
-      u32 set_counter     = 0;
-      u32 binding_counter = 0;
-      common_header.putf("#version 450\n");
-      common_header.putf("#extension GL_EXT_nonuniform_qualifier : require\n");
-      common_header.putf(R"(
-#define float2 vec2
-#define float3 vec3
-#define float4 vec4
-#define int2 ivec2
-#define int3 ivec3
-#define int4 ivec4
-#define uint2 uvec2
-#define uint3 uvec3
-#define uint4 uvec4
-#define float2x2 mat2
-#define float3x3 mat3
-#define float4x4 mat4
-
-)");
-      { // One uniform buffer
-        VkDescriptorSetLayoutBinding set_binding;
-        set_binding.binding            = 0;
-        set_binding.descriptorCount    = 1;
-        set_binding.descriptorType     = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        set_binding.pImmutableSamplers = NULL;
-        set_binding.stageFlags         = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
-        set_bindings[num_bindings++]   = set_binding;
-      }
-      u32 uniform_offset = 0;
-      common_header.putf("layout(set = %i, binding = %i, std140) uniform UBO_t {\n", set_counter,
-                         binding_counter);
-      uniform_table.iter_values([&](Shader_Builder::Uniform &uniform) {
-        ASSERT_ALWAYS(uniform.count == 1);
-        ASSERT_ALWAYS(uniform.layout == Shader_Builder::Layout_t::NONE);
-        uniform_slots.insert(uniform.name, uniform_offset);
-        common_header.putf("  %.*s %.*s;\n", STRF(uniform.type), STRF(uniform.name));
-        uniform_offset += parse_size(uniform.type);
-      });
-      common_header.putf("} ubo;\n");
-      binding_counter += 1;
-      global_table.iter_values([&](Shader_Builder::Global &glob) {
-        {
-          ASSERT_ALWAYS(set_counter == 0 && "One set for now");
-          VkDescriptorSetLayoutBinding set_binding;
-          set_binding.binding            = binding_counter;
-          set_binding.descriptorCount    = glob.count;
-          set_binding.descriptorType     = glob.get_desc_type();
-          set_binding.pImmutableSamplers = NULL;
-          set_binding.stageFlags         = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
-          set_bindings[num_bindings++]   = set_binding;
-        }
-        global_slots.insert(relocate_cstr(glob.name), Pair<u32, u32>{set_counter, binding_counter});
-        print_global(common_header, glob, set_counter, binding_counter);
-      });
-      string_ref header = common_header.get_str();
-      ps_text.putf("%.*s", STRF(header));
-      vs_text.putf("%.*s", STRF(header));
-      ito(psbuilder.inputs.size) {
-        auto &input = psbuilder.inputs[i];
-        ps_text.putf("layout(location = %i) in %.*s %.*s;\n", i, STRF(input.type),
-                     STRF(input.name));
-      }
-      ito(psbuilder.outputs.size) {
-        auto &output = psbuilder.outputs[i];
-        ps_text.putf("layout(location = %i) out %.*s _rt%i;\n", i, STRF(output.type),
-                     output.target);
-      }
-      ito(vsbuilder.inputs.size) {
-        auto &input = vsbuilder.inputs[i];
-        vs_text.putf("layout(location = %i) in %.*s %.*s;\n", input.location, STRF(input.type),
-                     STRF(input.name));
-      }
-      ito(vsbuilder.outputs.size) {
-        auto &output = vsbuilder.outputs[i];
-        vs_text.putf("layout(location = %i) out %.*s %.*s;\n", i, STRF(output.type),
-                     STRF(output.name));
-      }
-      preprocess_shader(ps_text, psbuilder);
-      preprocess_shader(vs_text, vsbuilder);
-      vs_module = compile_glsl(device, vs_text.get_str(), shaderc_glsl_vertex_shader);
-      ps_module = compile_glsl(device, ps_text.get_str(), shaderc_glsl_fragment_shader);
-    }
-    VkPipelineShaderStageCreateInfo stages[2];
-    {
-      VkPipelineShaderStageCreateInfo stage;
-      MEMZERO(stage);
-      stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-      stage.stage  = VK_SHADER_STAGE_VERTEX_BIT;
-      stage.module = vs_module;
-      stage.pName  = "main";
-      stages[0]    = stage;
-    }
-    {
-      VkPipelineShaderStageCreateInfo stage;
-      MEMZERO(stage);
-      stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-      stage.stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
-      stage.module = ps_module;
-      stage.pName  = "main";
-      stages[1]    = stage;
-    }
-    {
       VkDescriptorSetLayoutBindingFlagsCreateInfo binding_infos;
 
       ito(num_bindings) {
@@ -978,89 +699,206 @@ struct Graphics_Pipeline_Wrapper : public Slot {
       binding_infos.bindingCount  = num_bindings;
       binding_infos.pBindingFlags = &binding_flags[0];
       binding_infos.pNext         = NULL;
-      binding_infos.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+      binding_infos.sType =
+          VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
 
       VkDescriptorSetLayoutCreateInfo set_layout_create_info;
       MEMZERO(set_layout_create_info);
       set_layout_create_info.bindingCount = num_bindings;
       set_layout_create_info.pBindings    = &set_bindings[0];
-      set_layout_create_info.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
-      set_layout_create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+      set_layout_create_info.flags =
+          VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+      set_layout_create_info.sType =
+          VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
       set_layout_create_info.pNext = (void *)&binding_infos;
       VkDescriptorSetLayout set_layout;
-      VK_ASSERT_OK(vkCreateDescriptorSetLayout(device, &set_layout_create_info, NULL, &set_layout));
-      set_layouts[num_set_layouts++] = set_layout;
+      VK_ASSERT_OK(vkCreateDescriptorSetLayout(device, &set_layout_create_info,
+                                               NULL, &set_layout));
+      out.push(set_layout);
+      baked_layouts.insert(set_index, set_layout);
+    });
+    return out;
+  }
+};
+
+Shader_Reflection reflect_shader(Shader_Info const &info) {
+  spirv_cross::Compiler comp(
+      {info.bytecode.ptr, info.bytecode.ptr + info.bytecode.size});
+  spirv_cross::ShaderResources res = comp.get_shader_resources();
+  Shader_Reflection            out;
+  out.init();
+  auto handle_resource = [&](VkDescriptorType       desc_type,
+                             spirv_cross::Resource &item) {
+    Shader_Descriptor     desc;
+    spirv_cross::SPIRType type_obj      = comp.get_type(item.type_id);
+    spirv_cross::SPIRType base_type_obj = comp.get_type(item.base_type_id);
+    auto                  set =
+        comp.get_decoration(item.id, spv::Decoration::DecorationDescriptorSet);
+    desc.name = make_string(item.name.c_str());
+    desc.set  = set;
+    desc.binding =
+        comp.get_decoration(item.id, spv::Decoration::DecorationBinding);
+    desc.descriptorCount = 0;
+    if (type_obj.array.size() != 0) {
+      ASSERT_ALWAYS(type_obj.array.size() == 1);
+      desc.descriptorCount = type_obj.array[0];
     }
-    // VkPushConstantRange push_range;
-    // MEMZERO(push_range);
-    // push_range.offset = 0;
-    // push_range.size = ???
+    desc.stageFlags     = info.get_stage_bits();
+    desc.descriptorType = desc_type;
+    if (out.set_table.contains(set) == false) {
+      Shader_Reflection::Table<u32, Shader_Descriptor> descset;
+      descset.init();
+      out.set_table.insert(set, descset);
+    }
+    Shader_Reflection::Table<u32, Shader_Descriptor> &descset =
+        out.set_table.get_ref(set);
+    ASSERT_DEBUG(descset.contains(desc.binding) == false);
+    descset.insert(desc.binding, desc);
+  };
+  for (auto &item : res.storage_buffers) {
+    handle_resource(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, item);
+  }
+  for (auto &item : res.sampled_images) {
+    handle_resource(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, item);
+  }
+  for (auto &item : res.separate_samplers) {
+    handle_resource(VK_DESCRIPTOR_TYPE_SAMPLER, item);
+  }
+  for (auto &item : res.separate_images) {
+    handle_resource(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, item);
+  }
+  for (auto &item : res.storage_images) {
+    handle_resource(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, item);
+  }
+  for (auto &item : res.uniform_buffers) {
+    handle_resource(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, item);
+  }
+  for (auto &item : res.push_constant_buffers) {
+    ASSERT_DEBUG(res.push_constant_buffers.size() == 1);
+    spirv_cross::SPIRType type_obj      = comp.get_type(item.type_id);
+    spirv_cross::SPIRType base_type_obj = comp.get_type(item.base_type_id);
+    out.push_constants_size = comp.get_declared_struct_size(type_obj);
+  }
+  return out;
+}
+
+struct Graphics_Pipeline_Wrapper : public Slot {
+  VkPipelineLayout  pipeline_layout;
+  VkPipeline        pipeline;
+  VkShaderModule    ps_module;
+  VkShaderModule    vs_module;
+  Shader_Reflection vs_reflection;
+  Shader_Reflection ps_reflection;
+  u32               uniform_size;
+  u32               push_constants_size;
+
+  void release(VkDevice device) {
+    vkDestroyPipelineLayout(device, pipeline_layout, NULL);
+    vkDestroyPipeline(device, pipeline, NULL);
+    vkDestroyShaderModule(device, vs_module, NULL);
+    vkDestroyShaderModule(device, ps_module, NULL);
+    vs_reflection.release(device);
+    ps_reflection.release(device);
+    MEMZERO(*this);
+  }
+
+  void init(VkDevice                 device,    //
+            Render_Pass &            pass,      //
+            Shader_Info &            vs_shader, //
+            Shader_Info &            ps_shader, //
+            Graphics_Pipeline_State &pipeline_info) {
+    MEMZERO(*this);
+    vs_reflection.init();
+    ps_reflection.init();
+    (void)pipeline_info;
+    VkDescriptorSetLayout set_layouts[16];
+    u32                   num_set_layouts;
+    num_set_layouts = 0;
+
+    VkPipelineShaderStageCreateInfo stages[2];
+
+    {
+      vs_module = vs_shader.compile(device);
+      VkPipelineShaderStageCreateInfo stage;
+      MEMZERO(stage);
+      stage.sType         = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+      stage.stage         = VK_SHADER_STAGE_VERTEX_BIT;
+      stage.module        = vs_module;
+      stage.pName         = "main";
+      stages[0]           = stage;
+      vs_reflection       = reflect_shader(vs_shader);
+      auto vs_set_layouts = vs_reflection.create_layouts(device);
+      defer(vs_set_layouts.release());
+      ito(vs_set_layouts.size) set_layouts[num_set_layouts++] =
+          vs_set_layouts[i];
+    }
+    {
+      ps_module = ps_shader.compile(device);
+      VkPipelineShaderStageCreateInfo stage;
+      MEMZERO(stage);
+      stage.sType         = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+      stage.stage         = VK_SHADER_STAGE_FRAGMENT_BIT;
+      stage.module        = ps_module;
+      stage.pName         = "main";
+      stages[1]           = stage;
+      ps_reflection       = reflect_shader(ps_shader);
+      auto ps_set_layouts = ps_reflection.create_layouts(device);
+      defer(ps_set_layouts.release());
+      ito(ps_set_layouts.size) set_layouts[num_set_layouts++] =
+          ps_set_layouts[i];
+    }
     {
       VkPipelineLayoutCreateInfo pipe_layout_info;
       MEMZERO(pipe_layout_info);
-      pipe_layout_info.sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+      pipe_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
       pipe_layout_info.pSetLayouts    = &set_layouts[0];
       pipe_layout_info.setLayoutCount = num_set_layouts;
-      VK_ASSERT_OK(vkCreatePipelineLayout(device, &pipe_layout_info, NULL, &pipeline_layout));
+      VkPushConstantRange push_range;
+      push_range.offset     = 0;
+      push_range.stageFlags = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+      push_range.size       = MAX(vs_reflection.push_constants_size,
+                            ps_reflection.push_constants_size);
+      if (push_range.size > 0) {
+        pipe_layout_info.pPushConstantRanges    = &push_range;
+        pipe_layout_info.pushConstantRangeCount = 1;
+      }
+      VK_ASSERT_OK(vkCreatePipelineLayout(device, &pipe_layout_info, NULL,
+                                          &pipeline_layout));
     }
     {
       VkGraphicsPipelineCreateInfo info;
       MEMZERO(info);
       info.sType  = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
       info.layout = pipeline_layout;
-      VkPipelineColorBlendAttachmentState blend_states[0x10];
-      u32                                 num_blend_states = 0;
-      // @TODO Add blend states
-      ito(pass.rts.size) {
-        VkPipelineColorBlendAttachmentState blend_state;
-        MEMZERO(blend_state);
-        blend_state.colorWriteMask =   //
-            VK_COLOR_COMPONENT_R_BIT | //
-            VK_COLOR_COMPONENT_G_BIT | //
-            VK_COLOR_COMPONENT_B_BIT | //
-            VK_COLOR_COMPONENT_A_BIT;  //
-        blend_state.blendEnable          = VK_FALSE;
-        blend_states[num_blend_states++] = blend_state;
-      }
-      if (!pass.depth_target.is_null()) num_blend_states--;
+
       VkPipelineColorBlendStateCreateInfo blend_create_info;
       MEMZERO(blend_create_info);
-      blend_create_info.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-      blend_create_info.attachmentCount = num_blend_states;
+      blend_create_info.sType =
+          VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+      blend_create_info.attachmentCount = pipeline_info.num_rts;
       blend_create_info.logicOpEnable   = VK_FALSE;
-      blend_create_info.pAttachments    = &blend_states[0];
+      blend_create_info.pAttachments    = &pipeline_info.blend_states[0];
       info.pColorBlendState             = &blend_create_info;
 
-      VkPipelineDepthStencilStateCreateInfo ds_create_info;
-      MEMZERO(ds_create_info);
-      ds_create_info.sType            = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-      ds_create_info.depthTestEnable  = pipeline_info.enable_depth_test ? VK_TRUE : VK_FALSE;
-      ds_create_info.depthCompareOp   = pipeline_info.cmp_op;
-      ds_create_info.depthWriteEnable = pipeline_info.enable_depth_write;
-      ds_create_info.maxDepthBounds   = pipeline_info.max_depth;
-      info.pDepthStencilState         = &ds_create_info;
+      VkPipelineDepthStencilStateCreateInfo ds_create_info =
+          pipeline_info.get_ds_create_info();
+      info.pDepthStencilState = &ds_create_info;
 
       VkViewport viewports[] = {VkViewport{0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f}};
       VkRect2D   scissors[]  = {VkRect2D{{0, 0}, {1, 1}}};
       VkPipelineViewportStateCreateInfo vp_create_info;
       MEMZERO(vp_create_info);
-      vp_create_info.sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+      vp_create_info.sType =
+          VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
       vp_create_info.pViewports    = viewports;
       vp_create_info.viewportCount = 1;
       vp_create_info.pScissors     = scissors;
       vp_create_info.scissorCount  = 1;
       info.pViewportState          = &vp_create_info;
 
-      VkPipelineRasterizationStateCreateInfo rs_create_info;
-      MEMZERO(rs_create_info);
-      rs_create_info.sType           = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-      rs_create_info.cullMode        = pipeline_info.cull_mode;
-      rs_create_info.frontFace       = pipeline_info.front_face;
-      rs_create_info.lineWidth       = pipeline_info.line_width;
-      rs_create_info.polygonMode     = pipeline_info.polygon_mode;
-      rs_create_info.depthBiasEnable = pipeline_info.depth_bias_const != 0.0f;
-      rs_create_info.depthBiasConstantFactor = pipeline_info.depth_bias_const;
-      info.pRasterizationState               = &rs_create_info;
+      VkPipelineRasterizationStateCreateInfo rs_create_info =
+          pipeline_info.get_rs_create_info();
+      info.pRasterizationState = &rs_create_info;
 
       VkDynamicState dynamic_states[] = {
           VK_DYNAMIC_STATE_VIEWPORT,
@@ -1068,36 +906,39 @@ struct Graphics_Pipeline_Wrapper : public Slot {
       };
       VkPipelineDynamicStateCreateInfo dy_create_info;
       MEMZERO(dy_create_info);
-      dy_create_info.sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+      dy_create_info.sType =
+          VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
       dy_create_info.dynamicStateCount = ARRAY_SIZE(dynamic_states);
       dy_create_info.pDynamicStates    = dynamic_states;
       info.pDynamicState               = &dy_create_info;
 
-      VkPipelineMultisampleStateCreateInfo ms_state;
-      MEMZERO(ms_state);
-      ms_state.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-      ms_state.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-      info.pMultisampleState        = &ms_state;
+      VkPipelineMultisampleStateCreateInfo ms_state =
+          pipeline_info.get_ms_create_info();
+      info.pMultisampleState = &ms_state;
 
       VkPipelineInputAssemblyStateCreateInfo ia_create_info;
       MEMZERO(ia_create_info);
-      ia_create_info.sType     = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+      ia_create_info.sType =
+          VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
       ia_create_info.topology  = pipeline_info.topology;
       info.pInputAssemblyState = &ia_create_info;
 
       VkPipelineVertexInputStateCreateInfo vs_create_info;
       MEMZERO(vs_create_info);
-      vs_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-      vs_create_info.pVertexAttributeDescriptions    = pipeline_info.attributes;
-      vs_create_info.vertexAttributeDescriptionCount = pipeline_info.num_attributes;
-      vs_create_info.pVertexBindingDescriptions      = pipeline_info.bindings;
-      vs_create_info.vertexBindingDescriptionCount   = pipeline_info.num_bindings;
-      info.pVertexInputState                         = &vs_create_info;
+      vs_create_info.sType =
+          VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+      vs_create_info.pVertexAttributeDescriptions = pipeline_info.attributes;
+      vs_create_info.vertexAttributeDescriptionCount =
+          pipeline_info.num_attributes;
+      vs_create_info.pVertexBindingDescriptions    = pipeline_info.bindings;
+      vs_create_info.vertexBindingDescriptionCount = pipeline_info.num_bindings;
+      info.pVertexInputState                       = &vs_create_info;
 
       info.renderPass = pass.pass;
       info.pStages    = stages;
       info.stageCount = 2;
-      VK_ASSERT_OK(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &info, NULL, &pipeline));
+      VK_ASSERT_OK(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &info,
+                                             NULL, &pipeline));
     }
   }
 };
@@ -1143,7 +984,8 @@ struct Resource_Array {
     return {(u32)items.size};
   }
   T &operator[](ID id) {
-    ASSERT_DEBUG(!id.is_null() && items[id.index()].get_id().index() == id.index());
+    ASSERT_DEBUG(!id.is_null() &&
+                 items[id.index()].get_id().index() == id.index());
     return items[id.index()];
   }
   void remove(ID id, u32 timeout) {
@@ -1206,12 +1048,13 @@ struct Window {
   VkExtent2D         sc_extent                      = {};
   VkSurfaceFormatKHR sc_format                      = {};
 
-  u32         frame_id                         = 0;
-  u32         cmd_index                        = 0;
-  u32         image_index                      = 0;
-  VkFence     frame_fences[MAX_SC_IMAGES]      = {};
-  VkSemaphore sc_free_sem[MAX_SC_IMAGES]       = {};
-  VkSemaphore render_finish_sem[MAX_SC_IMAGES] = {};
+  u32             frame_id                         = 0;
+  u32             cmd_index                        = 0;
+  u32             image_index                      = 0;
+  VkFence         frame_fences[MAX_SC_IMAGES]      = {};
+  VkSemaphore     sc_free_sem[MAX_SC_IMAGES]       = {};
+  VkSemaphore     render_finish_sem[MAX_SC_IMAGES] = {};
+  Descriptor_Pool desc_pools[MAX_SC_IMAGES]        = {};
 
   u32 graphics_queue_id = 0;
   u32 compute_queue_id  = 0;
@@ -1270,11 +1113,11 @@ struct Window {
       Resource_Array::init();
     }
   } image_views;
-  struct Shader_Array : Resource_Array<Shader, Shader_Array> {
+  struct Shader_Array : Resource_Array<Shader_Info, Shader_Array> {
     static constexpr char const NAME[] = "Shader_Array";
     Window *                    wnd    = NULL;
-    void                        release_item(Shader &shader) { (void)shader; }
-    void                        init(Window *wnd) {
+    void release_item(Shader_Info &shader) { shader.release(); }
+    void init(Window *wnd) {
       this->wnd = wnd;
       Resource_Array::init();
     }
@@ -1282,25 +1125,12 @@ struct Window {
   struct Render_Pass_Array : Resource_Array<Render_Pass, Render_Pass_Array> {
     static constexpr char const NAME[] = "Render_Pass_Array";
     Window *                    wnd    = NULL;
-    void                        release_item(Render_Pass &item) { item.release(wnd->device); }
-    void                        init(Window *wnd) {
-      this->wnd = wnd;
-      Resource_Array::init();
-    }
-  } render_passes;
-  struct RT_Array : Resource_Array<RT, RT_Array> {
-    static constexpr char const NAME[] = "RT_Array";
-    Window *                    wnd    = NULL;
-    void                        release_item(RT &item) {
-      wnd->images[item.img_id].rem_reference();
-      wnd->image_views.remove(item.view_id, 3);
-      MEMZERO(item);
-    }
+    void release_item(Render_Pass &item) { item.release(wnd->device); }
     void init(Window *wnd) {
       this->wnd = wnd;
       Resource_Array::init();
     }
-  } rts;
+  } render_passes;
   struct Pipe_Array : Resource_Array<Graphics_Pipeline_Wrapper, Pipe_Array> {
     static constexpr char const NAME[] = "Pipe_Array";
     Window *                    wnd    = NULL;
@@ -1313,38 +1143,52 @@ struct Window {
       Resource_Array::init();
     }
   } pipelines;
-  ID                                      cur_pass;
-  Hash_Table<string_ref, ID>              named_render_passes;
-  Graphics_Pipeline_State                 graphics_state;
-  Hash_Table<string_ref, Resource_ID>     named_resources;
-  Hash_Table<Graphics_Pipeline_State, ID> pipeline_cache;
+  struct Sampler_Array : Resource_Array<Sampler, Sampler_Array> {
+    static constexpr char const NAME[] = "Sampler_Array";
+    Window *                    wnd    = NULL;
+    void                        release_item(Sampler &item) {
+      vkDestroySampler(wnd->device, item.sampler, NULL);
+      MEMZERO(item);
+    }
+    void init(Window *wnd) {
+      this->wnd = wnd;
+      Resource_Array::init();
+    }
+  } samplers;
+  ID                                            cur_pass;
+  Hash_Table<string_ref, ID>                    named_render_passes;
+  Hash_Table<string_ref, Pair<ID, Resource_ID>> named_resources;
+  Hash_Table<Graphics_Pipeline_State, ID>       pipeline_cache;
+  Hash_Table<u64, ID>                           shader_cache;
 
   void init_ds() {
     named_resources.init();
+    shader_cache.init();
     pipeline_cache.init();
     mem_chunks.init();
     named_render_passes.init();
     buffers.init(this);
+    samplers.init(this);
     images.init(this);
     shaders.init(this);
     buffer_views.init(this);
     image_views.init(this);
     render_passes.init(this);
-    rts.init(this);
     pipelines.init(this);
   }
 
   void release() {
     named_resources.release();
+    shader_cache.release();
     pipeline_cache.release();
     buffers.release();
+    samplers.release();
     images.release();
     named_render_passes.release();
     shaders.release();
     buffer_views.release();
     image_views.release();
     render_passes.release();
-    rts.release();
     pipelines.release();
     ito(mem_chunks.size) mem_chunks[i].release(device);
     mem_chunks.release();
@@ -1352,6 +1196,7 @@ struct Window {
     ito(sc_image_count) vkDestroySemaphore(device, sc_free_sem[i], NULL);
     ito(sc_image_count) vkDestroySemaphore(device, render_finish_sem[i], NULL);
     ito(sc_image_count) vkDestroyFence(device, frame_fences[i], NULL);
+    ito(sc_image_count) desc_pools[i].release();
     vkDestroySwapchainKHR(device, swapchain, NULL);
     vkDestroyDevice(device, NULL);
     vkDestroySurfaceKHR(instance, surface, NULL);
@@ -1360,7 +1205,8 @@ struct Window {
     SDL_Quit();
   }
 
-  u32 find_mem_chunk(u32 prop_flags, u32 memory_type_bits, u32 alignment, u32 size) {
+  u32 find_mem_chunk(u32 prop_flags, u32 memory_type_bits, u32 alignment,
+                     u32 size) {
     (void)alignment;
     ito(mem_chunks.size) { // look for a suitable memory chunk
       Mem_Chunk &chunk = mem_chunks[i];
@@ -1377,7 +1223,8 @@ struct Window {
     if (num_pages * Mem_Chunk::PAGE_SIZE < size) {
       num_pages = (size + Mem_Chunk::PAGE_SIZE - 1) / Mem_Chunk::PAGE_SIZE;
     }
-    new_chunk.init(device, num_pages, find_mem_type(memory_type_bits, prop_flags), prop_flags,
+    new_chunk.init(device, num_pages,
+                   find_mem_type(memory_type_bits, prop_flags), prop_flags,
                    memory_type_bits);
 
     ASSERT_DEBUG(new_chunk.has_space(size));
@@ -1389,7 +1236,8 @@ struct Window {
     VkPhysicalDeviceMemoryProperties props;
     vkGetPhysicalDeviceMemoryProperties(physdevice, &props);
     ito(props.memoryTypeCount) {
-      if (type & (1 << i) && (props.memoryTypes[i].propertyFlags & prop_flags) == prop_flags) {
+      if (type & (1 << i) &&
+          (props.memoryTypes[i].propertyFlags & prop_flags) == prop_flags) {
         return i;
       }
     }
@@ -1421,20 +1269,15 @@ struct Window {
     VK_ASSERT_OK(vkCreateBuffer(device, &cinfo, NULL, &buf));
     VkMemoryRequirements reqs;
     vkGetBufferMemoryRequirements(device, buf, &reqs);
-    VkDeviceMemory mem = alloc_memory(
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, reqs);
+    VkDeviceMemory mem = alloc_memory(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                      reqs);
     VK_ASSERT_OK(vkBindBufferMemory(device, buf, mem, 0));
     return {buf, mem};
   }
 
-  Resource_ID create_buffer(rd::Buffer info, void const *initial_data) {
-    u32 prop_flags = 0;
-    if (info.mem_bits & (i32)rd::Memory_Bits::MAPPABLE) {
-      prop_flags |= VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    }
-    if (info.mem_bits & (i32)rd::Memory_Bits::DEVICE) {
-      prop_flags |= VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-    }
+  Resource_ID create_buffer(rd::Buffer_Create_Info info) {
+    u32                prop_flags = to_vk_memory_bits(info.mem_bits);
     VkBuffer           buf;
     VkBufferCreateInfo cinfo;
     {
@@ -1444,23 +1287,7 @@ struct Window {
       cinfo.queueFamilyIndexCount = 1;
       cinfo.sharingMode           = VK_SHARING_MODE_EXCLUSIVE;
       cinfo.size                  = info.size;
-      cinfo.usage                 = 0;
-      cinfo.usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-      if (info.mem_bits & (i32)rd::Memory_Bits::MAPPABLE) {
-        cinfo.usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-      }
-      if (info.usage_bits & (i32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER) {
-        cinfo.usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-      }
-      if (info.usage_bits & (i32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER) {
-        cinfo.usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-      }
-      if (info.usage_bits & (i32)rd::Buffer_Usage_Bits::USAGE_UAV) {
-        cinfo.usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-      }
-      if (info.usage_bits & (i32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER) {
-        cinfo.usage |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-      }
+      cinfo.usage                 = to_vk_buffer_usage_bits(info.usage_bits);
       VK_ASSERT_OK(vkCreateBuffer(device, &cinfo, NULL, &buf));
     }
     VkMemoryRequirements reqs;
@@ -1471,35 +1298,37 @@ struct Window {
     new_buf.create_info  = cinfo;
     new_buf.ref_cnt      = 1;
 
-    u32 chunk_index = find_mem_chunk(prop_flags, reqs.memoryTypeBits, reqs.alignment, reqs.size);
+    u32 chunk_index      = find_mem_chunk(prop_flags, reqs.memoryTypeBits,
+                                     reqs.alignment, reqs.size);
     new_buf.mem_chunk_id = ID{chunk_index + 1};
     Mem_Chunk &chunk     = mem_chunks[chunk_index];
     new_buf.mem_offset   = chunk.alloc(reqs.alignment, reqs.size);
 
     vkBindBufferMemory(device, new_buf.buffer, chunk.mem, new_buf.mem_offset);
-    if (initial_data != NULL) {
-      ASSERT_DEBUG(info.mem_bits & (i32)rd::Memory_Bits::MAPPABLE);
-      void *data = NULL;
-      VK_ASSERT_OK(
-          vkMapMemory(device, chunk.mem, new_buf.mem_offset, new_buf.create_info.size, 0, &data));
-      memcpy(data, initial_data, new_buf.create_info.size);
-      vkUnmapMemory(device, chunk.mem);
-    }
+    // if (initial_data != NULL) {
+    //  ASSERT_DEBUG(info.mem_bits & (i32)rd::Memory_Bits::HOST_VISIBLE);
+    //  void *data = NULL;
+    //  VK_ASSERT_OK(vkMapMemory(device, chunk.mem, new_buf.mem_offset,
+    //                           new_buf.create_info.size, 0, &data));
+    //  memcpy(data, initial_data, new_buf.create_info.size);
+    //  vkUnmapMemory(device, chunk.mem);
+    //}
 
-    return {buffers.push(new_buf), (i32)rd::Type::Buffer};
+    return {buffers.push(new_buf), (i32)Resource_Type::BUFFER};
   }
 
   void *map_buffer(Resource_ID res_id) {
-    ASSERT_DEBUG(res_id.type == (i32)rd::Type::Buffer);
+    ASSERT_DEBUG(res_id.type == (i32)Resource_Type::BUFFER);
     Buffer &   buf   = buffers[res_id.id];
     Mem_Chunk &chunk = mem_chunks[buf.mem_chunk_id.index()];
     void *     data  = NULL;
-    VK_ASSERT_OK(vkMapMemory(device, chunk.mem, buf.mem_offset, buf.create_info.size, 0, &data));
+    VK_ASSERT_OK(vkMapMemory(device, chunk.mem, buf.mem_offset,
+                             buf.create_info.size, 0, &data));
     return data;
   }
 
   void unmap_buffer(Resource_ID res_id) {
-    ASSERT_DEBUG(res_id.type == (i32)rd::Type::Buffer);
+    ASSERT_DEBUG(res_id.type == (i32)Resource_Type::BUFFER);
     Buffer &   buf   = buffers[res_id.id];
     Mem_Chunk &chunk = mem_chunks[buf.mem_chunk_id.index()];
     vkUnmapMemory(device, chunk.mem);
@@ -1517,187 +1346,12 @@ struct Window {
     return module;
   }
 
-  void invalidate_cache() {}
-
-  Resource_ID create_render_pass(string_ref name, u32 width, u32 height, string_ref *deps,
-                                 u32 num_deps, string_ref *rts_names, RT_Info *rts, u32 num_rts,
-                                 List *src) {
-    if (named_render_passes.contains(name)) {
-      ID           pass_id    = named_render_passes.get(name);
-      Render_Pass &pass       = render_passes[pass_id];
-      bool         invalidate = false;
-      if (                              //
-          pass.width != width ||        //
-          pass.height != height ||      //
-          pass.deps.size != num_deps || //
-          pass.rts.size != num_rts) {
-        invalidate = true;
-      }
-
-      if (invalidate) {
-        ito(pass.rts.size) {
-          Resource_ID res_id = named_resources.get(pass.rts[i]);
-          named_resources.remove(pass.rts[i]);
-          ASSERT_DEBUG(res_id.type == (i32)rd::Type::RT);
-          this->rts.remove(res_id.id, 3);
-        }
-        render_passes.remove(pass_id, 3);
-        named_render_passes.remove(name);
-        invalidate_cache();
-        goto make_new;
-      } else
-        return {pass_id, (i32)rd::Type::RenderPass};
-    }
-
-  make_new:
-    Render_Pass pass;
-    pass.init();
-    pass.name   = relocate_cstr(name);
-    pass.width  = width;
-    pass.height = height;
-    pass.src    = src;
-    ito(num_deps) {
-      Pass_Input input;
-      if (deps[i].ptr[0] == '~') {
-        input.name    = relocate_cstr(deps[i].substr(1, deps[i].len - 1));
-        input.history = true;
-      } else {
-        input.name    = relocate_cstr(deps[i]);
-        input.history = false;
-      }
-      pass.deps.push(input);
-    }
-    ito(num_rts) {
-      string_ref  rt_name = relocate_cstr(rts_names[i]);
-      Resource_ID rt      = create_rt(rts[i], width, height);
-      ASSERT_DEBUG(!named_resources.contains(rts_names[i]));
-      named_resources.insert(rt_name, rt);
-      if (rts[i].type == rd::RT_t::Depth) {
-        ASSERT_DEBUG(pass.depth_target.is_null());
-        pass.depth_target = rt;
-      }
-      pass.rts.push(rt_name);
-    }
-    SmallArray<VkAttachmentDescription, 6> attachments;
-    SmallArray<VkAttachmentReference, 6>   refs;
-    attachments.init();
-    refs.init();
-    defer({
-      attachments.release();
-      refs.release();
-    });
-    u32 depth_attachment_id = 0;
-    ito(num_rts) {
-      VkAttachmentDescription attachment;
-      MEMZERO(attachment);
-      if (rts[i].type == rd::RT_t::Color) {
-        attachment.format         = rts[i].format;
-        attachment.samples        = VK_SAMPLE_COUNT_1_BIT;
-        attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
-        attachment.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
-        attachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_LOAD;
-        attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        attachment.initialLayout  = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        attachment.finalLayout    = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-        VkAttachmentReference color_attachment;
-        MEMZERO(color_attachment);
-        color_attachment.attachment = i;
-        color_attachment.layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        refs.push(color_attachment);
-      } else {
-        attachment.format         = rts[i].format;
-        attachment.samples        = VK_SAMPLE_COUNT_1_BIT;
-        attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
-        attachment.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
-        attachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_LOAD;
-        attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        attachment.initialLayout  = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        attachment.finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        depth_attachment_id       = i;
-      }
-      attachments.push(attachment);
-    }
-    VkRenderPassCreateInfo cinfo;
-    MEMZERO(cinfo);
-    cinfo.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    cinfo.attachmentCount = attachments.size;
-    cinfo.pAttachments    = &attachments[0];
-
-    VkSubpassDescription  subpass;
-    VkAttachmentReference depth_attachment;
-    MEMZERO(subpass);
-    subpass.pipelineBindPoint    = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = refs.size;
-    subpass.pColorAttachments    = &refs[0];
-    if (!pass.depth_target.is_null()) {
-      MEMZERO(depth_attachment);
-      depth_attachment.attachment     = depth_attachment_id;
-      depth_attachment.layout         = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-      subpass.pDepthStencilAttachment = &depth_attachment;
-    }
-    cinfo.pSubpasses   = &subpass;
-    cinfo.subpassCount = 1;
-
-    VkSubpassDependency dependency;
-    MEMZERO(dependency);
-    dependency.srcSubpass    = VK_SUBPASS_EXTERNAL;
-    dependency.dstSubpass    = 0;
-    dependency.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependency.dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependency.srcAccessMask = 0;
-    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-
-    cinfo.pDependencies   = &dependency;
-    cinfo.dependencyCount = 1;
-
-    VK_ASSERT_OK(vkCreateRenderPass(device, &cinfo, NULL, &pass.pass));
-
-    {
-      SmallArray<VkImageView, 8> views;
-      views.init();
-      defer(views.release());
-      ito(pass.rts.size) {
-        Resource_ID res_id = named_resources.get(pass.rts[i]);
-        ASSERT_ALWAYS(res_id.type == (i32)rd::Type::RT);
-        RT &       rt   = this->rts[res_id.id];
-        ImageView &view = image_views[rt.view_id];
-        views.push(view.view);
-      }
-      VkFramebufferCreateInfo info;
-      MEMZERO(info);
-      info.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-      info.attachmentCount = views.size;
-      info.width           = width;
-      info.height          = height;
-      info.layers          = 1;
-      info.pAttachments    = &views[0];
-      info.renderPass      = pass.pass;
-      VK_ASSERT_OK(vkCreateFramebuffer(device, &info, NULL, &pass.fb));
-    }
-    ID pass_id = render_passes.push(pass);
-    named_render_passes.insert(pass.name, pass_id);
-    return {pass_id, (i32)rd::Type::RenderPass};
-  }
-
-  Resource_ID create_rt(RT_Info desc, u32 width, u32 height) {
-    Resource_ID image =
-        create_image(width, height, 1, 1, 1, desc.format,
-                     desc.type == rd::RT_t::Color ? (i32)rd::Image_Usage_Bits::USAGE_RT
-                                                  : (i32)rd::Image_Usage_Bits::USAGE_DT,
-                     (i32)rd::Memory_Bits::DEVICE);
-    Resource_ID image_view = create_image_view(image, 0, 1, 0, 1);
-    RT          rt;
-    rt.img_id  = image.id;
-    rt.view_id = image_view.id;
-    return {rts.push(rt), (i32)rd::Type::RT};
-  }
-
-  Resource_ID create_image_view(Resource_ID res_id, u32 base_level, u32 levels, u32 base_layer,
-                                u32 layers) {
-    ASSERT_ALWAYS(res_id.type == (i32)rd::Type::Image);
-    Image &               img = images[res_id.id];
-    ImageView             img_view;
+  Resource_ID create_image_view(Resource_ID res_id, u32 base_level, u32 levels,
+                                u32 base_layer, u32 layers) {
+    ASSERT_ALWAYS(res_id.type == (i32)Resource_Type::IMAGE);
+    Image &   img = images[res_id.id];
+    ImageView img_view;
+    MEMZERO(img_view);
     VkImageViewCreateInfo cinfo;
     MEMZERO(cinfo);
     cinfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -1716,28 +1370,28 @@ struct Window {
     cinfo.subresourceRange.levelCount     = levels;
     cinfo.viewType                        = img.create_info.extent.depth == 1
                          ? (img.create_info.extent.height == 1 ? //
-                                (img.create_info.arrayLayers == 1 ? VK_IMAGE_VIEW_TYPE_1D
-                                                                  : VK_IMAGE_VIEW_TYPE_1D_ARRAY)
+                                (img.create_info.arrayLayers == 1
+                                     ? VK_IMAGE_VIEW_TYPE_1D
+                                     : VK_IMAGE_VIEW_TYPE_1D_ARRAY)
                                                                : //
-                                (img.create_info.arrayLayers == 1 ? VK_IMAGE_VIEW_TYPE_2D
-                                                                  : VK_IMAGE_VIEW_TYPE_2D_ARRAY))
+                                (img.create_info.arrayLayers == 1
+                                     ? VK_IMAGE_VIEW_TYPE_2D
+                                     : VK_IMAGE_VIEW_TYPE_2D_ARRAY))
                          : VK_IMAGE_VIEW_TYPE_3D;
     VK_ASSERT_OK(vkCreateImageView(device, &cinfo, NULL, &img_view.view));
     img_view.img_id = res_id.id;
     img.add_reference();
-    img_view.create_info = cinfo;
-    return {image_views.push(img_view), (i32)rd::Type::ImageView};
+    img_view.flags.components       = cinfo.components;
+    img_view.flags.format           = cinfo.format;
+    img_view.flags.subresourceRange = cinfo.subresourceRange;
+    img_view.flags.viewType         = cinfo.viewType;
+    return {image_views.push(img_view), (i32)Resource_Type::IMAGE_VIEW};
   }
 
-  Resource_ID create_image(u32 width, u32 height, u32 depth, u32 layers, u32 levels,
-                           VkFormat format, u32 usage_flags, u32 mem_flags) {
-    u32 prop_flags = 0;
-    if (mem_flags & (i32)rd::Memory_Bits::MAPPABLE) {
-      prop_flags |= VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    }
-    if (mem_flags & (i32)rd::Memory_Bits::DEVICE) {
-      prop_flags |= VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-    }
+  Resource_ID create_image(u32 width, u32 height, u32 depth, u32 layers,
+                           u32 levels, VkFormat format, u32 usage_flags,
+                           u32 mem_flags) {
+    u32               prop_flags = to_vk_memory_bits(mem_flags);
     VkImage           image;
     VkImageCreateInfo cinfo;
     {
@@ -1752,26 +1406,12 @@ struct Window {
       cinfo.mipLevels             = levels;
       cinfo.samples               = VK_SAMPLE_COUNT_1_BIT;
       cinfo.imageType =
-          depth == 1 ? (height == 1 ? VK_IMAGE_TYPE_1D : VK_IMAGE_TYPE_2D) : VK_IMAGE_TYPE_3D;
+          depth == 1 ? (height == 1 ? VK_IMAGE_TYPE_1D : VK_IMAGE_TYPE_2D)
+                     : VK_IMAGE_TYPE_3D;
       cinfo.format        = format;
       cinfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
       cinfo.tiling        = VK_IMAGE_TILING_OPTIMAL;
-      cinfo.usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-      if (mem_flags & (i32)rd::Memory_Bits::MAPPABLE) {
-        cinfo.usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-      }
-      if (usage_flags & (i32)rd::Image_Usage_Bits::USAGE_RT) {
-        cinfo.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-      }
-      if (usage_flags & (i32)rd::Image_Usage_Bits::USAGE_DT) {
-        cinfo.usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-      }
-      if (usage_flags & (i32)rd::Image_Usage_Bits::USAGE_SAMPLED) {
-        cinfo.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
-      }
-      if (usage_flags & (i32)rd::Image_Usage_Bits::USAGE_UAV) {
-        cinfo.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
-      }
+      cinfo.usage         = to_vk_image_usage_bits(mem_flags);
       VK_ASSERT_OK(vkCreateImage(device, &cinfo, NULL, &image));
     }
     VkMemoryRequirements reqs;
@@ -1786,146 +1426,30 @@ struct Window {
       new_image.aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
     else
       new_image.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
-    u32 chunk_index = find_mem_chunk(prop_flags, reqs.memoryTypeBits, reqs.alignment, reqs.size);
+    u32 chunk_index        = find_mem_chunk(prop_flags, reqs.memoryTypeBits,
+                                     reqs.alignment, reqs.size);
     new_image.mem_chunk_id = ID{chunk_index + 1};
     Mem_Chunk &chunk       = mem_chunks[chunk_index];
     new_image.mem_offset   = chunk.alloc(reqs.alignment, reqs.size);
     vkBindImageMemory(device, new_image.image, chunk.mem, new_image.mem_offset);
-    return {images.push(new_image), (i32)rd::Type::Image};
-  }
-
-  // Resource_ID alloc_shader(size_t len, u32 *bytecode) {
-  //   Shader sh;
-  //   sh.module = compile_spirv(len, bytecode);
-  //   return {shaders.push(sh), (i32)rd::Type::Shader};
-  // }
-
-  Resource_ID alloc_shader(List *root) {
-    Shader sh;
-    sh.root = root;
-    sh.hash = hash_of(root->get_umbrella_string());
-    return {shaders.push(sh), (i32)rd::Type::Shader};
+    return {images.push(new_image), (i32)Resource_Type::IMAGE};
   }
 
   void release_resource(Resource_ID res_id) {
-    if (res_id.type == (i32)rd::Type::Buffer) {
-      buffers[res_id.id].rem_reference();
-      //      buffers.remove(res_id.id, 3);
-    } else if (res_id.type == (i32)rd::Type::Shader) {
-      //      shaders.remove(res_id.id, 3);
-      shaders[res_id.id].rem_reference();
+    if (res_id.type == (i32)Resource_Type::BUFFER) {
+      Buffer &buf = buffers[res_id.id];
+      buf.rem_reference();
+      ito(buf.views.size) buffer_views.remove(buf.views[i], 0);
+    } else if (res_id.type == (i32)Resource_Type::IMAGE) {
+      Image &img = images[res_id.id];
+      img.rem_reference();
+      ito(img.views.size) image_views.remove(img.views[i], 0);
+    } else if (res_id.type == (i32)Resource_Type::SHADER) {
+      shaders.remove(res_id.id, 3);
     } else {
       TRAP;
     }
   }
-
-  void VS_bind_shader(Resource_ID res_id) {
-    if (res_id.is_null()) {
-      graphics_state.vs      = ID{0};
-      graphics_state.vs_hash = 0;
-      return;
-    }
-    ASSERT_DEBUG(res_id.type == (i32)rd::Type::Shader);
-    Shader &sh             = shaders[res_id.id];
-    graphics_state.vs      = res_id.id;
-    graphics_state.vs_hash = sh.hash;
-  }
-
-  void PS_bind_shader(Resource_ID res_id) {
-    if (res_id.is_null()) {
-      graphics_state.ps      = ID{0};
-      graphics_state.ps_hash = 0;
-      return;
-    }
-    ASSERT_DEBUG(res_id.type == (i32)rd::Type::Shader);
-    Shader &sh             = shaders[res_id.id];
-    graphics_state.ps      = res_id.id;
-    graphics_state.ps_hash = sh.hash;
-  }
-
-  void IA_set_topology(VkPrimitiveTopology topo) { graphics_state.topology = topo; }
-
-  void IA_bind_index_buffer(Resource_ID res_id, u32 offset, VkFormat format) {
-    if (res_id.is_null()) {
-      return;
-    }
-    ASSERT_DEBUG(res_id.type == (i32)rd::Type::Buffer);
-    Buffer &    buf = buffers[res_id.id];
-    VkIndexType type;
-    switch (format) {
-    case VK_FORMAT_R32_UINT: type = VK_INDEX_TYPE_UINT32; break;
-    case VK_FORMAT_R16_UINT: type = VK_INDEX_TYPE_UINT16; break;
-    default: TRAP;
-    }
-    vkCmdBindIndexBuffer(cmd_buffers[cmd_index], buf.buffer, (VkDeviceSize)offset, type);
-  }
-
-  void IA_bind_vertex_buffer(Resource_ID res_id, u32 binding, u32 offset, u32 stride,
-                             VkVertexInputRate rate) {
-    if (res_id.is_null()) {
-      return;
-    }
-    ASSERT_DEBUG(res_id.type == (i32)rd::Type::Buffer);
-    Buffer &     buf     = buffers[res_id.id];
-    VkDeviceSize doffset = (VkDeviceSize)offset;
-    vkCmdBindVertexBuffers(cmd_buffers[cmd_index], binding, 1, &buf.buffer, &doffset);
-    if (graphics_state.num_bindings <= binding) {
-      graphics_state.num_bindings = binding + 1;
-    }
-    graphics_state.bindings[binding].binding   = binding;
-    graphics_state.bindings[binding].inputRate = rate;
-    graphics_state.bindings[binding].stride    = stride;
-  }
-
-  void IA_bind_attribute(u32 location, u32 binding, u32 offset, VkFormat format) {
-    if (graphics_state.num_attributes <= location) {
-      graphics_state.num_attributes = location + 1;
-    }
-    graphics_state.attributes[location].binding  = binding;
-    graphics_state.attributes[location].format   = format;
-    graphics_state.attributes[location].location = location;
-    graphics_state.attributes[location].offset   = offset;
-  }
-
-  void IA_set_cull_mode(VkFrontFace ff, VkCullModeFlags cm) {
-    graphics_state.front_face = ff;
-    graphics_state.cull_mode  = cm;
-  }
-
-  void bind_graphics_pipeline() {
-    if (!pipeline_cache.contains(graphics_state)) {
-      Graphics_Pipeline_Wrapper gw;
-      ASSERT_DEBUG(!graphics_state.ps.is_null());
-      ASSERT_DEBUG(!graphics_state.vs.is_null());
-      Shader &ps = shaders[graphics_state.ps];
-      Shader &vs = shaders[graphics_state.vs];
-      ASSERT_DEBUG(!cur_pass.is_null());
-      Render_Pass &pass = render_passes[cur_pass];
-      gw.init(device, pass, vs, ps, graphics_state);
-      ID pipe_id = pipelines.push(gw);
-      pipeline_cache.insert(graphics_state, pipe_id);
-    }
-    ID pipe_id = pipeline_cache.get(graphics_state);
-    ASSERT_DEBUG(!pipe_id.is_null());
-    Graphics_Pipeline_Wrapper &gw = pipelines[pipe_id];
-    vkCmdBindPipeline(cmd_buffers[cmd_index], VK_PIPELINE_BIND_POINT_GRAPHICS, gw.pipeline);
-  }
-
-  void draw_indexed_instanced(u32 index_count, u32 instance_count, u32 start_index,
-                              i32 start_vertex, u32 start_instance) {
-    bind_graphics_pipeline();
-    vkCmdDrawIndexed(cmd_buffers[cmd_index], index_count, instance_count, start_index, start_vertex,
-                     start_instance);
-  }
-
-  //  u32 shader_get_input_location(Resource_ID res_id, string_ref name) {
-  //    ASSERT_DEBUG(res_id.type == (i32)rd::Type::Shader);
-  //    Shader &sh = shaders[res_id.id];
-  //    ito(sh.attributes.size) {
-  //      if (sh.attributes[i].name == name) return sh.attributes[i].location;
-  //    }
-  //    TRAP;
-  //  }
 
   void release_swapchain() {
     if (swapchain != VK_NULL_HANDLE) {
@@ -1934,7 +1458,8 @@ struct Window {
     ito(sc_image_count) {
       if (sc_framebuffers[i] != VK_NULL_HANDLE)
         vkDestroyFramebuffer(device, sc_framebuffers[i], NULL);
-      if (sc_image_views[i] != VK_NULL_HANDLE) vkDestroyImageView(device, sc_image_views[i], NULL);
+      if (sc_image_views[i] != VK_NULL_HANDLE)
+        vkDestroyImageView(device, sc_image_views[i], NULL);
     }
     if (sc_render_pass != VK_NULL_HANDLE) {
       vkDestroyRenderPass(device, sc_render_pass, NULL);
@@ -1949,7 +1474,8 @@ struct Window {
     u32                format_count = 0;
     VkSurfaceFormatKHR formats[0x100];
     vkGetPhysicalDeviceSurfaceFormatsKHR(physdevice, surface, &format_count, 0);
-    vkGetPhysicalDeviceSurfaceFormatsKHR(physdevice, surface, &format_count, formats);
+    vkGetPhysicalDeviceSurfaceFormatsKHR(physdevice, surface, &format_count,
+                                         formats);
     VkSurfaceFormatKHR format_of_choice;
     format_of_choice.format = VK_FORMAT_UNDEFINED;
     ito(format_count) {
@@ -1970,11 +1496,13 @@ struct Window {
     sc_format = format_of_choice;
 
     uint32_t num_present_modes = 0;
-    vkGetPhysicalDeviceSurfacePresentModesKHR(physdevice, surface, &num_present_modes, NULL);
+    vkGetPhysicalDeviceSurfacePresentModesKHR(physdevice, surface,
+                                              &num_present_modes, NULL);
     VkPresentModeKHR present_modes[0x100];
-    vkGetPhysicalDeviceSurfacePresentModesKHR(physdevice, surface, &num_present_modes,
-                                              present_modes);
-    VkPresentModeKHR present_mode_of_choice = VK_PRESENT_MODE_FIFO_KHR; // always supported.
+    vkGetPhysicalDeviceSurfacePresentModesKHR(
+        physdevice, surface, &num_present_modes, present_modes);
+    VkPresentModeKHR present_mode_of_choice =
+        VK_PRESENT_MODE_FIFO_KHR; // always supported.
     ito(num_present_modes) {
       if (present_modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) { // prefer mailbox
         present_mode_of_choice = VK_PRESENT_MODE_MAILBOX_KHR;
@@ -1983,19 +1511,23 @@ struct Window {
     }
     //    usleep(100000);
     VkSurfaceCapabilitiesKHR surface_capabilities;
-    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physdevice, surface, &surface_capabilities);
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physdevice, surface,
+                                              &surface_capabilities);
 
-    sc_extent        = surface_capabilities.currentExtent;
-    sc_extent.width  = CLAMP(sc_extent.width, surface_capabilities.minImageExtent.width,
-                            surface_capabilities.maxImageExtent.width);
-    sc_extent.height = CLAMP(sc_extent.height, surface_capabilities.minImageExtent.height,
-                             surface_capabilities.maxImageExtent.height);
+    sc_extent = surface_capabilities.currentExtent;
+    sc_extent.width =
+        CLAMP(sc_extent.width, surface_capabilities.minImageExtent.width,
+              surface_capabilities.maxImageExtent.width);
+    sc_extent.height =
+        CLAMP(sc_extent.height, surface_capabilities.minImageExtent.height,
+              surface_capabilities.maxImageExtent.height);
 
     VkSwapchainCreateInfoKHR sc_create_info;
     MEMZERO(sc_create_info);
-    sc_create_info.sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-    sc_create_info.surface          = surface;
-    sc_create_info.minImageCount    = CLAMP(3, surface_capabilities.minImageCount, 0x10);
+    sc_create_info.sType   = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+    sc_create_info.surface = surface;
+    sc_create_info.minImageCount =
+        CLAMP(3, surface_capabilities.minImageCount, 0x10);
     sc_create_info.imageFormat      = format_of_choice.format;
     sc_create_info.imageColorSpace  = format_of_choice.colorSpace;
     sc_create_info.imageExtent      = sc_extent;
@@ -2029,7 +1561,8 @@ struct Window {
       view_ci.subresourceRange.baseArrayLayer = 0;
       view_ci.subresourceRange.layerCount     = 1;
       view_ci.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
-      VK_ASSERT_OK(vkCreateImageView(device, &view_ci, NULL, &sc_image_views[i]));
+      VK_ASSERT_OK(
+          vkCreateImageView(device, &view_ci, NULL, &sc_image_views[i]));
       sc_image_layout[i] = VK_IMAGE_LAYOUT_UNDEFINED;
     }
     {
@@ -2081,24 +1614,28 @@ struct Window {
       info.layers          = 1;
       info.pAttachments    = &sc_image_views[i];
       info.renderPass      = sc_render_pass;
-      VK_ASSERT_OK(vkCreateFramebuffer(device, &info, NULL, &sc_framebuffers[i]));
+      VK_ASSERT_OK(
+          vkCreateFramebuffer(device, &info, NULL, &sc_framebuffers[i]));
     }
   }
 
   void init() {
     init_ds();
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS);
-    SDL_Window *window = SDL_CreateWindow("VulkII", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                          1280, 720, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+    SDL_Window *window = SDL_CreateWindow(
+        "VulkII", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720,
+        SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
     TMP_STORAGE_SCOPE;
 
     u32 num_instance_extensions;
-    ASSERT_ALWAYS(SDL_Vulkan_GetInstanceExtensions(window, &num_instance_extensions, nullptr));
-    const char **instance_extensions =
-        (char const **)tl_alloc_tmp((num_instance_extensions + 1) * sizeof(char *));
-    ASSERT_ALWAYS(
-        SDL_Vulkan_GetInstanceExtensions(window, &num_instance_extensions, instance_extensions));
-    instance_extensions[num_instance_extensions++] = VK_EXT_DEBUG_REPORT_EXTENSION_NAME;
+    ASSERT_ALWAYS(SDL_Vulkan_GetInstanceExtensions(
+        window, &num_instance_extensions, nullptr));
+    const char **instance_extensions = (char const **)tl_alloc_tmp(
+        (num_instance_extensions + 1) * sizeof(char *));
+    ASSERT_ALWAYS(SDL_Vulkan_GetInstanceExtensions(
+        window, &num_instance_extensions, instance_extensions));
+    instance_extensions[num_instance_extensions++] =
+        VK_EXT_DEBUG_REPORT_EXTENSION_NAME;
 
     VkApplicationInfo app_info;
     MEMZERO(app_info);
@@ -2108,9 +1645,10 @@ struct Window {
     app_info.pApplicationName   = "Vulkii";
     app_info.pEngineName        = "Vulkii";
 
-    const char *layerNames[] = {//
-                                // "VK_LAYER_LUNARG_standard_validation" // [Deprecated]
-                                "VK_LAYER_KHRONOS_validation"};
+    const char *layerNames[] = {
+        //
+        // "VK_LAYER_LUNARG_standard_validation" // [Deprecated]
+        "VK_LAYER_KHRONOS_validation"};
 
     VkInstanceCreateInfo info;
     MEMZERO(info);
@@ -2141,24 +1679,29 @@ struct Window {
     ito(physdevice_count) {
       {
         u32 num_queue_family_properties = 0;
-        vkGetPhysicalDeviceQueueFamilyProperties(physdevice_handles[i],
-                                                 &num_queue_family_properties, NULL);
         vkGetPhysicalDeviceQueueFamilyProperties(
-            physdevice_handles[i], &num_queue_family_properties, queue_family_properties);
+            physdevice_handles[i], &num_queue_family_properties, NULL);
+        vkGetPhysicalDeviceQueueFamilyProperties(physdevice_handles[i],
+                                                 &num_queue_family_properties,
+                                                 queue_family_properties);
 
         jto(num_queue_family_properties) {
 
           VkBool32 sup = VK_FALSE;
-          vkGetPhysicalDeviceSurfaceSupportKHR(physdevice_handles[i], j, surface, &sup);
+          vkGetPhysicalDeviceSurfaceSupportKHR(physdevice_handles[i], j,
+                                               surface, &sup);
 
-          if (sup && (queue_family_properties[j].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
+          if (sup &&
+              (queue_family_properties[j].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
             graphics_queue_id  = j;
             graphics_device_id = physdevice_handles[i];
           }
-          if (sup && (queue_family_properties[j].queueFlags & VK_QUEUE_COMPUTE_BIT)) {
+          if (sup &&
+              (queue_family_properties[j].queueFlags & VK_QUEUE_COMPUTE_BIT)) {
             compute_queue_id = j;
           }
-          if (sup && (queue_family_properties[j].queueFlags & VK_QUEUE_TRANSFER_BIT)) {
+          if (sup &&
+              (queue_family_properties[j].queueFlags & VK_QUEUE_TRANSFER_BIT)) {
             transfer_queue_id = j;
           }
         }
@@ -2175,18 +1718,20 @@ struct Window {
       //    {
       //      u32 num_queue_family_properties = 0;
       //      vkGetPhysicalDeviceQueueFamilyProperties2KHR(physdevice_handles[i],
-      //                                                   &num_queue_family_properties, NULL);
+      //                                                   &num_queue_family_properties,
+      //                                                   NULL);
       //      vkGetPhysicalDeviceQueueFamilyProperties2KHR(
       //          physdevice_handles[i], &num_queue_family_properties,
       //          queue_family_properties2KHR);
       //    }
     }
     physdevice                             = graphics_device_id;
-    char const *       device_extensions[] = {"VK_EXT_descriptor_indexing", "VK_EXT_debug_marker",
+    char const *       device_extensions[] = {"VK_EXT_descriptor_indexing",
+                                       "VK_EXT_debug_marker",
                                        VK_KHR_SWAPCHAIN_EXTENSION_NAME};
     VkDeviceCreateInfo device_create_info;
     MEMZERO(device_create_info);
-    device_create_info.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    device_create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     device_create_info.queueCreateInfoCount    = 1;
     device_create_info.pQueueCreateInfos       = 0;
     device_create_info.enabledLayerCount       = ARRAY_SIZE(layerNames);
@@ -2197,7 +1742,7 @@ struct Window {
     float                   priority           = 1.0f;
     VkDeviceQueueCreateInfo queue_create_info;
     MEMZERO(queue_create_info);
-    queue_create_info.sType              = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    queue_create_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
     queue_create_info.queueFamilyIndex   = graphics_queue_id;
     queue_create_info.queueCount         = 1;
     queue_create_info.pQueuePriorities   = &priority;
@@ -2208,8 +1753,9 @@ struct Window {
     pd_features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     VkPhysicalDeviceDescriptorIndexingFeaturesEXT pd_index_features;
     MEMZERO(pd_index_features);
-    pd_index_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT;
-    pd_features2.pNext      = ((void *)&pd_index_features);
+    pd_index_features.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT;
+    pd_features2.pNext = ((void *)&pd_index_features);
     vkGetPhysicalDeviceFeatures2(physdevice, &pd_features2);
     ASSERT_DEBUG(pd_index_features.shaderSampledImageArrayNonUniformIndexing);
     ASSERT_DEBUG(pd_index_features.descriptorBindingPartiallyBound);
@@ -2221,7 +1767,8 @@ struct Window {
 
     device_create_info.pEnabledFeatures = &pd_features;
 
-    VK_ASSERT_OK(vkCreateDevice(graphics_device_id, &device_create_info, NULL, &device));
+    VK_ASSERT_OK(
+        vkCreateDevice(graphics_device_id, &device_create_info, NULL, &device));
     vkGetDeviceQueue(device, graphics_queue_id, 0, &queue);
     ASSERT_ALWAYS(queue != VK_NULL_HANDLE);
 
@@ -2252,7 +1799,8 @@ struct Window {
       info.pNext = NULL;
       info.flags = 0;
       ito(sc_image_count) vkCreateSemaphore(device, &info, 0, &sc_free_sem[i]);
-      ito(sc_image_count) vkCreateSemaphore(device, &info, 0, &render_finish_sem[i]);
+      ito(sc_image_count)
+          vkCreateSemaphore(device, &info, 0, &render_finish_sem[i]);
     }
     {
       VkFenceCreateInfo info;
@@ -2261,23 +1809,25 @@ struct Window {
       info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
       ito(sc_image_count) vkCreateFence(device, &info, 0, &frame_fences[i]);
     }
+    ito(sc_image_count) desc_pools[i].init(device);
   }
 
   void update_surface_size() {
     VkSurfaceCapabilitiesKHR surface_capabilities;
-    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physdevice, surface, &surface_capabilities);
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physdevice, surface,
+                                              &surface_capabilities);
     window_width  = surface_capabilities.currentExtent.width;
     window_height = surface_capabilities.currentExtent.height;
   }
+
   void start_frame() {
-    graphics_state.reset();
     buffers.tick();
+    samplers.tick();
     images.tick();
     shaders.tick();
     buffer_views.tick();
     image_views.tick();
     render_passes.tick();
-    rts.tick();
     pipelines.tick();
     images.for_each([this](Image &image) {
       if (!image.is_referenced()) images.remove(image.get_id(), 3);
@@ -2287,32 +1837,38 @@ struct Window {
     });
   restart:
     update_surface_size();
-    if (window_width != (i32)sc_extent.width || window_height != (i32)sc_extent.height) {
+    if (window_width != (i32)sc_extent.width ||
+        window_height != (i32)sc_extent.height) {
       update_swapchain();
     }
-    cmd_index         = (frame_id++) % sc_image_count;
-    VkResult wait_res = vkWaitForFences(device, 1, &frame_fences[cmd_index], VK_TRUE, 1000);
+    cmd_index = (frame_id++) % sc_image_count;
+    desc_pools[cmd_index].reset();
+    VkResult wait_res =
+        vkWaitForFences(device, 1, &frame_fences[cmd_index], VK_TRUE, 1000);
     if (wait_res == VK_TIMEOUT) {
       goto restart;
     }
     vkResetFences(device, 1, &frame_fences[cmd_index]);
 
-    VkResult acquire_res = vkAcquireNextImageKHR(
-        device, swapchain, UINT64_MAX, sc_free_sem[cmd_index], VK_NULL_HANDLE, &image_index);
+    VkResult acquire_res = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX,
+                                                 sc_free_sem[cmd_index],
+                                                 VK_NULL_HANDLE, &image_index);
 
-    if (acquire_res == VK_ERROR_OUT_OF_DATE_KHR || acquire_res == VK_SUBOPTIMAL_KHR) {
+    if (acquire_res == VK_ERROR_OUT_OF_DATE_KHR ||
+        acquire_res == VK_SUBOPTIMAL_KHR) {
       update_swapchain();
       goto restart;
     } else if (acquire_res != VK_SUCCESS) {
       TRAP;
     }
   }
-  void end_frame() {
+  void end_frame(VkSemaphore *wait_sem) {
     VkCommandBufferBeginInfo begin_info;
     MEMZERO(begin_info);
     begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkResetCommandBuffer(cmd_buffers[cmd_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+    vkResetCommandBuffer(cmd_buffers[cmd_index],
+                         VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
     vkBeginCommandBuffer(cmd_buffers[cmd_index], &begin_info);
     VkImageSubresourceRange srange;
     MEMZERO(srange);
@@ -2333,42 +1889,15 @@ struct Window {
       bar.dstQueueFamilyIndex = graphics_queue_id;
       bar.image               = sc_images[image_index];
       bar.subresourceRange    = srange;
-      vkCmdPipelineBarrier(cmd_buffers[cmd_index], VK_PIPELINE_STAGE_TRANSFER_BIT,
-                           VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &bar);
+      vkCmdPipelineBarrier(
+          cmd_buffers[cmd_index], VK_PIPELINE_STAGE_TRANSFER_BIT,
+          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &bar);
     }
     VkClearColorValue clear_color = {{1.0f, 0.0f, 0.0f, 1.0f}};
     vkCmdClearColorImage(cmd_buffers[cmd_index], sc_images[image_index],
-                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &srange);
-    render_passes.for_each([&](Render_Pass &pass) {
-      cur_pass = pass.id;
-      VkRenderPassBeginInfo binfo;
-      MEMZERO(binfo);
-      binfo.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-      binfo.clearValueCount = 0;
-      binfo.framebuffer     = pass.fb;
-      binfo.renderArea      = VkRect2D{{0, 0}, {pass.width, pass.height}};
-      binfo.renderPass      = pass.pass;
-      ito(pass.rts.size) {
-        Resource_ID res_id = named_resources.get(pass.rts[i]);
-        ASSERT_DEBUG(res_id.type == (i32)rd::Type::RT);
-        RT &   rt  = rts[res_id.id];
-        Image &img = images[rt.img_id];
-        if (img.is_depth_image())
-          img.barrier(cmd_buffers[cmd_index], VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                      VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-        else
-          img.barrier(cmd_buffers[cmd_index], VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-      }
-      vkCmdBeginRenderPass(cmd_buffers[cmd_index], &binfo, VK_SUBPASS_CONTENTS_INLINE);
-      List *cur = pass.src;
-      while (cur != NULL) {
-        IEvaluator::get_head()->eval(cur);
-        cur = cur->next;
-      }
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1,
+                         &srange);
 
-      vkCmdEndRenderPass(cmd_buffers[cmd_index]);
-    });
     {
       VkImageMemoryBarrier bar;
       MEMZERO(bar);
@@ -2381,23 +1910,38 @@ struct Window {
       bar.dstQueueFamilyIndex = graphics_queue_id;
       bar.image               = sc_images[image_index];
       bar.subresourceRange    = srange;
-      vkCmdPipelineBarrier(cmd_buffers[cmd_index], VK_PIPELINE_STAGE_TRANSFER_BIT,
-                           VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 1, &bar);
+      vkCmdPipelineBarrier(
+          cmd_buffers[cmd_index], VK_PIPELINE_STAGE_TRANSFER_BIT,
+          VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 1, &bar);
     }
     sc_image_layout[image_index] = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     vkEndCommandBuffer(cmd_buffers[cmd_index]);
-    VkPipelineStageFlags stage_flags[]{VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-    VkSubmitInfo         submit_info;
+    VkPipelineStageFlags stage_flags[]{
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+    VkSubmitInfo submit_info;
     MEMZERO(submit_info);
-    submit_info.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit_info.waitSemaphoreCount   = 1;
-    submit_info.pWaitSemaphores      = &sc_free_sem[cmd_index];
-    submit_info.pWaitDstStageMask    = stage_flags;
-    submit_info.commandBufferCount   = 1;
-    submit_info.pCommandBuffers      = &cmd_buffers[cmd_index];
-    submit_info.signalSemaphoreCount = 1;
-    submit_info.pSignalSemaphores    = &render_finish_sem[cmd_index];
-    vkQueueSubmit(queue, 1, &submit_info, frame_fences[cmd_index]);
+    if (wait_sem != NULL) {
+      VkSemaphore sems[2]              = {sc_free_sem[cmd_index], *wait_sem};
+      submit_info.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+      submit_info.waitSemaphoreCount   = 2;
+      submit_info.pWaitSemaphores      = sems;
+      submit_info.pWaitDstStageMask    = stage_flags;
+      submit_info.commandBufferCount   = 1;
+      submit_info.pCommandBuffers      = &cmd_buffers[cmd_index];
+      submit_info.signalSemaphoreCount = 1;
+      submit_info.pSignalSemaphores    = &render_finish_sem[cmd_index];
+      vkQueueSubmit(queue, 1, &submit_info, frame_fences[cmd_index]);
+    } else {
+      submit_info.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+      submit_info.waitSemaphoreCount   = 1;
+      submit_info.pWaitSemaphores      = &sc_free_sem[cmd_index];
+      submit_info.pWaitDstStageMask    = stage_flags;
+      submit_info.commandBufferCount   = 1;
+      submit_info.pCommandBuffers      = &cmd_buffers[cmd_index];
+      submit_info.signalSemaphoreCount = 1;
+      submit_info.pSignalSemaphores    = &render_finish_sem[cmd_index];
+      vkQueueSubmit(queue, 1, &submit_info, frame_fences[cmd_index]);
+    }
     VkPresentInfoKHR present_info;
     MEMZERO(present_info);
     present_info.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -2410,488 +1954,450 @@ struct Window {
   }
 };
 
-// typedef void (*Loop_Callback_t)(rd::Pass_Mng *);
-
-enum class Render_Value_t {
-  UNKNOWN = 0,
-  RESOURCE_ID,
-  FLAGS,
-  ARRAY,
-  //  SHADER_SOURCE,
-};
-
-struct Render_Value {
-  struct Array {
-    void *ptr;
-    u32   size;
+class Vk_Ctx : public rd::Imm_Ctx {
+  Window *                                wnd;
+  Graphics_Pipeline_State                 graphics_state;
+  VkCommandBuffer                         cmd;
+  VkFence                                 finish_fence;
+  VkSemaphore                             finish_sem;
+  InlineArray<Graphics_Pipeline_State, 8> stack;
+  ID                                      cur_pass;
+  ID                                      cur_pso;
+  u8                                      _push_constants[128];
+  u32                                     _push_constants_size;
+  bool                                    _push_constants_dirty;
+  enum class Binding_t {
+    UNIFORM_BUFFER,
+    STORAGE_BUFFER,
+    IMAGE,
+    SAMPLED_IMAGE,
+    STORAGE_IMAGE
   };
-  //  struct Shader_Source {
-  //    shaderc_shader_kind kind;
-  //    string_ref          text;
-  //  };
-  union {
-    Resource_ID res_id;
-    Array       arr;
-    //    Shader_Source shsrc;
+  struct Resource_Binding {
+    u32       set;
+    u32       binding;
+    u32       element;
+    Binding_t type;
+    union {
+      struct {
+        ID     buf_id;
+        size_t offset;
+      } uniform_buffer;
+      struct {
+        ID     buf_id;
+        size_t offset;
+      } storage_buffer;
+    };
   };
-};
 
-struct Renderign_Evaluator final : public IEvaluator {
-  Window             wnd;
-  Pool<Render_Value> rd_values;
-  Pool<>             tmp_values;
-  // scratch state
-  struct Scratch_State {
-    string_ref        name;
-    i32               index_count;
-    i32               instance_count;
-    i32               start_index;
-    i32               start_vertex;
-    i32               start_innstance;
-    i32               offset;
-    i32               binding;
-    i32               location;
-    i32               stride;
-    VkVertexInputRate rate;
-    VkFormat          format;
-    VkFrontFace       front_face;
-    VkCullModeFlags   cull_mode;
-    rd::RT_t          rt_type;
-    void              clear() { memset(this, 0, sizeof(*this)); }
-    void              eval(List *l) {
-      if (l->child != NULL) {
-        eval(l->child);
-      } else if (l->cmp_symbol("offset")) {
-        ASSERT_DEBUG(parse_decimal_int(l->next->symbol.ptr, l->next->symbol.len, &offset));
-      } else if (l->cmp_symbol("binding")) {
-        ASSERT_DEBUG(parse_decimal_int(l->next->symbol.ptr, l->next->symbol.len, &binding));
-      } else if (l->cmp_symbol("stride")) {
-        ASSERT_DEBUG(parse_decimal_int(l->next->symbol.ptr, l->next->symbol.len, &stride));
-      } else if (l->cmp_symbol("location")) {
-        ASSERT_DEBUG(parse_decimal_int(l->next->symbol.ptr, l->next->symbol.len, &location));
-      } else if (l->cmp_symbol("format")) {
-        format = parse_format(l->next->symbol);
-      } else if (l->cmp_symbol("name")) {
-        name = l->next->symbol;
-      } else if (l->cmp_symbol("rate")) {
-        if (l->next->cmp_symbol("PER_VERTEX")) {
-          rate = VK_VERTEX_INPUT_RATE_VERTEX;
-        } else if (l->next->cmp_symbol("PER_INSTANCE")) {
-          rate = VK_VERTEX_INPUT_RATE_INSTANCE;
-        } else {
-          TRAP;
-        }
-      } else if (l->cmp_symbol("front_face")) {
-        if (l->next->cmp_symbol("CCW")) {
-          front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-        } else if (l->next->cmp_symbol("CW")) {
-          front_face = VK_FRONT_FACE_CLOCKWISE;
-        } else {
-          TRAP;
-        }
-      } else if (l->cmp_symbol("cull_mode")) {
-        if (l->next->cmp_symbol("NONE")) {
-          cull_mode = VK_CULL_MODE_NONE;
-        } else if (l->next->cmp_symbol("FRONT")) {
-          cull_mode = VK_CULL_MODE_FRONT_BIT;
-        } else {
-          TRAP;
-        }
-      } else if (l->cmp_symbol("rt_type")) {
-        if (l->next->cmp_symbol("COLOR")) {
-          rt_type = rd::RT_t::Color;
-        } else if (l->next->cmp_symbol("DEPTH")) {
-          rt_type = rd::RT_t::Depth;
-        } else {
-          TRAP;
-        }
-      }
+  void flush_graphics_push_constants() {
+    if (_push_constants_size > 0 && _push_constants_dirty)
+      vkCmdPushConstants(cmd, get_cur_graphics_pipeline().pipeline_layout,
+                         VK_SHADER_STAGE_ALL_GRAPHICS, 0, _push_constants_size,
+                         _push_constants);
+    _push_constants_dirty = false;
+  }
+
+  Graphics_Pipeline_Wrapper &get_cur_graphics_pipeline() {
+    ASSERT_DEBUG(!cur_pso.is_null());
+    return wnd->pipelines[cur_pso];
+  }
+
+  void bind_graphics_pipeline() {
+    if (!wnd->pipeline_cache.contains(graphics_state)) {
+      Graphics_Pipeline_Wrapper gw;
+      ASSERT_DEBUG(!graphics_state.ps.is_null());
+      ASSERT_DEBUG(!graphics_state.vs.is_null());
+      Shader_Info &ps = wnd->shaders[graphics_state.ps];
+      Shader_Info &vs = wnd->shaders[graphics_state.vs];
+      ASSERT_DEBUG(!cur_pass.is_null());
+      Render_Pass &pass = wnd->render_passes[cur_pass];
+      gw.init(wnd->device, pass, vs, ps, graphics_state);
+      ID pipe_id = wnd->pipelines.push(gw);
+      wnd->pipeline_cache.insert(graphics_state, pipe_id);
     }
-  } scratch;
-  void init() {
-    rd_values  = Pool<Render_Value>::create(1 << 10);
-    tmp_values = Pool<>::create(1 << 10);
-    wnd.init();
+    ID pipe_id = wnd->pipeline_cache.get(graphics_state);
+    ASSERT_DEBUG(!pipe_id.is_null());
+    if (cur_pso == pipe_id) return;
+    cur_pso                       = pipe_id;
+    Graphics_Pipeline_Wrapper &gw = wnd->pipelines[pipe_id];
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gw.pipeline);
   }
-  Renderign_Evaluator *create() {
-    Renderign_Evaluator *out = new Renderign_Evaluator;
-    out->init();
-    return out;
+
+  public:
+  VkSemaphore get_on_finish() { return finish_sem; }
+  void        init(Window *wnd, ID pass) {
+    _push_constants_size  = 0;
+    _push_constants_dirty = false;
+    this->wnd             = wnd;
+    this->cur_pass        = pass;
+    cur_pso               = ID{0};
+    stack.init();
+    graphics_state.reset();
+    VkCommandBufferAllocateInfo info;
+    MEMZERO(info);
+    info.sType       = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    info.commandPool = wnd->cmd_pool;
+    info.level       = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    info.commandBufferCount = 1;
+
+    vkAllocateCommandBuffers(wnd->device, &info, &cmd);
+    VkCommandBufferBeginInfo begin_info;
+    MEMZERO(begin_info);
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    VK_ASSERT_OK(vkResetCommandBuffer(
+        cmd, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT));
+    VK_ASSERT_OK(vkBeginCommandBuffer(cmd, &begin_info));
+    {
+      VkFenceCreateInfo info;
+      MEMZERO(info);
+      info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+      info.flags = 0;
+      VK_ASSERT_OK(vkCreateFence(wnd->device, &info, NULL, &finish_fence));
+    }
+    {
+      VkSemaphoreCreateInfo info;
+      MEMZERO(info);
+      info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+      info.pNext = NULL;
+      info.flags = 0;
+      VK_ASSERT_OK(vkCreateSemaphore(wnd->device, &info, 0, &finish_sem));
+    }
   }
-  void *alloc_tmp(u32 size) { return tmp_values.alloc(size); }
-  void  enter_scope() {
-    state->enter_scope();
-    tmp_values.enter_scope();
-    rd_values.enter_scope();
-    string_storage.enter_scope();
+  bool is_fininshed() {
+    VkResult wait_res =
+        vkWaitForFences(wnd->device, 1, &finish_fence, VK_TRUE, 0);
+    ASSERT_DEBUG(wait_res == VK_SUCCESS || wait_res == VK_TIMEOUT);
+    return wait_res == VK_SUCCESS;
   }
-  void exit_scope() {
-    state->exit_scope();
-    tmp_values.exit_scope();
-    rd_values.exit_scope();
-    string_storage.exit_scope();
+  void submit(VkSemaphore *wait_sem) {
+    vkEndCommandBuffer(cmd);
+    VkPipelineStageFlags stage_flags[]{VK_PIPELINE_STAGE_ALL_COMMANDS_BIT};
+    VkSubmitInfo         submit_info;
+    MEMZERO(submit_info);
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    if (wait_sem != NULL) {
+      submit_info.waitSemaphoreCount = 1;
+      submit_info.pWaitSemaphores    = wait_sem;
+    }
+    submit_info.pWaitDstStageMask    = stage_flags;
+    submit_info.commandBufferCount   = 1;
+    submit_info.pCommandBuffers      = &cmd;
+    submit_info.signalSemaphoreCount = 1;
+    submit_info.pSignalSemaphores    = &finish_sem;
+    vkQueueSubmit(wnd->queue, 1, &submit_info, finish_fence);
+  }
+  void release() {
+    stack.release();
+    vkDestroyFence(wnd->device, finish_fence, NULL);
+    vkDestroySemaphore(wnd->device, finish_sem, NULL);
+    vkFreeCommandBuffers(wnd->device, wnd->cmd_pool, 1, &cmd);
+  }
+  // CTX
+  void clear_state() override { graphics_state.reset(); }
+  void push_state() override { stack.push(graphics_state); }
+  void pop_state() override { graphics_state = stack.pop(); }
+  void IA_set_topology(rd::Primitive topology) override {
+    graphics_state.topology = to_vk(topology);
+  }
+  void IA_set_index_buffer(Resource_ID res_id, u32 offset,
+                           rd::Index_t format) override {
+    if (res_id.is_null()) {
+      return;
+    }
+    ASSERT_DEBUG(res_id.type == (i32)Resource_Type::BUFFER);
+    Buffer &    buf = wnd->buffers[res_id.id];
+    VkIndexType type;
+    switch (format) {
+    case rd::Index_t::UINT32: type = VK_INDEX_TYPE_UINT32; break;
+    case rd::Index_t::UINT16: type = VK_INDEX_TYPE_UINT16; break;
+    default: TRAP;
+    }
+    vkCmdBindIndexBuffer(cmd, buf.buffer, (VkDeviceSize)offset, type);
+  }
+  void IA_set_vertex_buffer(u32 index, Resource_ID res_id, size_t offset,
+                            size_t stride, rd::Input_Rate rate) override {
+    if (res_id.is_null()) {
+      return;
+    }
+    ASSERT_DEBUG(res_id.type == (i32)Resource_Type::SHADER);
+    Buffer &     buf     = wnd->buffers[res_id.id];
+    VkDeviceSize doffset = (VkDeviceSize)offset;
+    vkCmdBindVertexBuffers(cmd, index, 1, &buf.buffer, &doffset);
+    graphics_state.num_bindings = MAX(graphics_state.num_bindings, index + 1);
+    graphics_state.bindings[index].binding = index;
+    if (rate == rd::Input_Rate::VERTEX)
+      graphics_state.bindings[index].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    else if (rate == rd::Input_Rate::INSTANCE)
+      graphics_state.bindings[index].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+    graphics_state.bindings[index].stride = stride;
+  }
+  void IA_set_attribute(rd::Attribute_Info const &info) override {
+    graphics_state.num_attributes =
+        MAX(graphics_state.num_attributes, info.location + 1);
+    graphics_state.attributes[info.location].binding  = info.binding;
+    graphics_state.attributes[info.location].format   = to_vk(info.format);
+    graphics_state.attributes[info.location].location = info.location;
+    graphics_state.attributes[info.location].offset   = info.offset;
+  }
+  void VS_set_shader(Resource_ID id) override {}
+  void PS_set_shader(Resource_ID id) override {}
+  void CS_set_shader(Resource_ID id) override {}
+  void RS_set_state(rd::RS_State const &rs_state) override {
+    graphics_state.rs_state = rs_state;
+  }
+  void DS_set_state(rd::DS_State const &ds_state) override {
+    graphics_state.ds_state = ds_state;
+  }
+  void MS_set_state(rd::MS_State const &ms_state) override {
+    graphics_state.ms_state = ms_state;
+  }
+  void OM_set_blend_state(u32 rt_index, rd::Blend_State const &bl) override {
+    VkPipelineColorBlendAttachmentState bs;
+    MEMZERO(bs);
+    bs.blendEnable         = to_vk(bl.enabled);
+    bs.srcColorBlendFactor = to_vk(bl.src_color);
+    bs.dstColorBlendFactor = to_vk(bl.dst_color);
+    bs.colorBlendOp        = to_vk(bl.color_blend_op);
+    bs.srcAlphaBlendFactor = to_vk(bl.src_alpha);
+    bs.dstAlphaBlendFactor = to_vk(bl.dst_alpha);
+    bs.alphaBlendOp        = to_vk(bl.alpha_blend_op);
+
+    if (bl.color_write_mask & (u32)rd::Color_Component_Bit::R_BIT)
+      bs.colorWriteMask |= VK_COLOR_COMPONENT_R_BIT;
+    if (bl.color_write_mask & (u32)rd::Color_Component_Bit::G_BIT)
+      bs.colorWriteMask |= VK_COLOR_COMPONENT_G_BIT;
+    if (bl.color_write_mask & (u32)rd::Color_Component_Bit::B_BIT)
+      bs.colorWriteMask |= VK_COLOR_COMPONENT_B_BIT;
+    if (bl.color_write_mask & (u32)rd::Color_Component_Bit::A_BIT)
+      bs.colorWriteMask |= VK_COLOR_COMPONENT_A_BIT;
+
+    graphics_state.blend_states[rt_index] = bs;
+  }
+
+  void bind_uniform_buffer(rd::Stage_t stage, u32 set, u32 binding,
+                           Resource_ID buf_id, size_t offset) override {
+    UNIMPLEMENTED;
+  }
+  void bind_storage_buffer(rd::Stage_t stage, u32 set, u32 binding,
+                           Resource_ID buf_id, size_t offset) override {
+    UNIMPLEMENTED;
+  }
+  void bind_image(rd::Stage_t stage, u32 set, u32 binding, u32 index,
+                  Resource_ID image_id, u32 layer, u32 num_layers, u32 level,
+                  u32 num_levels) override {
+    UNIMPLEMENTED;
+  }
+  void bind_sampled_image(rd::Stage_t stage, u32 set, u32 binding, u32 index,
+                          Resource_ID image_id, Resource_ID sampler_id,
+                          u32 layer, u32 num_layers, u32 level,
+                          u32 num_levels) override {
+    UNIMPLEMENTED;
+  }
+  void bind_rw_image(rd::Stage_t stage, u32 set, u32 binding, u32 index,
+                     Resource_ID image_id, u32 layer, u32 num_layers, u32 level,
+                     u32 num_levels) override {
+    UNIMPLEMENTED;
+  }
+  void  flush_bindings() override { UNIMPLEMENTED; }
+  void *map_buffer(Resource_ID res_id) override {
+    return wnd->map_buffer(res_id);
+  }
+  void unmap_buffer(Resource_ID res_id) override { wnd->unmap_buffer(res_id); }
+  void push_constants(void const *data, size_t size) override {
+    _push_constants_dirty = true;
+    _push_constants_size  = size;
+    memcpy(_push_constants, data, size);
+  }
+  void draw_indexed(u32 index_count, u32 instance_count, u32 first_index,
+                    u32 first_instance, i32 vertex_offset) override {
+    bind_graphics_pipeline();
+    flush_graphics_push_constants();
+    vkCmdDrawIndexed(cmd, index_count, instance_count, first_index,
+                     vertex_offset, first_instance);
+  }
+  void draw(u32 vertex_count, u32 instance_count, u32 first_vertex,
+            u32 first_instance) override {
+    bind_graphics_pipeline();
+    flush_graphics_push_constants();
+    vkCmdDraw(cmd, vertex_count, instance_count, first_vertex, first_instance);
+  }
+  void dispatch(u32 dim_x, u32 dim_y, u32 dim_z) override {
+    UNIMPLEMENTED;
+    vkCmdDispatch(cmd, dim_x, dim_y, dim_z);
+  }
+};
+
+class VkResource_Manager : public rd::IResource_Manager {
+  Window *wnd;
+
+  public:
+  void        init(Window *wnd) { this->wnd = wnd; }
+  void        release() {}
+  void        on_pass_begin() {}
+  void        on_pass_end() {}
+  Resource_ID create_image(rd::Image_Create_Info info) override {
+    return wnd->create_image(info.width, info.height, info.depth, info.layers,
+                             info.levels, to_vk(info.format), info.usage_bits,
+                             info.mem_bits);
+  }
+  Resource_ID create_buffer(rd::Buffer_Create_Info info) override {
+    return wnd->create_buffer(info);
+  }
+  Resource_ID create_shader_raw(rd::Stage_t type, string_ref text,
+                                Pair<string_ref, string_ref> *defines,
+                                size_t num_defines) override {
+    u64 shader_hash = hash_of(text);
+    ito(num_defines) {
+      shader_hash ^= hash_of(defines[0].first) ^ hash_of(defines[0].second);
+    }
+    if (wnd->shader_cache.contains(shader_hash)) {
+      return {wnd->shader_cache.get(shader_hash), (u32)Resource_Type::SHADER};
+    }
+    Shader_Info         si;
+    shaderc_shader_kind kind;
+    if (type == rd::Stage_t::VERTEX)
+      kind = shaderc_vertex_shader;
+    else if (type == rd::Stage_t::COMPUTE)
+      kind = shaderc_compute_shader;
+    else if (type == rd::Stage_t::PIXEL)
+      kind = shaderc_fragment_shader;
+    else
+      UNIMPLEMENTED;
+
+    si.init(type, shader_hash,
+            compile_glsl(wnd->device, text, kind, defines, num_defines));
+
+    ID shid = wnd->shaders.push(si);
+    wnd->shader_cache.insert(shader_hash, shid);
+    return {shid, (u32)Resource_Type::SHADER};
+  }
+  Resource_ID create_sampler(rd::Sampler_Create_Info const &info) override {
+    Sampler sm;
+    sm.create_info = info;
+    VkSamplerCreateInfo cinfo;
+    MEMZERO(cinfo);
+    cinfo.sType                   = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    cinfo.addressModeU            = to_vk(info.address_mode_u);
+    cinfo.addressModeV            = to_vk(info.address_mode_v);
+    cinfo.addressModeW            = to_vk(info.address_mode_w);
+    cinfo.anisotropyEnable        = to_vk(info.anisotropy);
+    cinfo.compareEnable           = to_vk(info.cmp);
+    cinfo.compareOp               = to_vk(info.cmp_op);
+    cinfo.magFilter               = to_vk(info.mag_filter);
+    cinfo.minFilter               = to_vk(info.min_filter);
+    cinfo.maxAnisotropy           = info.max_anisotropy;
+    cinfo.minLod                  = info.min_lod;
+    cinfo.maxLod                  = info.max_lod;
+    cinfo.unnormalizedCoordinates = to_vk(info.unnormalized_coordiantes);
+    cinfo.mipLodBias              = info.mip_lod_bias;
+    cinfo.mipmapMode              = info.mip_mode == rd::Filter::LINEAR
+                           ? VK_SAMPLER_MIPMAP_MODE_LINEAR
+                           : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    VK_ASSERT_OK(vkCreateSampler(wnd->device, &cinfo, NULL, &sm.sampler));
+    ID id = wnd->samplers.push(sm);
+    return {id, (u32)Resource_Type::SAMPLER};
+  }
+  void release_resource(Resource_ID id) override {}
+  void add_render_target(rd::Image_Create_Info const &info, u32 layer,
+                         u32 level, rd::Clear_Color const &cl) override {
+    UNIMPLEMENTED;
+  }
+  void add_render_target(Resource_ID id, u32 layer, u32 level,
+                         rd::Clear_Color const &cl) override {
+    UNIMPLEMENTED;
+  }
+  void add_depth_target(rd::Image_Create_Info const &info, u32 layer, u32 level,
+                        rd::Clear_Depth const &cl) override {
+    UNIMPLEMENTED;
+  }
+  void add_depth_target(Resource_ID id, u32 layer, u32 level,
+                        rd::Clear_Depth const &cl) override {
+    UNIMPLEMENTED;
+  }
+  Resource_ID get_resource(string_ref pass_name, string_ref res_name) override {
+    UNIMPLEMENTED;
+  }
+  void assign_name(Resource_ID res_id, string_ref name) override {
+    UNIMPLEMENTED;
+  }
+  Resource_ID      get_swapchain_image() override { UNIMPLEMENTED; }
+  rd::Image2D_Info get_swapchain_image_info() override { UNIMPLEMENTED; }
+};
+
+class VkPass_Mng : public rd::Pass_Mng {
+  Window *wnd;
+  struct Pass_Wrapper {
+    rd::IPass *         pass;
+    VkResource_Manager *rsmng;
+    Vk_Ctx *            ctx;
+    ID                  pass_id;
+    void                release() {
+      pass->release(rsmng);
+      ctx->release();
+      rsmng->release();
+    }
+  };
+  Array<Pass_Wrapper> passes;
+
+  public:
+  VkPass_Mng() {
+    wnd = new Window();
+    wnd->init();
+    passes.init();
   }
   void release() override {
-    wnd.release();
-    tmp_values.release();
-    rd_values.release();
+    wnd->release();
+
+    ito(passes.size) { passes[i].release(); }
+    passes.release();
+    delete wnd;
     delete this;
   }
-  void start_frame() {
-    SDL_Event event;
-    while (SDL_PollEvent(&event)) {
-      if (event.type == SDL_QUIT) {
-        exit(0);
-      }
-      switch (event.type) {
-      case SDL_WINDOWEVENT:
-        if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
+  void loop() override {
+
+    while (true) {
+      SDL_Event event;
+      while (SDL_PollEvent(&event)) {
+        if (event.type == SDL_QUIT) {
+          exit(0);
         }
-        break;
+        switch (event.type) {
+        case SDL_WINDOWEVENT:
+          if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
+          }
+          break;
+        }
       }
+      wnd->start_frame();
+      ito(passes.size) { passes[i].pass->on_begin(passes[i].rsmng); }
+      Pass_Wrapper *last_wrapper = NULL;
+      /*ito(passes.size) {
+        passes[i].pass->exec(passes[i].ctx);
+        if (last_wrapper != NULL) {
+          VkSemaphore sem = last_wrapper->ctx->get_on_finish();
+          passes[i].ctx->submit(&sem);
+        } else
+          passes[i].ctx->submit(NULL);
+        last_wrapper = &passes[i];
+      }*/
+      if (last_wrapper != NULL) {
+        VkSemaphore sem = last_wrapper->ctx->get_on_finish();
+        wnd->end_frame(&sem);
+      } else
+        wnd->end_frame(NULL);
     }
-    wnd.start_frame();
   }
-  Value *wrap_flags(u32 flags) {
-    Value *new_val    = state->value_storage.alloc_zero(1);
-    new_val->i        = (i32)flags;
-    new_val->type     = (i32)Value::Value_t::ANY;
-    new_val->any_type = (i32)Render_Value_t::FLAGS;
-    return new_val;
-  }
-  Value *wrap_resource(Resource_ID res_id) {
-    Render_Value *rval = rd_values.alloc_zero(1);
-    rval->res_id       = res_id;
-    Value *new_val     = state->value_storage.alloc_zero(1);
-    new_val->type      = (i32)Value::Value_t::ANY;
-    new_val->any_type  = (i32)Render_Value_t::RESOURCE_ID;
-    new_val->any       = rval;
-    return new_val;
-  }
-  Value *wrap_array(void *ptr, u32 size) {
-    Render_Value *rval = rd_values.alloc_zero(1);
-    rval->arr.ptr      = ptr;
-    rval->arr.size     = size;
-    Value *new_val     = state->value_storage.alloc_zero(1);
-    new_val->type      = (i32)Value::Value_t::ANY;
-    new_val->any_type  = (i32)Render_Value_t::ARRAY;
-    new_val->any       = rval;
-    return new_val;
-  }
-  //  Value *wrap_shader_source(string_ref text, shaderc_shader_kind kind) {
-  //    Render_Value *rval = rd_values.alloc_zero(1);
-  //    rval->shsrc.kind   = kind;
-  //    rval->shsrc.text   = text;
-  //    Value *new_val     = state->value_storage.alloc_zero(1);
-  //    new_val->type      = (i32)Value::Value_t::ANY;
-  //    new_val->any_type  = (i32)Render_Value_t::SHADER_SOURCE;
-  //    new_val->any       = rval;
-  //    return new_val;
-  //  }
-  void  end_frame() { wnd.end_frame(); }
-  Match eval(List *l) override {
-    if (l == NULL) return NULL;
-    if (l->child != NULL) {
-      return global_eval(l->child);
-    } else if (l->cmp_symbol("start_frame")) {
-      start_frame();
-      return NULL;
-    } else if (l->cmp_symbol("render-loop")) {
-      while (true) {
-        enter_scope();
-        eval_args(l->next);
-        exit_scope();
-      }
-      return NULL;
-    } else if (l->cmp_symbol("end_frame")) {
-      end_frame();
-      return NULL;
-    } else if (l->cmp_symbol("flags")) {
-      List *cur   = l->next;
-      u32   flags = 0;
-      while (cur != NULL) {
-        if (cur->cmp_symbol("Buffer_Usage_Bits::USAGE_TRANSIENT")) {
-          flags |= (i32)rd::Buffer_Usage_Bits::USAGE_TRANSIENT;
-        } else if (cur->cmp_symbol("Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER")) {
-          flags |= (i32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER;
-        } else if (cur->cmp_symbol("Buffer_Usage_Bits::USAGE_INDEX_BUFFER")) {
-          flags |= (i32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER;
-        } else if (cur->cmp_symbol("Buffer_Usage_Bits::USAGE_VERTEX_BUFFER")) {
-          flags |= (i32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
-        } else if (cur->cmp_symbol("Buffer_Usage_Bits::USAGE_UAV")) {
-          flags |= (i32)rd::Buffer_Usage_Bits::USAGE_UAV;
-        } else if (cur->cmp_symbol("Memory_Bits::MAPPABLE")) {
-          flags |= (i32)rd::Memory_Bits::MAPPABLE;
-        } else {
-          ASSERT_DEBUG(false);
-        }
-        cur = cur->next;
-      }
-      return wrap_flags(flags);
-    } else if (l->cmp_symbol("show_stats")) {
-      wnd.buffers.dump();
-      wnd.images.dump();
-      wnd.shaders.dump();
-      wnd.buffer_views.dump();
-      wnd.image_views.dump();
-      wnd.render_passes.dump();
-      wnd.rts.dump();
-      wnd.pipelines.dump();
-      fprintf(stdout, "num mem chunks: %i\n", (i32)wnd.mem_chunks.size);
-      ito(wnd.mem_chunks.size) wnd.mem_chunks[i].dump();
-      return NULL;
-    } else if (l->cmp_symbol("create_buffer")) {
-      SmallArray<Value *, 2> args;
-      args.init();
-      defer(args.release());
-      eval_args_and_collect(l->next, args);
-      ASSERT_EVAL(args.size = 3);
-      ASSERT_EVAL(args[0]->type == (i32)Value::Value_t::ANY &&
-                  args[0]->any_type == (i32)Render_Value_t::FLAGS);
-      ASSERT_EVAL(args[1]->type == (i32)Value::Value_t::ANY &&
-                  args[1]->any_type == (i32)Render_Value_t::FLAGS);
-      ASSERT_EVAL(args[2]->type == (i32)Value::Value_t::I32);
-      rd::Buffer info;
-      info.usage_bits    = args[0]->i;
-      info.mem_bits      = args[1]->i;
-      info.size          = args[2]->i;
-      Resource_ID res_id = wnd.create_buffer(info, NULL);
-      return wrap_resource(res_id);
-    } else if (l->cmp_symbol("release_resource")) {
-      SmallArray<Value *, 1> args;
-      args.init();
-      defer(args.release());
-      eval_args_and_collect(l->next, args);
-      ASSERT_EVAL(args.size = 1);
-      ASSERT_EVAL(args[0]->type == (i32)Value::Value_t::ANY &&
-                  args[0]->any_type == (i32)Render_Value_t::RESOURCE_ID);
-      Render_Value *rval = (Render_Value *)args[0]->any;
-      wnd.release_resource(rval->res_id);
-      return NULL;
-    } else if (l->cmp_symbol("map_buffer")) {
-      SmallArray<Value *, 2> args;
-      args.init();
-      defer(args.release());
-      eval_args_and_collect(l->next, args);
-      ASSERT_EVAL(args.size = 1);
-      ASSERT_EVAL(args[0]->type == (i32)Value::Value_t::ANY &&
-                  args[0]->any_type == (i32)Render_Value_t::RESOURCE_ID);
-      Render_Value *rval = (Render_Value *)args[0]->any;
-      void *        ptr  = wnd.map_buffer(rval->res_id);
-      return wrap_array(ptr, 0);
-    } else if (l->cmp_symbol("unmap_buffer")) {
-      SmallArray<Value *, 2> args;
-      args.init();
-      defer(args.release());
-      eval_args_and_collect(l->next, args);
-      ASSERT_EVAL(args.size = 1);
-      ASSERT_EVAL(args[0]->type == (i32)Value::Value_t::ANY &&
-                  args[0]->any_type == (i32)Render_Value_t::RESOURCE_ID);
-      Render_Value *rval = (Render_Value *)args[0]->any;
-      wnd.unmap_buffer(rval->res_id);
-      return NULL;
-    } else if (l->cmp_symbol("array_f32")) {
-      SmallArray<Value *, 16> args;
-      args.init();
-      defer(args.release());
-      eval_args_and_collect(l->next, args);
-      u8 *data = (u8 *)alloc_tmp(4 * args.size);
-      ito(args.size) {
-        ASSERT_EVAL(args[i]->type == (i32)Value::Value_t::F32);
-        memcpy(data + i * 4, &args[i]->f, 4);
-      }
-      return wrap_array(data, args.size * 4);
-    } else if (l->cmp_symbol("array_i32")) {
-      SmallArray<Value *, 16> args;
-      args.init();
-      defer(args.release());
-      eval_args_and_collect(l->next, args);
-      u8 *data = (u8 *)alloc_tmp(4 * args.size);
-      ito(args.size) {
-        ASSERT_EVAL(args[i]->type == (i32)Value::Value_t::I32);
-        memcpy(data + i * 4, &args[i]->f, 4);
-      }
-      return wrap_array(data, args.size * 4);
-    } else if (l->cmp_symbol("memcpy")) {
-      SmallArray<Value *, 4> args;
-      args.init();
-      defer(args.release());
-      eval_args_and_collect(l->next, args);
-      ASSERT_EVAL(args.size == 2);
-      ASSERT_EVAL(args[0]->type == (i32)Value::Value_t::ANY &&
-                  args[0]->any_type == (i32)Render_Value_t::ARRAY);
-      ASSERT_EVAL(args[1]->type == (i32)Value::Value_t::ANY &&
-                  args[1]->any_type == (i32)Render_Value_t::ARRAY);
-      Render_Value *val_1 = (Render_Value *)args[0]->any;
-      Render_Value *val_2 = (Render_Value *)args[1]->any;
-      memcpy(val_1->arr.ptr, val_2->arr.ptr, val_2->arr.size);
-      return NULL;
-    } else if (l->cmp_symbol("create_shader")) {
-      return wrap_resource(wnd.alloc_shader(l));
-    } else if (l->cmp_symbol("VS_bind_shader")) {
-      SmallArray<Value *, 1> args;
-      args.init();
-      defer(args.release());
-      eval_args_and_collect(l->next, args);
-      ASSERT_EVAL(args.size = 1);
-      ASSERT_EVAL(args[0]->type == (i32)Value::Value_t::ANY &&
-                  args[0]->any_type == (i32)Render_Value_t::RESOURCE_ID);
-      Render_Value *rval = (Render_Value *)args[0]->any;
-      wnd.VS_bind_shader(rval->res_id);
-      return NULL;
-    } else if (l->cmp_symbol("PS_bind_shader")) {
-      SmallArray<Value *, 1> args;
-      args.init();
-      defer(args.release());
-      eval_args_and_collect(l->next, args);
-      ASSERT_EVAL(args.size = 1);
-      ASSERT_EVAL(args[0]->type == (i32)Value::Value_t::ANY &&
-                  args[0]->any_type == (i32)Render_Value_t::RESOURCE_ID);
-      Render_Value *rval = (Render_Value *)args[0]->any;
-      wnd.PS_bind_shader(rval->res_id);
-      return NULL;
-    } else if (l->cmp_symbol("IA_set_topology")) {
-      SmallArray<Value *, 1> args;
-      args.init();
-      defer(args.release());
-      eval_args_and_collect(l->next, args);
-      ASSERT_EVAL(args.size = 1);
-      ASSERT_EVAL(args[0]->type == (i32)Value::Value_t::SYMBOL);
-      VkPrimitiveTopology topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-      if (args[0]->str == stref_s("TRIANGLE_LIST")) {
-        topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-      } else if (args[0]->str == stref_s("LINE_LIST")) {
-        topo = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
-      } else {
-        TRAP;
-      }
-      wnd.IA_set_topology(topo);
-      return NULL;
-    } else if (l->cmp_symbol("IA_bind_index_buffer")) {
-      Value *buf = global_eval(l->next).unwrap();
-      ASSERT_EVAL(buf != NULL && buf->type == (i32)Value::Value_t::ANY &&
-                  buf->any_type == (i32)Render_Value_t::RESOURCE_ID);
-      Render_Value *rval = (Render_Value *)buf->any;
-      scratch.clear();
-      List *cur = l->next->next;
-      while (cur != NULL) {
-        scratch.eval(cur);
-        cur = cur->next;
-      }
-      wnd.IA_bind_index_buffer(rval->res_id, scratch.offset, scratch.format);
-      return NULL;
-    } else if (l->cmp_symbol("IA_bind_vertex_buffer")) {
-      Value *buf = global_eval(l->next).unwrap();
-      ASSERT_EVAL(buf != NULL && buf->type == (i32)Value::Value_t::ANY &&
-                  buf->any_type == (i32)Render_Value_t::RESOURCE_ID);
-      Render_Value *rval = (Render_Value *)buf->any;
-      scratch.clear();
-      List *cur = l->next->next;
-      while (cur != NULL) {
-        scratch.eval(cur);
-        cur = cur->next;
-      }
-      wnd.IA_bind_vertex_buffer(rval->res_id, scratch.binding, scratch.offset, scratch.stride,
-                                scratch.rate);
-      return NULL;
-    } else if (l->cmp_symbol("IA_bind_attribute")) {
-      scratch.clear();
-      List *cur = l->next->next;
-      while (cur != NULL) {
-        scratch.eval(cur);
-        cur = cur->next;
-      }
-      wnd.IA_bind_attribute(scratch.location, scratch.binding, scratch.offset, scratch.format);
-      return NULL;
-    } else if (l->cmp_symbol("IA_set_cull_mode")) {
-      scratch.clear();
-      List *cur = l->next->next;
-      while (cur != NULL) {
-        scratch.eval(cur);
-        cur = cur->next;
-      }
-      wnd.IA_set_cull_mode(scratch.front_face, scratch.cull_mode);
-      return NULL;
-    } else if (l->cmp_symbol("draw_indexed_instanced")) {
-      scratch.clear();
-      List *cur = l->next->next;
-      while (cur != NULL) {
-        scratch.eval(cur);
-        cur = cur->next;
-      }
-      wnd.draw_indexed_instanced(scratch.index_count, scratch.instance_count, scratch.start_index,
-                                 scratch.start_vertex, scratch.start_innstance);
-      return NULL;
-    } else if (l->cmp_symbol("clear_state")) {
-      wnd.graphics_state.reset();
-      return NULL;
-    } else if (l->cmp_symbol("nil")) {
-      return wrap_resource(Resource_ID{{0}, 0});
-    } else if (l->cmp_symbol("start_render_pass")) {
-      string_ref        name  = l->next->symbol;
-      i32               width = 512, height = 512;
-      Array<RT_Info>    rts;
-      Array<string_ref> rts_names;
-      Array<string_ref> deps_names;
-      List *            src = NULL;
-      rts.init();
-      rts_names.init();
-      deps_names.init();
-      defer({
-        rts.release();
-        rts_names.release();
-        deps_names.release();
-      });
-      List *cur = l->next->next;
-      while (cur != NULL) {
-        List *ch = cur->child;
-        if (ch->cmp_symbol("width")) {
-          if (ch->next->cmp_symbol("#")) {
-            width = wnd.sc_extent.width;
-          } else {
-            ASSERT_DEBUG(parse_decimal_int(ch->next->symbol.ptr, ch->next->symbol.len, &width));
-          }
-        } else if (ch->cmp_symbol("height")) {
-          if (ch->next->cmp_symbol("#")) {
-            width = wnd.sc_extent.width;
-          } else {
-            ASSERT_DEBUG(parse_decimal_int(ch->next->symbol.ptr, ch->next->symbol.len, &height));
-          }
-        } else if (ch->cmp_symbol("depends")) {
-          deps_names.push(ch->next->symbol);
-        } else if (ch->cmp_symbol("add_render_target")) {
-          scratch.clear();
-          List *cur = ch->next;
-          while (cur != NULL) {
-            scratch.eval(cur);
-            cur = cur->next;
-          }
-          RT_Info rt;
-          rt.format = scratch.format;
-          rt.type   = scratch.rt_type;
-          rts.push(rt);
-          rts_names.push(scratch.name);
-        } else if (ch->cmp_symbol("body")) {
-          src = ch->next;
-        }
-        cur = cur->next;
-      }
-      wnd.create_render_pass(name, width, height, deps_names.ptr, deps_names.size, rts_names.ptr,
-                             rts.ptr, rts.size, src);
-      return NULL;
-    }
-    if (prev != NULL) return prev->eval(l);
-    return {NULL, false};
+  void add_pass(rd::IPass *pass) override {
+    Pass_Wrapper pw;
+    pw.pass = pass;
+    pw.ctx  = new Vk_Ctx();
+    pw.ctx->init(wnd, {0});
+    pw.rsmng = new VkResource_Manager();
+    pw.rsmng->init(wnd);
+    passes.push(pw);
   }
 };
 
-IEvaluator *create_rendering_mode() {
-  Renderign_Evaluator *eval = new Renderign_Evaluator();
-  eval->init();
-  return eval;
-}
-
-static int _init = [] {
-  IEvaluator::add_mode(stref_s("rendering"), create_rendering_mode);
-  return 0;
-}();
+rd::Pass_Mng *rd::Pass_Mng::create(rd::Impl_t) { return new VkPass_Mng; }
