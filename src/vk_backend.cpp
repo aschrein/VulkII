@@ -144,16 +144,45 @@ struct Buffer : public Ref_Cnt {
   InlineArray<ID, 8> views;
 };
 
+static inline bool operator==(VkComponentMapping const &a,
+                              VkComponentMapping const &b) {
+  return a.a == b.a && a.r == b.r && a.g == b.g && a.b == b.b;
+}
+
+static inline bool operator==(VkImageSubresourceRange const &a,
+                              VkImageSubresourceRange const &b) {
+  return a.aspectMask == b.aspectMask && a.baseArrayLayer == b.baseArrayLayer &&
+         a.baseMipLevel == b.baseMipLevel && a.layerCount == b.layerCount &&
+         a.levelCount == b.levelCount;
+}
+
 struct ImageView_Flags {
   VkImageViewType         viewType;
   VkFormat                format;
   VkComponentMapping      components;
   VkImageSubresourceRange subresourceRange;
+  bool                    operator==(ImageView_Flags const &that) {
+    return viewType == that.viewType && format == that.format &&
+           components == that.components &&
+           subresourceRange == that.subresourceRange;
+  }
 };
 
 u64 hash_of(ImageView_Flags const &state) {
   return hash_of(string_ref{(char const *)&state, sizeof(state)});
 }
+
+struct Image_Info {
+  VkImageType           imageType;
+  VkFormat              format;
+  VkExtent3D            extent;
+  uint32_t              mipLevels;
+  uint32_t              arrayLayers;
+  VkSampleCountFlagBits samples;
+  VkImageTiling         tiling;
+  VkImageUsageFlags     usage;
+  VkSharingMode         sharingMode;
+};
 
 struct Image : public Ref_Cnt {
   ID                 mem_chunk_id;
@@ -162,10 +191,10 @@ struct Image : public Ref_Cnt {
   VkAccessFlags      access_flags;
   VkImageAspectFlags aspect;
   VkImage            image;
-  VkImageCreateInfo  create_info;
+  Image_Info         info;
   InlineArray<ID, 8> views;
   bool               is_depth_image() {
-    switch (create_info.format) {
+    switch (info.format) {
     case VK_FORMAT_D16_UNORM:
     case VK_FORMAT_D16_UNORM_S8_UINT:
     case VK_FORMAT_D24_UNORM_S8_UINT:
@@ -189,8 +218,8 @@ struct Image : public Ref_Cnt {
     bar.subresourceRange.aspectMask = aspect;
     bar.subresourceRange.baseArrayLayer = 0;
     bar.subresourceRange.baseMipLevel   = 0;
-    bar.subresourceRange.layerCount     = create_info.arrayLayers;
-    bar.subresourceRange.levelCount     = create_info.mipLevels;
+    bar.subresourceRange.layerCount     = info.arrayLayers;
+    bar.subresourceRange.levelCount     = info.mipLevels;
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0,
                          NULL, 1, &bar);
@@ -332,13 +361,9 @@ struct Shader_Info : public Slot {
 
 struct Render_Pass : public Slot {
   string        name;
-  u32           width;
-  u32           height;
-  u32           num_rts;
-  Resource_ID   rts[0x10];
-  Resource_ID   depth_target;
   VkRenderPass  pass;
   VkFramebuffer fb;
+  u32           width, height;
 
   void init() { memset(this, 0, sizeof(*this)); }
 
@@ -424,15 +449,40 @@ VkFormat to_vk(rd::Format format) {
   case rd::Format::RGBA8_SNORM     : return VK_FORMAT_R8G8B8A8_SNORM      ;
   case rd::Format::RGBA8_SRGBA     : return VK_FORMAT_R8G8B8A8_SRGB       ;
   case rd::Format::RGBA8_UINT      : return VK_FORMAT_R8G8B8A8_UINT       ;
+
   case rd::Format::RGB8_UNORM      : return VK_FORMAT_R8G8B8_UNORM        ;
-  case rd::Format::RGB8_SNORM      : return VK_FORMAT_R8G8B8A8_SNORM      ;
-  case rd::Format::RGB8_SRGBA      : return VK_FORMAT_R8G8B8A8_SRGB       ;
-  case rd::Format::RGB8_UINT       : return VK_FORMAT_R8G8B8A8_UINT       ;
+  case rd::Format::RGB8_SNORM      : return VK_FORMAT_R8G8B8_SNORM        ;
+  case rd::Format::RGB8_SRGBA      : return VK_FORMAT_R8G8B8_SRGB         ;
+  case rd::Format::RGB8_UINT       : return VK_FORMAT_R8G8B8_UINT         ;
+
   case rd::Format::RGBA32_FLOAT    : return VK_FORMAT_R32G32B32A32_SFLOAT ;
   case rd::Format::RGB32_FLOAT     : return VK_FORMAT_R32G32B32_SFLOAT    ;
   case rd::Format::RG32_FLOAT      : return VK_FORMAT_R32G32_SFLOAT       ;
   case rd::Format::R32_FLOAT       : return VK_FORMAT_R32_SFLOAT          ;
   case rd::Format::D32_FLOAT       : return VK_FORMAT_D32_SFLOAT          ;
+  default: UNIMPLEMENTED;
+  }
+  // clang-format on
+}
+
+rd::Format from_vk(VkFormat format) {
+  // clang-format off
+  switch (format) {
+  case VK_FORMAT_R8G8B8A8_UNORM      : return rd::Format::RGBA8_UNORM     ;
+  case VK_FORMAT_R8G8B8A8_SNORM      : return rd::Format::RGBA8_SNORM     ;
+  case VK_FORMAT_R8G8B8A8_SRGB       : return rd::Format::RGBA8_SRGBA     ;
+  case VK_FORMAT_R8G8B8A8_UINT       : return rd::Format::RGBA8_UINT      ;
+
+  case VK_FORMAT_R8G8B8_UNORM        : return rd::Format::RGB8_UNORM      ;
+  case VK_FORMAT_R8G8B8_SNORM        : return rd::Format::RGB8_SNORM      ;
+  case VK_FORMAT_R8G8B8_SRGB         : return rd::Format::RGB8_SRGBA      ;
+  case VK_FORMAT_R8G8B8_UINT         : return rd::Format::RGB8_UINT       ;
+
+  case VK_FORMAT_R32G32B32A32_SFLOAT : return rd::Format::RGBA32_FLOAT    ;
+  case VK_FORMAT_R32G32B32_SFLOAT    : return rd::Format::RGB32_FLOAT     ;
+  case VK_FORMAT_R32G32_SFLOAT       : return rd::Format::RG32_FLOAT      ;
+  case VK_FORMAT_R32_SFLOAT          : return rd::Format::R32_FLOAT       ;
+  case VK_FORMAT_D32_SFLOAT          : return rd::Format::D32_FLOAT       ;
   default: UNIMPLEMENTED;
   }
   // clang-format on
@@ -972,6 +1022,11 @@ struct Resource_Array {
     free_items.release();
     limbo_items.release();
   }
+  void free_slot(ID id) {
+    ASSERT_DEBUG(!id.is_null());
+    items[id.index()].disable();
+    free_items.push(id.index());
+  }
   ID push(T t) {
     if (free_items.size) {
       auto id   = free_items.pop();
@@ -1038,15 +1093,11 @@ struct Window {
   VkCommandPool    cmd_pool                   = VK_NULL_HANDLE;
   VkCommandBuffer  cmd_buffers[MAX_SC_IMAGES] = {};
 
-  VkSwapchainKHR     swapchain                      = VK_NULL_HANDLE;
-  VkRenderPass       sc_render_pass                 = VK_NULL_HANDLE;
-  uint32_t           sc_image_count                 = 0;
-  VkImageLayout      sc_image_layout[MAX_SC_IMAGES] = {};
-  VkImage            sc_images[MAX_SC_IMAGES]       = {};
-  VkImageView        sc_image_views[MAX_SC_IMAGES]  = {};
-  VkFramebuffer      sc_framebuffers[MAX_SC_IMAGES] = {};
-  VkExtent2D         sc_extent                      = {};
-  VkSurfaceFormatKHR sc_format                      = {};
+  VkSwapchainKHR     swapchain                = VK_NULL_HANDLE;
+  uint32_t           sc_image_count           = 0;
+  ID                 sc_images[MAX_SC_IMAGES] = {};
+  VkExtent2D         sc_extent                = {};
+  VkSurfaceFormatKHR sc_format                = {};
 
   u32             frame_id                         = 0;
   u32             cmd_index                        = 0;
@@ -1346,10 +1397,9 @@ struct Window {
     return module;
   }
 
-  Resource_ID create_image_view(Resource_ID res_id, u32 base_level, u32 levels,
+  Resource_ID create_image_view(ID res_id, u32 base_level, u32 levels,
                                 u32 base_layer, u32 layers) {
-    ASSERT_ALWAYS(res_id.type == (i32)Resource_Type::IMAGE);
-    Image &   img = images[res_id.id];
+    Image &   img = images[res_id];
     ImageView img_view;
     MEMZERO(img_view);
     VkImageViewCreateInfo cinfo;
@@ -1361,30 +1411,39 @@ struct Window {
     cm.b                                  = VK_COMPONENT_SWIZZLE_B;
     cm.a                                  = VK_COMPONENT_SWIZZLE_A;
     cinfo.components                      = cm;
-    cinfo.format                          = img.create_info.format;
+    cinfo.format                          = img.info.format;
     cinfo.image                           = img.image;
     cinfo.subresourceRange.aspectMask     = img.aspect;
     cinfo.subresourceRange.baseArrayLayer = base_layer;
     cinfo.subresourceRange.baseMipLevel   = base_level;
     cinfo.subresourceRange.layerCount     = layers;
     cinfo.subresourceRange.levelCount     = levels;
-    cinfo.viewType                        = img.create_info.extent.depth == 1
-                         ? (img.create_info.extent.height == 1 ? //
-                                (img.create_info.arrayLayers == 1
-                                     ? VK_IMAGE_VIEW_TYPE_1D
-                                     : VK_IMAGE_VIEW_TYPE_1D_ARRAY)
-                                                               : //
-                                (img.create_info.arrayLayers == 1
-                                     ? VK_IMAGE_VIEW_TYPE_2D
-                                     : VK_IMAGE_VIEW_TYPE_2D_ARRAY))
-                         : VK_IMAGE_VIEW_TYPE_3D;
-    VK_ASSERT_OK(vkCreateImageView(device, &cinfo, NULL, &img_view.view));
-    img_view.img_id = res_id.id;
-    img.add_reference();
+    cinfo.viewType =
+        img.info.extent.depth == 1
+            ? (img.info.extent.height == 1 ? //
+                   (img.info.arrayLayers == 1 ? VK_IMAGE_VIEW_TYPE_1D
+                                              : VK_IMAGE_VIEW_TYPE_1D_ARRAY)
+                                           : //
+                   (img.info.arrayLayers == 1 ? VK_IMAGE_VIEW_TYPE_2D
+                                              : VK_IMAGE_VIEW_TYPE_2D_ARRAY))
+            : VK_IMAGE_VIEW_TYPE_3D;
+
     img_view.flags.components       = cinfo.components;
     img_view.flags.format           = cinfo.format;
     img_view.flags.subresourceRange = cinfo.subresourceRange;
     img_view.flags.viewType         = cinfo.viewType;
+    // check if there's already a view with needed properties
+    ito(img.views.size) {
+      ImageView &view = image_views[img.views[i]];
+      if (view.flags == img_view.flags) {
+        return {img.views[i], (u32)Resource_Type::IMAGE_VIEW};
+      }
+    }
+
+    VK_ASSERT_OK(vkCreateImageView(device, &cinfo, NULL, &img_view.view));
+    img_view.img_id = res_id;
+    img.add_reference();
+
     return {image_views.push(img_view), (i32)Resource_Type::IMAGE_VIEW};
   }
 
@@ -1417,12 +1476,22 @@ struct Window {
     VkMemoryRequirements reqs;
     vkGetImageMemoryRequirements(device, image, &reqs);
     Image new_image;
-    new_image.image        = image;
-    new_image.access_flags = 0;
-    new_image.create_info  = cinfo;
-    new_image.layout       = VK_IMAGE_LAYOUT_UNDEFINED;
-    new_image.ref_cnt      = 1;
-    if (usage_flags & (i32)rd::Image_Usage_Bits::USAGE_DT)
+    new_image.image              = image;
+    new_image.access_flags       = 0;
+    new_image.info.arrayLayers   = cinfo.arrayLayers;
+    new_image.info.extent.width  = cinfo.extent.width;
+    new_image.info.extent.height = cinfo.extent.height;
+    new_image.info.extent.depth  = cinfo.extent.depth;
+    new_image.info.format        = cinfo.format;
+    new_image.info.imageType     = cinfo.imageType;
+    new_image.info.mipLevels     = cinfo.mipLevels;
+    new_image.info.samples       = cinfo.samples;
+    new_image.info.sharingMode   = cinfo.sharingMode;
+    new_image.info.tiling        = cinfo.tiling;
+    new_image.info.usage         = cinfo.usage;
+    new_image.layout             = VK_IMAGE_LAYOUT_UNDEFINED;
+    new_image.ref_cnt            = 1;
+    if (usage_flags & (u32)rd::Image_Usage_Bits::USAGE_DT)
       new_image.aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
     else
       new_image.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -1432,19 +1501,23 @@ struct Window {
     Mem_Chunk &chunk       = mem_chunks[chunk_index];
     new_image.mem_offset   = chunk.alloc(reqs.alignment, reqs.size);
     vkBindImageMemory(device, new_image.image, chunk.mem, new_image.mem_offset);
-    return {images.push(new_image), (i32)Resource_Type::IMAGE};
+    return {images.push(new_image), (u32)Resource_Type::IMAGE};
   }
 
   void release_resource(Resource_ID res_id) {
-    if (res_id.type == (i32)Resource_Type::BUFFER) {
+    if (res_id.type == (u32)Resource_Type::BUFFER) {
       Buffer &buf = buffers[res_id.id];
       buf.rem_reference();
-      ito(buf.views.size) buffer_views.remove(buf.views[i], 0);
-    } else if (res_id.type == (i32)Resource_Type::IMAGE) {
+      ito(buf.views.size) buffer_views.remove(buf.views[i], 3);
+    } else if (res_id.type == (u32)Resource_Type::BUFFER_VIEW) {
+      buffer_views.remove(res_id.id, 3);
+    } else if (res_id.type == (u32)Resource_Type::IMAGE_VIEW) {
+      image_views.remove(res_id.id, 3);
+    } else if (res_id.type == (u32)Resource_Type::IMAGE) {
       Image &img = images[res_id.id];
       img.rem_reference();
-      ito(img.views.size) image_views.remove(img.views[i], 0);
-    } else if (res_id.type == (i32)Resource_Type::SHADER) {
+      ito(img.views.size) image_views.remove(img.views[i], 3);
+    } else if (res_id.type == (u32)Resource_Type::SHADER) {
       shaders.remove(res_id.id, 3);
     } else {
       TRAP;
@@ -1456,13 +1529,9 @@ struct Window {
       vkDestroySwapchainKHR(device, swapchain, NULL);
     }
     ito(sc_image_count) {
-      if (sc_framebuffers[i] != VK_NULL_HANDLE)
-        vkDestroyFramebuffer(device, sc_framebuffers[i], NULL);
-      if (sc_image_views[i] != VK_NULL_HANDLE)
-        vkDestroyImageView(device, sc_image_views[i], NULL);
-    }
-    if (sc_render_pass != VK_NULL_HANDLE) {
-      vkDestroyRenderPass(device, sc_render_pass, NULL);
+      Image &img = images[sc_images[i]];
+      jto(img.views.size) { image_views.remove(img.views[i], 0); }
+      images.free_slot(sc_images[i]);
     }
   }
 
@@ -1542,30 +1611,30 @@ struct Window {
     sc_image_count                  = 0;
     VK_ASSERT_OK(vkCreateSwapchainKHR(device, &sc_create_info, 0, &swapchain));
     vkGetSwapchainImagesKHR(device, swapchain, &sc_image_count, NULL);
-    vkGetSwapchainImagesKHR(device, swapchain, &sc_image_count, sc_images);
+    VkImage raw_images[MAX_SC_IMAGES];
+    vkGetSwapchainImagesKHR(device, swapchain, &sc_image_count, raw_images);
     ito(sc_image_count) {
-      VkImageViewCreateInfo view_ci;
-      MEMZERO(view_ci);
-      view_ci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-      view_ci.image = sc_images[i];
-      MEMZERO(view_ci.components);
-      view_ci.components.r = VK_COMPONENT_SWIZZLE_R;
-      view_ci.components.g = VK_COMPONENT_SWIZZLE_G;
-      view_ci.components.b = VK_COMPONENT_SWIZZLE_B;
-      view_ci.components.a = VK_COMPONENT_SWIZZLE_A;
-      view_ci.format       = sc_format.format;
-      MEMZERO(view_ci.subresourceRange);
-      view_ci.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-      view_ci.subresourceRange.baseMipLevel   = 0;
-      view_ci.subresourceRange.levelCount     = 1;
-      view_ci.subresourceRange.baseArrayLayer = 0;
-      view_ci.subresourceRange.layerCount     = 1;
-      view_ci.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
-      VK_ASSERT_OK(
-          vkCreateImageView(device, &view_ci, NULL, &sc_image_views[i]));
-      sc_image_layout[i] = VK_IMAGE_LAYOUT_UNDEFINED;
+      Image image;
+      MEMZERO(image);
+      image.image              = raw_images[i];
+      image.access_flags       = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+      image.layout             = VK_IMAGE_LAYOUT_UNDEFINED;
+      image.info.arrayLayers   = sc_create_info.imageArrayLayers;
+      image.info.extent.width  = sc_create_info.imageExtent.width;
+      image.info.extent.height = sc_create_info.imageExtent.height;
+      image.info.extent.depth  = 1;
+      image.info.format        = sc_create_info.imageFormat;
+      image.info.imageType     = VK_IMAGE_TYPE_2D;
+      image.info.mipLevels     = 1;
+      image.info.samples       = VK_SAMPLE_COUNT_1_BIT;
+      image.info.sharingMode   = sc_create_info.imageSharingMode;
+      image.info.tiling        = VK_IMAGE_TILING_OPTIMAL;
+      image.info.usage         = sc_create_info.imageUsage;
+      image.aspect             = VK_IMAGE_ASPECT_COLOR_BIT;
+      image.ref_cnt            = 1;
+      sc_images[i]             = images.push(image);
     }
-    {
+    /*{
       VkAttachmentDescription attachment;
       MEMZERO(attachment);
       attachment.format         = sc_format.format;
@@ -1616,7 +1685,7 @@ struct Window {
       info.renderPass      = sc_render_pass;
       VK_ASSERT_OK(
           vkCreateFramebuffer(device, &info, NULL, &sc_framebuffers[i]));
-    }
+    }*/
   }
 
   void init() {
@@ -1870,7 +1939,7 @@ struct Window {
     vkResetCommandBuffer(cmd_buffers[cmd_index],
                          VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
     vkBeginCommandBuffer(cmd_buffers[cmd_index], &begin_info);
-    VkImageSubresourceRange srange;
+    /*VkImageSubresourceRange srange;
     MEMZERO(srange);
     srange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
     srange.baseMipLevel   = 0;
@@ -1896,25 +1965,12 @@ struct Window {
     VkClearColorValue clear_color = {{1.0f, 0.0f, 0.0f, 1.0f}};
     vkCmdClearColorImage(cmd_buffers[cmd_index], sc_images[image_index],
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1,
-                         &srange);
+                         &srange);*/
 
-    {
-      VkImageMemoryBarrier bar;
-      MEMZERO(bar);
-      bar.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-      bar.srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
-      bar.dstAccessMask       = VK_ACCESS_MEMORY_READ_BIT;
-      bar.oldLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-      bar.newLayout           = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-      bar.srcQueueFamilyIndex = graphics_queue_id;
-      bar.dstQueueFamilyIndex = graphics_queue_id;
-      bar.image               = sc_images[image_index];
-      bar.subresourceRange    = srange;
-      vkCmdPipelineBarrier(
-          cmd_buffers[cmd_index], VK_PIPELINE_STAGE_TRANSFER_BIT,
-          VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 1, &bar);
-    }
-    sc_image_layout[image_index] = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    Image &img = images[sc_images[image_index]];
+    img.barrier(cmd_buffers[cmd_index], VK_ACCESS_MEMORY_READ_BIT,
+                VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+
     vkEndCommandBuffer(cmd_buffers[cmd_index]);
     VkPipelineStageFlags stage_flags[]{
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
@@ -2025,20 +2081,39 @@ class Vk_Ctx : public rd::Imm_Ctx {
   }
 
   public:
+  void reset() {
+    vkResetCommandBuffer(cmd, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+    vkResetFences(wnd->device, 1, &finish_fence);
+    this->cur_pass = {0};
+    clear_state();
+  }
   VkSemaphore get_on_finish() { return finish_sem; }
-  void        init(Window *wnd, ID pass) {
+  void        set_pass(ID pass_id) {
+    this->cur_pass             = pass_id;
+    Render_Pass &         pass = wnd->render_passes[pass_id];
+    VkRenderPassBeginInfo binfo;
+    MEMZERO(binfo);
+    binfo.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    binfo.clearValueCount = 0;
+    binfo.framebuffer     = pass.fb;
+    binfo.renderArea      = VkRect2D{{0, 0}, {pass.width, pass.height}};
+    binfo.renderPass      = pass.pass;
+    vkCmdBeginRenderPass(cmd, &binfo,
+                           VK_SUBPASS_CONTENTS_INLINE);
+  }
+  void init(Window *wnd) {
     _push_constants_size  = 0;
     _push_constants_dirty = false;
     this->wnd             = wnd;
-    this->cur_pass        = pass;
-    cur_pso               = ID{0};
+
+    cur_pso = ID{0};
     stack.init();
     graphics_state.reset();
     VkCommandBufferAllocateInfo info;
     MEMZERO(info);
-    info.sType       = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    info.commandPool = wnd->cmd_pool;
-    info.level       = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    info.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    info.commandPool        = wnd->cmd_pool;
+    info.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     info.commandBufferCount = 1;
 
     vkAllocateCommandBuffers(wnd->device, &info, &cmd);
@@ -2141,9 +2216,9 @@ class Vk_Ctx : public rd::Imm_Ctx {
     graphics_state.attributes[info.location].location = info.location;
     graphics_state.attributes[info.location].offset   = info.offset;
   }
-  void VS_set_shader(Resource_ID id) override {}
-  void PS_set_shader(Resource_ID id) override {}
-  void CS_set_shader(Resource_ID id) override {}
+  void VS_set_shader(Resource_ID id) override { graphics_state.vs = id.id; }
+  void PS_set_shader(Resource_ID id) override { graphics_state.ps = id.id; }
+  void CS_set_shader(Resource_ID id) override { UNIMPLEMENTED; }
   void RS_set_state(rd::RS_State const &rs_state) override {
     graphics_state.rs_state = rs_state;
   }
@@ -2230,13 +2305,272 @@ class Vk_Ctx : public rd::Imm_Ctx {
 };
 
 class VkResource_Manager : public rd::IResource_Manager {
-  Window *wnd;
+  Window *   wnd;
+  ID         cached_pass;
+  rd::IPass *pPass;
+
+  struct Get_Or_Create_RT {
+    bool                  is_set;
+    ID                    id;
+    rd::Image_Create_Info create_info;
+    bool                  is_id;
+    u32                   layer;
+    u32                   level;
+    rd::Clear_Color       clear_color;
+    rd::Clear_Depth       clear_depth;
+
+    ID view_id;
+
+    void reset() { MEMZERO(*this); }
+    bool operator!=(Get_Or_Create_RT const &that) const {
+      if (is_id == that.is_id) {
+        if (is_id) {
+          return id != that.id || layer != that.layer || level != that.level;
+        } else {
+          return memcmp(&create_info, &that.create_info, sizeof(create_info)) !=
+                     0 ||
+                 layer != that.layer || level != that.level;
+        }
+      }
+      return false;
+    }
+  };
+  InlineArray<Get_Or_Create_RT, 0x10> rts;
+  Get_Or_Create_RT                    depth_target;
+
+  InlineArray<Get_Or_Create_RT, 0x10> cached_rts;
+  Get_Or_Create_RT                    cached_depth_target;
 
   public:
-  void        init(Window *wnd) { this->wnd = wnd; }
-  void        release() {}
-  void        on_pass_begin() {}
-  void        on_pass_end() {}
+  void init(Window *wnd, rd::IPass *pPass) {
+    this->wnd   = wnd;
+    cached_pass = {0};
+    rts.init();
+    cached_rts.init();
+    depth_target.reset();
+    cached_depth_target.reset();
+    this->pPass = pPass;
+  }
+  void release() {
+    if (cached_pass.is_null() == false)
+      wnd->render_passes.remove(cached_pass, 3);
+  }
+  void on_pass_begin() {
+    rts.init();
+    depth_target.reset();
+  }
+  ID get_pass() {
+    bool invalidate = cached_pass.is_null();
+    invalidate      = invalidate || depth_target != cached_depth_target;
+    invalidate      = invalidate || rts.size != cached_rts.size;
+    if (!invalidate) {
+      ito(rts.size) {
+        invalidate = rts[i] != cached_rts[i];
+        if (invalidate) break;
+      }
+    }
+    if (invalidate) {
+      // release old resources
+      if (!cached_pass.is_null()) {
+        wnd->named_render_passes.remove(
+            wnd->render_passes[cached_pass].name.ref());
+        wnd->render_passes.remove(cached_pass, 3);
+        ito(cached_rts.size) {
+          if (cached_rts[i].is_id == false) {
+            wnd->release_resource(
+                {cached_rts[i].id, (u32)Resource_Type::IMAGE});
+          } else {
+            wnd->release_resource(
+                {cached_rts[i].view_id, (u32)Resource_Type::IMAGE_VIEW});
+          }
+        }
+        if (cached_depth_target.is_set) {
+          if (cached_depth_target.is_id == false) {
+            wnd->release_resource(
+                {cached_depth_target.id, (u32)Resource_Type::IMAGE});
+          } else {
+            wnd->release_resource(
+                {cached_depth_target.view_id, (u32)Resource_Type::IMAGE_VIEW});
+          }
+        }
+      }
+      // allocate new resources
+      InlineArray<VkAttachmentDescription, 9> attachments;
+      InlineArray<VkAttachmentReference, 8>   refs;
+      attachments.init();
+      refs.init();
+      defer({
+        attachments.release();
+        refs.release();
+      });
+      u32 depth_attachment_id = 0;
+      ito(rts.size) {
+        Image *img = NULL;
+        if (rts[i].is_id == false) {
+          rts[i].id =
+              wnd->create_image(
+                     rts[i].create_info.width, rts[i].create_info.height,
+                     rts[i].create_info.depth, rts[i].create_info.layers,
+                     rts[i].create_info.levels,
+                     to_vk(rts[i].create_info.format),
+                     rts[i].create_info.usage_bits, rts[i].create_info.mem_bits)
+                  .id;
+          rts[i].view_id = wnd->create_image_view(rts[i].id, rts[i].level, 1,
+                                                  rts[i].layer, 1)
+                               .id;
+        } else {
+          rts[i].view_id = wnd->create_image_view(rts[i].id, rts[i].level, 1,
+                                                  rts[i].layer, 1)
+                               .id;
+        }
+      }
+      if (depth_target.is_set) {
+        if (depth_target.is_id == false) {
+          depth_target.id =
+              wnd->create_image(depth_target.create_info.width,
+                                depth_target.create_info.height,
+                                depth_target.create_info.depth,
+                                depth_target.create_info.layers,
+                                depth_target.create_info.levels,
+                                to_vk(depth_target.create_info.format),
+                                depth_target.create_info.usage_bits,
+                                depth_target.create_info.mem_bits)
+                  .id;
+          depth_target.view_id =
+              wnd->create_image_view(depth_target.id, depth_target.level, 1,
+                                     depth_target.layer, 1)
+                  .id;
+        } else {
+          depth_target.view_id =
+              wnd->create_image_view(depth_target.id, depth_target.level, 1,
+                                     depth_target.layer, 1)
+                  .id;
+        }
+      }
+      u32 width  = 0;
+      u32 height = 0;
+      ito(rts.size) {
+        VkAttachmentDescription attachment;
+        MEMZERO(attachment);
+        Image &img = wnd->images[rts[i].id];
+        if (width == 0)
+          width = img.info.extent.width;
+        else
+          ASSERT_ALWAYS(width == img.info.extent.width);
+        if (height == 0)
+          height = img.info.extent.height;
+        else
+          ASSERT_ALWAYS(height == img.info.extent.height);
+
+        attachment.format         = img.info.format;
+        attachment.samples        = VK_SAMPLE_COUNT_1_BIT;
+        attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
+        attachment.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+        attachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_LOAD;
+        attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachment.initialLayout  = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        attachment.finalLayout    = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        VkAttachmentReference color_attachment;
+        MEMZERO(color_attachment);
+        color_attachment.attachment = i;
+        color_attachment.layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        refs.push(color_attachment);
+
+        attachments.push(attachment);
+      }
+      if (depth_target.is_set) {
+        VkAttachmentDescription attachment;
+        MEMZERO(attachment);
+        Image &img = wnd->images[depth_target.id];
+        if (width == 0)
+          width = img.info.extent.width;
+        else
+          ASSERT_ALWAYS(width == img.info.extent.width);
+        if (height == 0)
+          height = img.info.extent.height;
+        else
+          ASSERT_ALWAYS(height == img.info.extent.height);
+
+        attachment.format         = img.info.format;
+        attachment.samples        = VK_SAMPLE_COUNT_1_BIT;
+        attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
+        attachment.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+        attachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_LOAD;
+        attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachment.initialLayout =
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        attachment.finalLayout =
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        depth_attachment_id = attachments.size;
+        attachments.push(attachment);
+      }
+      VkRenderPassCreateInfo cinfo;
+      MEMZERO(cinfo);
+      cinfo.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+      cinfo.attachmentCount = attachments.size;
+      cinfo.pAttachments    = &attachments[0];
+
+      VkSubpassDescription  subpass;
+      VkAttachmentReference depth_attachment;
+      MEMZERO(subpass);
+      subpass.pipelineBindPoint    = VK_PIPELINE_BIND_POINT_GRAPHICS;
+      subpass.colorAttachmentCount = refs.size;
+      subpass.pColorAttachments    = &refs[0];
+      if (depth_target.is_set) {
+        MEMZERO(depth_attachment);
+        depth_attachment.attachment = depth_attachment_id;
+        depth_attachment.layout =
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        subpass.pDepthStencilAttachment = &depth_attachment;
+      }
+      cinfo.pSubpasses   = &subpass;
+      cinfo.subpassCount = 1;
+
+      VkSubpassDependency dependency;
+      MEMZERO(dependency);
+      dependency.srcSubpass    = VK_SUBPASS_EXTERNAL;
+      dependency.dstSubpass    = 0;
+      dependency.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+      dependency.dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+      dependency.srcAccessMask = 0;
+      dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+      cinfo.pDependencies   = &dependency;
+      cinfo.dependencyCount = 1;
+      Render_Pass pass;
+      pass.width  = width;
+      pass.height = height;
+      pass.name   = make_string(pPass->get_name());
+      VK_ASSERT_OK(vkCreateRenderPass(wnd->device, &cinfo, NULL, &pass.pass));
+      {
+        InlineArray<VkImageView, 8> views;
+        views.init();
+        defer(views.release());
+        ito(rts.size) { views.push(wnd->image_views[rts[i].view_id].view); }
+        VkFramebufferCreateInfo info;
+        MEMZERO(info);
+        info.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        info.attachmentCount = views.size;
+        info.width           = width;
+        info.height          = height;
+        info.layers          = 1;
+        info.pAttachments    = &views[0];
+        info.renderPass      = pass.pass;
+        VK_ASSERT_OK(vkCreateFramebuffer(wnd->device, &info, NULL, &pass.fb));
+      }
+      cached_pass = wnd->render_passes.push(pass);
+      wnd->named_render_passes.insert(pass.name.ref(), cached_pass);
+      cached_rts.release();
+      cached_rts.init();
+      ito(rts.size) { cached_rts.push(rts[i]); }
+      cached_depth_target.reset();
+      if (depth_target.is_set) {
+        cached_depth_target = depth_target;
+      }
+    }
+    return cached_pass;
+  }
   Resource_ID create_image(rd::Image_Create_Info info) override {
     return wnd->create_image(info.width, info.height, info.depth, info.layers,
                              info.levels, to_vk(info.format), info.usage_bits,
@@ -2299,22 +2633,56 @@ class VkResource_Manager : public rd::IResource_Manager {
     ID id = wnd->samplers.push(sm);
     return {id, (u32)Resource_Type::SAMPLER};
   }
-  void release_resource(Resource_ID id) override {}
+  void release_resource(Resource_ID id) override { wnd->release_resource(id); }
   void add_render_target(rd::Image_Create_Info const &info, u32 layer,
                          u32 level, rd::Clear_Color const &cl) override {
-    UNIMPLEMENTED;
+    Get_Or_Create_RT gorc;
+    gorc.reset();
+    gorc.is_set      = true;
+    gorc.create_info = info;
+    gorc.layer       = layer;
+    gorc.level       = level;
+    gorc.clear_color = cl;
+    gorc.is_id       = false;
+    rts.push(gorc);
   }
   void add_render_target(Resource_ID id, u32 layer, u32 level,
                          rd::Clear_Color const &cl) override {
-    UNIMPLEMENTED;
+    Get_Or_Create_RT gorc;
+    ASSERT_DEBUG(id.type == (u32)Resource_Type::IMAGE);
+    gorc.reset();
+    gorc.is_set      = true;
+    gorc.id          = id.id;
+    gorc.layer       = layer;
+    gorc.level       = level;
+    gorc.clear_color = cl;
+    gorc.is_id       = true;
+    rts.push(gorc);
   }
   void add_depth_target(rd::Image_Create_Info const &info, u32 layer, u32 level,
                         rd::Clear_Depth const &cl) override {
-    UNIMPLEMENTED;
+    Get_Or_Create_RT gorc;
+    gorc.reset();
+    gorc.is_set      = true;
+    gorc.create_info = info;
+    gorc.layer       = layer;
+    gorc.level       = level;
+    gorc.clear_depth = cl;
+    gorc.is_id       = false;
+    depth_target     = gorc;
   }
   void add_depth_target(Resource_ID id, u32 layer, u32 level,
                         rd::Clear_Depth const &cl) override {
-    UNIMPLEMENTED;
+    Get_Or_Create_RT gorc;
+    ASSERT_DEBUG(id.type == (u32)Resource_Type::IMAGE);
+    gorc.reset();
+    gorc.id          = id.id;
+    gorc.is_set      = true;
+    gorc.layer       = layer;
+    gorc.level       = level;
+    gorc.clear_depth = cl;
+    gorc.is_id       = true;
+    depth_target     = gorc;
   }
   Resource_ID get_resource(string_ref pass_name, string_ref res_name) override {
     UNIMPLEMENTED;
@@ -2322,8 +2690,20 @@ class VkResource_Manager : public rd::IResource_Manager {
   void assign_name(Resource_ID res_id, string_ref name) override {
     UNIMPLEMENTED;
   }
-  Resource_ID      get_swapchain_image() override { UNIMPLEMENTED; }
-  rd::Image2D_Info get_swapchain_image_info() override { UNIMPLEMENTED; }
+  Resource_ID get_swapchain_image() override {
+    return {wnd->sc_images[wnd->image_index], (u32)Resource_Type::IMAGE};
+  }
+  rd::Image2D_Info get_swapchain_image_info() override {
+    rd::Image2D_Info info;
+    MEMZERO(info);
+    Image &img  = wnd->images[wnd->sc_images[wnd->image_index]];
+    info.format = from_vk(img.info.format);
+    info.height = img.info.extent.height;
+    info.width  = img.info.extent.width;
+    info.layers = img.info.arrayLayers;
+    info.levels = img.info.mipLevels;
+    return info;
+  }
 };
 
 class VkPass_Mng : public rd::Pass_Mng {
@@ -2373,7 +2753,8 @@ class VkPass_Mng : public rd::Pass_Mng {
       wnd->start_frame();
       ito(passes.size) { passes[i].pass->on_begin(passes[i].rsmng); }
       Pass_Wrapper *last_wrapper = NULL;
-      /*ito(passes.size) {
+      ito(passes.size) {
+        passes[i].ctx->set_pass(passes[i].rsmng->get_pass());
         passes[i].pass->exec(passes[i].ctx);
         if (last_wrapper != NULL) {
           VkSemaphore sem = last_wrapper->ctx->get_on_finish();
@@ -2381,7 +2762,7 @@ class VkPass_Mng : public rd::Pass_Mng {
         } else
           passes[i].ctx->submit(NULL);
         last_wrapper = &passes[i];
-      }*/
+      }
       if (last_wrapper != NULL) {
         VkSemaphore sem = last_wrapper->ctx->get_on_finish();
         wnd->end_frame(&sem);
@@ -2393,9 +2774,9 @@ class VkPass_Mng : public rd::Pass_Mng {
     Pass_Wrapper pw;
     pw.pass = pass;
     pw.ctx  = new Vk_Ctx();
-    pw.ctx->init(wnd, {0});
+    pw.ctx->init(wnd);
     pw.rsmng = new VkResource_Manager();
-    pw.rsmng->init(wnd);
+    pw.rsmng->init(wnd, pass);
     passes.push(pw);
   }
 };

@@ -835,7 +835,7 @@ template <typename T, unsigned int N> struct InlineArray {
     ASSERT_DEBUG(size <= N);
   }
   void init() { size = 0; }
-  void release() {}
+  void release() { size = 0; }
   T    pop() {
     ASSERT_DEBUG(size > 0);
     return elems[--size];

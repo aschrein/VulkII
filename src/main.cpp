@@ -46,13 +46,13 @@ class Simple_Pass : public rd::IPass {
     // rt0_info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_RT |
     //                      (u32)rd::Image_Usage_Bits::USAGE_SAMPLED;
 
-    //rd::Clear_Color cl;
-    //cl.clear = true;
-    //cl.r     = 0.0f;
-    //cl.g     = 0.0f;
-    //cl.b     = 0.0f;
-    //cl.a     = 0.0f;
-    //pc->add_render_target(pc->get_swapchain_image(), 0, 0, cl);
+    rd::Clear_Color cl;
+    cl.clear = true;
+    cl.r     = 0.0f;
+    cl.g     = 0.0f;
+    cl.b     = 0.0f;
+    cl.a     = 0.0f;
+    pc->add_render_target(pc->get_swapchain_image(), 0, 0, cl);
 
     vs = pc->create_shader_raw(rd::Stage_t::VERTEX, preprocess(R"(\
 layout(location = 0) out vec2 tex_coords;

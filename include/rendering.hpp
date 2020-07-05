@@ -8,6 +8,7 @@ struct ID {
   u32  index() { return _id - 1; }
   bool is_null() { return _id == 0; }
   bool operator==(ID const &that) const { return _id == that._id; }
+  bool operator!=(ID const &that) const { return _id != that._id; }
 };
 
 static_assert(sizeof(ID) == 4, "blimey!");
