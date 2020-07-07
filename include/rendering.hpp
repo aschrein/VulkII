@@ -31,6 +31,8 @@ enum class Cull_Mode { NONE, FRONT, BACK };
 enum class Index_t { UINT32, UINT16 };
 enum class Format {
   UNKNOWN = 0,
+  BGRA8_UNORM,
+  BGR8_UNORM,
   RGBA8_UNORM,
   RGBA8_SNORM,
   RGBA8_SRGBA,
@@ -260,6 +262,9 @@ class Imm_Ctx {
   virtual void  draw(u32 vertices, u32 instances, u32 first_vertex,
                      u32 first_instance)                               = 0;
   virtual void  dispatch(u32 dim_x, u32 dim_y, u32 dim_z)              = 0;
+  virtual void  set_viewport(float x, float y, float width, float height,
+                             float mindepth, float maxdepth)           = 0;
+  virtual void  set_scissor(u32 x, u32 y, u32 width, u32 height)      = 0;
 };
 
 struct Clear_Color {

@@ -118,7 +118,9 @@ struct List {
     fflush(dotgraph);
     fclose(dotgraph);
   }
-  template <typename T> static List *parse(string_ref text, T allocator) {
+  template <typename T>
+  static List *parse(string_ref text, T allocator,
+                     char const **end_of_list = NULL) {
     List *root = allocator.alloc();
     List *cur  = root;
     TMP_STORAGE_SCOPE;
@@ -245,6 +247,9 @@ struct List {
     }
   exit_loop:
     (void)0;
+    if (end_of_list != NULL) {
+      *end_of_list = text.ptr + i + 1;
+    }
     return root;
   error_parsing:
     return NULL;
@@ -513,6 +518,14 @@ struct Evaluator_State {
     symbol_table.release();
   }
 
+  void reset() {
+    string_storage.reset();
+    list_storage.reset();
+    value_storage.reset();
+    symbol_table.release();
+    symbol_table.init();
+  }
+
   void enter_scope() {
     string_storage.enter_scope();
     list_storage.enter_scope();
@@ -658,6 +671,8 @@ struct IEvaluator {
 #endif // SCRIPT_HPP
 
 #ifdef SCRIPT_IMPL
+#ifndef SCRIPT_IMPL_GUARD
+#define SCRIPT_IMPL_GUARD
 
 #define ALLOC_VAL() (Value *)alloc_value()
 #define CALL_EVAL(x)                                                           \
@@ -1115,4 +1130,5 @@ IEvaluator *IEvaluator::create_mode(string_ref name) {
   }
   return NULL;
 }
+#endif // SCRIPT_IMPL_GUARD
 #endif

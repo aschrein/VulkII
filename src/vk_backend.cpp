@@ -1,5 +1,7 @@
 #define UTILS_TL_IMPL
 #include "utils.hpp"
+#define SCRIPT_IMPL
+#include "script.hpp"
 
 #include <functional>
 
@@ -317,6 +319,125 @@ static Array<u32> compile_glsl(VkDevice device, string_ref text,
   return out;
 }
 
+template <typename F>
+static char const *parse_parentheses(char const *cur, char const *end, F fn) {
+  while (cur[0] != '(' && cur != end) cur++;
+  if (cur == end) return end;
+  cur++;
+  return fn(cur, end);
+  ;
+}
+
+static void execute_preprocessor(List *l, char const *list_end,
+                                 String_Builder &builder) {
+  if (l->child) {
+    execute_preprocessor(l->child, list_end, builder);
+    return;
+  }
+  if (l->cmp_symbol("OUTPUT")) {
+    i32        location;
+    string_ref loc_str = l->get(1)->symbol;
+    ASSERT_ALWAYS(parse_decimal_int(loc_str.ptr, loc_str.len, &location));
+    builder.putf("layout(location = %i) out %.*s %.*s", location,
+                 STRF(l->get(2)->symbol), STRF(l->get(3)->symbol));
+  } else if (l->cmp_symbol("INPUT")) {
+    i32        location;
+    string_ref loc_str = l->get(1)->symbol;
+    ASSERT_ALWAYS(parse_decimal_int(loc_str.ptr, loc_str.len, &location));
+    builder.putf("layout(location = %i) out %.*s %.*s", location,
+                 STRF(l->get(2)->symbol), STRF(l->get(3)->symbol));
+  } else if (l->cmp_symbol("ENTRY")) {
+    builder.putf("void main() {");
+  } else if (l->cmp_symbol("END")) {
+    builder.putf("}");
+  } else if (l->cmp_symbol("DECLARE_RENDER_TARGET")) {
+    i32        location;
+    string_ref loc_str = l->get(1)->symbol;
+    ASSERT_ALWAYS(parse_decimal_int(loc_str.ptr, loc_str.len, &location));
+    builder.putf("layout(location = %i) out float4 out_rt%i", location,
+                 location);
+  } else if (l->cmp_symbol("EXPORT_POSITION")) {
+    string_ref next = l->get(1)->symbol;
+    builder.putf("gl_Position = %.*s", (int)(size_t)(list_end - next.ptr - 1),
+                 next.ptr);
+  } else if (l->cmp_symbol("EXPORT_COLOR")) {
+    i32        location;
+    string_ref loc_str = l->get(1)->symbol;
+    ASSERT_ALWAYS(parse_decimal_int(loc_str.ptr, loc_str.len, &location));
+    string_ref next = l->get(2)->symbol;
+    builder.putf("out_rt%i = %.*s", location,
+                 (int)(size_t)(list_end - next.ptr - 1), next.ptr);
+  } else {
+    // UNIMPLEMENTED;
+  }
+}
+
+static void preprocess_shader(String_Builder &builder, string_ref body) {
+  builder.putf("#version 450\n");
+  builder.putf("#extension GL_EXT_nonuniform_qualifier : require\n");
+  builder.putf(R"(
+#define float2        vec2
+#define float3        vec3
+#define float4        vec4
+#define int2          ivec2
+#define int3          ivec3
+#define int4          ivec4
+#define uint2         uvec2
+#define uint3         uvec3
+#define uint4         uvec4
+#define float2x2      mat2
+#define float3x3      mat3
+#define float4x4      mat4
+#define VERTEX_INDEX  gl_VertexIndex
+#define OUTPUT(x)     layout(location = x) out
+#define INPUT(x)      layout(location = x) in
+#define VERTEX_INDEX  gl_VertexIndex
+#define EXPORT_POSITION(p)  gl_Position = p
+#define RENDER_TARGET(x);  layout(location = x) out float4 out_rt##x
+#define EXPORT_COLOR0(p)  out_rt0 = p
+
+)");
+  char const *cur       = body.ptr;
+  char const *end       = cur + body.len;
+  size_t      total_len = 0;
+  Pool<List>  list_storage;
+  list_storage = Pool<List>::create(1 << 10);
+  defer(list_storage.release());
+
+  struct List_Allocator {
+    Pool<List> *list_storage;
+    List *      alloc() {
+      List *out = list_storage->alloc_zero(1);
+      return out;
+    }
+  } list_allocator;
+  list_allocator.list_storage = &list_storage;
+  auto parse_list             = [&]() {
+    list_storage.reset();
+    cur = parse_parentheses(cur, end, [&](char const *begin, char const *end) {
+      List *root = List::parse(string_ref{begin, (size_t)(end - begin)},
+                               list_allocator, &end);
+      if (root == NULL) {
+        push_error("Couldn't parse");
+        UNIMPLEMENTED;
+      }
+      execute_preprocessor(root, end, builder);
+      return end;
+    });
+  };
+  while (cur != end && total_len < body.len) {
+    if (*cur == '@') {
+      cur++;
+      total_len += 1;
+      parse_list();
+    } else {
+      builder.put_char(*cur);
+      cur += 1;
+      total_len += 1;
+    }
+  }
+}
+
 struct Shader_Info : public Slot {
   rd::Stage_t stage;
   u64         hash;
@@ -360,14 +481,20 @@ struct Shader_Info : public Slot {
 //};
 
 struct Render_Pass : public Slot {
-  string        name;
-  VkRenderPass  pass;
-  VkFramebuffer fb;
-  u32           width, height;
+  string             name;
+  VkRenderPass       pass;
+  VkFramebuffer      fb;
+  u32                width, height;
+  InlineArray<ID, 8> rts;
+  ID                 depth_target;
 
-  void init() { memset(this, 0, sizeof(*this)); }
+  void init() {
+    memset(this, 0, sizeof(*this));
+    rts.init();
+  }
 
   void release(VkDevice device) {
+    rts.release();
     name.release();
     vkDestroyRenderPass(device, pass, NULL);
     vkDestroyFramebuffer(device, fb, NULL);
@@ -468,6 +595,9 @@ VkFormat to_vk(rd::Format format) {
 rd::Format from_vk(VkFormat format) {
   // clang-format off
   switch (format) {
+  case VK_FORMAT_B8G8R8A8_UNORM      : return rd::Format::BGRA8_UNORM     ;
+  case VK_FORMAT_B8G8R8_UNORM        : return rd::Format::BGR8_UNORM      ;
+
   case VK_FORMAT_R8G8B8A8_UNORM      : return rd::Format::RGBA8_UNORM     ;
   case VK_FORMAT_R8G8B8A8_SNORM      : return rd::Format::RGBA8_SNORM     ;
   case VK_FORMAT_R8G8B8A8_SRGB       : return rd::Format::RGBA8_SRGBA     ;
@@ -1129,8 +1259,11 @@ struct Window {
     static constexpr char const NAME[] = "Image_Array";
     Window *                    wnd    = NULL;
     void                        release_item(Image &img) {
-      vkDestroyImage(wnd->device, img.image, NULL);
-      wnd->mem_chunks[img.mem_chunk_id.index()].rem_reference();
+      if (img.mem_chunk_id.is_null() ==
+          false) { // True in case of swap chain images
+        vkDestroyImage(wnd->device, img.image, NULL);
+        wnd->mem_chunks[img.mem_chunk_id.index()].rem_reference();
+      }
       MEMZERO(img);
     }
     void init(Window *wnd) {
@@ -1530,8 +1663,10 @@ struct Window {
     }
     ito(sc_image_count) {
       Image &img = images[sc_images[i]];
-      jto(img.views.size) { image_views.remove(img.views[i], 0); }
-      images.free_slot(sc_images[i]);
+      img.rem_reference();
+      sc_images[i] = ID{0};
+      // jto(img.views.size) { image_views.remove(img.views[i], 0); }
+      // images.free_slot(sc_images[i]);
     }
   }
 
@@ -1972,9 +2107,9 @@ struct Window {
                 VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 
     vkEndCommandBuffer(cmd_buffers[cmd_index]);
-    VkPipelineStageFlags stage_flags[]{
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-    VkSubmitInfo submit_info;
+    VkPipelineStageFlags stage_flags[]{VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                       VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT};
+    VkSubmitInfo         submit_info;
     MEMZERO(submit_info);
     if (wait_sem != NULL) {
       VkSemaphore sems[2]              = {sc_free_sem[cmd_index], *wait_sem};
@@ -2022,6 +2157,8 @@ class Vk_Ctx : public rd::Imm_Ctx {
   u8                                      _push_constants[128];
   u32                                     _push_constants_size;
   bool                                    _push_constants_dirty;
+  bool                                    _pass_bound;
+
   enum class Binding_t {
     UNIFORM_BUFFER,
     STORAGE_BUFFER,
@@ -2060,6 +2197,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
   }
 
   void bind_graphics_pipeline() {
+    begin_pass();
     if (!wnd->pipeline_cache.contains(graphics_state)) {
       Graphics_Pipeline_Wrapper gw;
       ASSERT_DEBUG(!graphics_state.ps.is_null());
@@ -2079,18 +2217,19 @@ class Vk_Ctx : public rd::Imm_Ctx {
     Graphics_Pipeline_Wrapper &gw = wnd->pipelines[pipe_id];
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gw.pipeline);
   }
-
-  public:
-  void reset() {
-    vkResetCommandBuffer(cmd, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
-    vkResetFences(wnd->device, 1, &finish_fence);
-    this->cur_pass = {0};
-    clear_state();
-  }
-  VkSemaphore get_on_finish() { return finish_sem; }
-  void        set_pass(ID pass_id) {
-    this->cur_pass             = pass_id;
-    Render_Pass &         pass = wnd->render_passes[pass_id];
+  void begin_pass() {
+    if (_pass_bound) return;
+    Render_Pass &pass = wnd->render_passes[cur_pass];
+    ito(pass.rts.size) {
+      Image &img = wnd->images[pass.rts[i]];
+      img.barrier(cmd, VK_ACCESS_MEMORY_WRITE_BIT,
+                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    }
+    if (pass.depth_target.is_null() == false) {
+      Image &img = wnd->images[pass.depth_target];
+      img.barrier(cmd, VK_ACCESS_MEMORY_WRITE_BIT,
+                  VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+    }
     VkRenderPassBeginInfo binfo;
     MEMZERO(binfo);
     binfo.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -2098,15 +2237,43 @@ class Vk_Ctx : public rd::Imm_Ctx {
     binfo.framebuffer     = pass.fb;
     binfo.renderArea      = VkRect2D{{0, 0}, {pass.width, pass.height}};
     binfo.renderPass      = pass.pass;
-    vkCmdBeginRenderPass(cmd, &binfo,
-                           VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBeginRenderPass(cmd, &binfo, VK_SUBPASS_CONTENTS_INLINE);
+    _pass_bound = true;
+  }
+  void end_pass() {
+    if (!_pass_bound) return;
+    vkCmdEndRenderPass(cmd);
+    _pass_bound = false;
+  }
+
+  public:
+  void reset() {
+    vkResetCommandBuffer(cmd, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+    vkResetFences(wnd->device, 1, &finish_fence);
+    this->cur_pass = {0};
+    _pass_bound    = false;
+    clear_state();
+  }
+  VkSemaphore get_on_finish() { return finish_sem; }
+  void        begin(ID pass_id) {
+    cur_pso           = ID{0};
+    this->cur_pass    = pass_id;
+    Render_Pass &pass = wnd->render_passes[pass_id];
+    _pass_bound       = false;
+    VkCommandBufferBeginInfo begin_info;
+    MEMZERO(begin_info);
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    VK_ASSERT_OK(vkResetCommandBuffer(
+        cmd, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT));
+    VK_ASSERT_OK(vkBeginCommandBuffer(cmd, &begin_info));
   }
   void init(Window *wnd) {
     _push_constants_size  = 0;
     _push_constants_dirty = false;
     this->wnd             = wnd;
-
-    cur_pso = ID{0};
+    _pass_bound           = false;
+    cur_pso               = ID{0};
     stack.init();
     graphics_state.reset();
     VkCommandBufferAllocateInfo info;
@@ -2117,18 +2284,11 @@ class Vk_Ctx : public rd::Imm_Ctx {
     info.commandBufferCount = 1;
 
     vkAllocateCommandBuffers(wnd->device, &info, &cmd);
-    VkCommandBufferBeginInfo begin_info;
-    MEMZERO(begin_info);
-    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    VK_ASSERT_OK(vkResetCommandBuffer(
-        cmd, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT));
-    VK_ASSERT_OK(vkBeginCommandBuffer(cmd, &begin_info));
     {
       VkFenceCreateInfo info;
       MEMZERO(info);
       info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-      info.flags = 0;
+      info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
       VK_ASSERT_OK(vkCreateFence(wnd->device, &info, NULL, &finish_fence));
     }
     {
@@ -2147,8 +2307,11 @@ class Vk_Ctx : public rd::Imm_Ctx {
     return wait_res == VK_SUCCESS;
   }
   void submit(VkSemaphore *wait_sem) {
+    vkResetFences(wnd->device, 1, &finish_fence);
+    end_pass();
     vkEndCommandBuffer(cmd);
-    VkPipelineStageFlags stage_flags[]{VK_PIPELINE_STAGE_ALL_COMMANDS_BIT};
+    VkPipelineStageFlags stage_flags[]{VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                       VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT};
     VkSubmitInfo         submit_info;
     MEMZERO(submit_info);
     submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -2170,6 +2333,27 @@ class Vk_Ctx : public rd::Imm_Ctx {
     vkFreeCommandBuffers(wnd->device, wnd->cmd_pool, 1, &cmd);
   }
   // CTX
+  void set_viewport(float x, float y, float width, float height, float mindepth,
+                    float maxdepth) override {
+    VkViewport viewports[1];
+    viewports[0].x        = x;
+    viewports[0].y        = y;
+    viewports[0].width    = width;
+    viewports[0].height   = height;
+    viewports[0].minDepth = mindepth;
+    viewports[0].maxDepth = maxdepth;
+    end_pass();
+    vkCmdSetViewport(cmd, 0, 1, viewports);
+  }
+  void set_scissor(u32 x, u32 y, u32 width, u32 height) override {
+    VkRect2D scissors[1];
+    scissors[0].offset.x      = x;
+    scissors[0].offset.y      = y;
+    scissors[0].extent.width  = width;
+    scissors[0].extent.height = height;
+    end_pass();
+    vkCmdSetScissor(cmd, 0, 1, scissors);
+  }
   void clear_state() override { graphics_state.reset(); }
   void push_state() override { stack.push(graphics_state); }
   void pop_state() override { graphics_state = stack.pop(); }
@@ -2189,6 +2373,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
     case rd::Index_t::UINT16: type = VK_INDEX_TYPE_UINT16; break;
     default: TRAP;
     }
+    end_pass();
     vkCmdBindIndexBuffer(cmd, buf.buffer, (VkDeviceSize)offset, type);
   }
   void IA_set_vertex_buffer(u32 index, Resource_ID res_id, size_t offset,
@@ -2196,6 +2381,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
     if (res_id.is_null()) {
       return;
     }
+    end_pass();
     ASSERT_DEBUG(res_id.type == (i32)Resource_Type::SHADER);
     Buffer &     buf     = wnd->buffers[res_id.id];
     VkDeviceSize doffset = (VkDeviceSize)offset;
@@ -2229,6 +2415,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
     graphics_state.ms_state = ms_state;
   }
   void OM_set_blend_state(u32 rt_index, rd::Blend_State const &bl) override {
+    graphics_state.num_rts = MAX(graphics_state.num_rts, rt_index + 1);
     VkPipelineColorBlendAttachmentState bs;
     MEMZERO(bs);
     bs.blendEnable         = to_vk(bl.enabled);
@@ -2287,6 +2474,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
   }
   void draw_indexed(u32 index_count, u32 instance_count, u32 first_index,
                     u32 first_instance, i32 vertex_offset) override {
+    begin_pass();
     bind_graphics_pipeline();
     flush_graphics_push_constants();
     vkCmdDrawIndexed(cmd, index_count, instance_count, first_index,
@@ -2294,6 +2482,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
   }
   void draw(u32 vertex_count, u32 instance_count, u32 first_vertex,
             u32 first_instance) override {
+    begin_pass();
     bind_graphics_pipeline();
     flush_graphics_push_constants();
     vkCmdDraw(cmd, vertex_count, instance_count, first_vertex, first_instance);
@@ -2359,7 +2548,8 @@ class VkResource_Manager : public rd::IResource_Manager {
     rts.init();
     depth_target.reset();
   }
-  ID get_pass() {
+  void on_pass_end() {}
+  ID   get_pass() {
     bool invalidate = cached_pass.is_null();
     invalidate      = invalidate || depth_target != cached_depth_target;
     invalidate      = invalidate || rts.size != cached_rts.size;
@@ -2395,14 +2585,6 @@ class VkResource_Manager : public rd::IResource_Manager {
         }
       }
       // allocate new resources
-      InlineArray<VkAttachmentDescription, 9> attachments;
-      InlineArray<VkAttachmentReference, 8>   refs;
-      attachments.init();
-      refs.init();
-      defer({
-        attachments.release();
-        refs.release();
-      });
       u32 depth_attachment_id = 0;
       ito(rts.size) {
         Image *img = NULL;
@@ -2447,6 +2629,14 @@ class VkResource_Manager : public rd::IResource_Manager {
                   .id;
         }
       }
+      InlineArray<VkAttachmentDescription, 9> attachments;
+      InlineArray<VkAttachmentReference, 8>   refs;
+      attachments.init();
+      refs.init();
+      defer({
+        attachments.release();
+        refs.release();
+      });
       u32 width  = 0;
       u32 height = 0;
       ito(rts.size) {
@@ -2474,7 +2664,7 @@ class VkResource_Manager : public rd::IResource_Manager {
         VkAttachmentReference color_attachment;
         MEMZERO(color_attachment);
         color_attachment.attachment = i;
-        color_attachment.layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        color_attachment.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         refs.push(color_attachment);
 
         attachments.push(attachment);
@@ -2529,18 +2719,26 @@ class VkResource_Manager : public rd::IResource_Manager {
 
       VkSubpassDependency dependency;
       MEMZERO(dependency);
-      dependency.srcSubpass    = VK_SUBPASS_EXTERNAL;
-      dependency.dstSubpass    = 0;
-      dependency.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-      dependency.dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+      dependency.srcSubpass   = VK_SUBPASS_EXTERNAL;
+      dependency.dstSubpass   = 0;
+      dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+      dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
       dependency.srcAccessMask = 0;
       dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 
       cinfo.pDependencies   = &dependency;
       cinfo.dependencyCount = 1;
+
       Render_Pass pass;
-      pass.width  = width;
+      pass.init();
+      if (depth_target.is_set) {
+        pass.depth_target = depth_target.id;
+      } else {
+        pass.depth_target = ID{0};
+      }
+      ito(rts.size) pass.rts.push(rts[i].id);
       pass.height = height;
+      pass.width  = width;
       pass.name   = make_string(pPass->get_name());
       VK_ASSERT_OK(vkCreateRenderPass(wnd->device, &cinfo, NULL, &pass.pass));
       {
@@ -2579,16 +2777,24 @@ class VkResource_Manager : public rd::IResource_Manager {
   Resource_ID create_buffer(rd::Buffer_Create_Info info) override {
     return wnd->create_buffer(info);
   }
-  Resource_ID create_shader_raw(rd::Stage_t type, string_ref text,
+  Resource_ID create_shader_raw(rd::Stage_t type, string_ref body,
                                 Pair<string_ref, string_ref> *defines,
                                 size_t num_defines) override {
-    u64 shader_hash = hash_of(text);
+    u64 shader_hash = hash_of(body);
     ito(num_defines) {
       shader_hash ^= hash_of(defines[0].first) ^ hash_of(defines[0].second);
     }
     if (wnd->shader_cache.contains(shader_hash)) {
       return {wnd->shader_cache.get(shader_hash), (u32)Resource_Type::SHADER};
     }
+
+    String_Builder sb;
+    sb.init();
+    defer(sb.release());
+    sb.reset();
+    preprocess_shader(sb, body);
+    string_ref text = sb.get_str();
+
     Shader_Info         si;
     shaderc_shader_kind kind;
     if (type == rd::Stage_t::VERTEX)
@@ -2711,11 +2917,12 @@ class VkPass_Mng : public rd::Pass_Mng {
   struct Pass_Wrapper {
     rd::IPass *         pass;
     VkResource_Manager *rsmng;
-    Vk_Ctx *            ctx;
+    u32                 cur_ctx;
+    Vk_Ctx *            ctx[3];
     ID                  pass_id;
     void                release() {
       pass->release(rsmng);
-      ctx->release();
+      ito(3) ctx[i]->release();
       rsmng->release();
     }
   };
@@ -2751,20 +2958,31 @@ class VkPass_Mng : public rd::Pass_Mng {
         }
       }
       wnd->start_frame();
-      ito(passes.size) { passes[i].pass->on_begin(passes[i].rsmng); }
-      Pass_Wrapper *last_wrapper = NULL;
+      Vk_Ctx *last_ctx = NULL;
       ito(passes.size) {
-        passes[i].ctx->set_pass(passes[i].rsmng->get_pass());
-        passes[i].pass->exec(passes[i].ctx);
-        if (last_wrapper != NULL) {
-          VkSemaphore sem = last_wrapper->ctx->get_on_finish();
-          passes[i].ctx->submit(&sem);
+        passes[i].rsmng->on_pass_begin();
+        passes[i].pass->on_begin(passes[i].rsmng);
+        while (true) {
+          if (passes[i].ctx[passes[i].cur_ctx]->is_fininshed() == false) {
+            passes[i].cur_ctx = (passes[i].cur_ctx + 1) % 3;
+            continue;
+          }
+          break;
+        }
+        u32 cur_ctx = passes[i].cur_ctx;
+
+        passes[i].ctx[cur_ctx]->begin(passes[i].rsmng->get_pass());
+        passes[i].pass->exec(passes[i].ctx[cur_ctx]);
+        if (last_ctx != NULL) {
+          VkSemaphore sem = last_ctx->get_on_finish();
+          passes[i].ctx[cur_ctx]->submit(&sem);
         } else
-          passes[i].ctx->submit(NULL);
-        last_wrapper = &passes[i];
+          passes[i].ctx[cur_ctx]->submit(NULL);
+        last_ctx = passes[i].ctx[cur_ctx];
+        passes[i].rsmng->on_pass_end();
       }
-      if (last_wrapper != NULL) {
-        VkSemaphore sem = last_wrapper->ctx->get_on_finish();
+      if (last_ctx != NULL) {
+        VkSemaphore sem = last_ctx->get_on_finish();
         wnd->end_frame(&sem);
       } else
         wnd->end_frame(NULL);
@@ -2772,9 +2990,12 @@ class VkPass_Mng : public rd::Pass_Mng {
   }
   void add_pass(rd::IPass *pass) override {
     Pass_Wrapper pw;
-    pw.pass = pass;
-    pw.ctx  = new Vk_Ctx();
-    pw.ctx->init(wnd);
+    pw.pass    = pass;
+    pw.cur_ctx = 0;
+    ito(3) {
+      pw.ctx[i] = new Vk_Ctx();
+      pw.ctx[i]->init(wnd);
+    }
     pw.rsmng = new VkResource_Manager();
     pw.rsmng->init(wnd, pass);
     passes.push(pw);
