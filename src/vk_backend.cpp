@@ -301,6 +301,8 @@ static Array<u32> compile_glsl(VkDevice device, string_ref text,
                                          shaderc_env_version_vulkan_1_2);
   shaderc_compilation_result_t result = shaderc_compile_into_spv(
       compiler, text.ptr, text.len, kind, "tmp", "main", options);
+  // fprintf(stderr, "%.*s\n", STRF(text));
+  // fflush(stderr);
   defer({
     shaderc_result_release(result);
     shaderc_compiler_release(compiler);
@@ -852,8 +854,8 @@ struct Shader_Reflection {
     out.init();
     set_table.iter_pairs([&](u32                            set_index,
                              Table<u32, Shader_Descriptor> &binding_table) {
-      constexpr u32                MAX_BINDINGS = 0x40;
-      VkDescriptorBindingFlags     binding_flags[MAX_BINDINGS];
+      constexpr u32 MAX_BINDINGS = 0x40;
+      // VkDescriptorBindingFlags     binding_flags[MAX_BINDINGS];
       u32                          num_bindings = 0;
       VkDescriptorSetLayoutBinding set_bindings[MAX_BINDINGS];
       binding_table.iter_values([&](Shader_Descriptor &val) {
@@ -868,7 +870,7 @@ struct Shader_Reflection {
       });
       VkDescriptorSetLayoutBindingFlagsCreateInfo binding_infos;
 
-      ito(num_bindings) {
+      /*ito(num_bindings) {
         if (set_bindings[i].descriptorCount > 1) {
           binding_flags[i] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
         } else {
@@ -880,17 +882,18 @@ struct Shader_Reflection {
       binding_infos.pBindingFlags = &binding_flags[0];
       binding_infos.pNext         = NULL;
       binding_infos.sType =
-          VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+          VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;*/
 
       VkDescriptorSetLayoutCreateInfo set_layout_create_info;
       MEMZERO(set_layout_create_info);
       set_layout_create_info.bindingCount = num_bindings;
       set_layout_create_info.pBindings    = &set_bindings[0];
-      set_layout_create_info.flags =
-          VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+      set_layout_create_info.flags        = 0
+          //  | VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT
+          ;
       set_layout_create_info.sType =
           VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-      set_layout_create_info.pNext = (void *)&binding_infos;
+      // set_layout_create_info.pNext = (void *)&binding_infos;
       VkDescriptorSetLayout set_layout;
       VK_ASSERT_OK(vkCreateDescriptorSetLayout(device, &set_layout_create_info,
                                                NULL, &set_layout));
@@ -918,7 +921,7 @@ Shader_Reflection reflect_shader(Shader_Info const &info) {
     desc.set  = set;
     desc.binding =
         comp.get_decoration(item.id, spv::Decoration::DecorationBinding);
-    desc.descriptorCount = 0;
+    desc.descriptorCount = 1;
     if (type_obj.array.size() != 0) {
       ASSERT_ALWAYS(type_obj.array.size() == 1);
       desc.descriptorCount = type_obj.array[0];
@@ -1388,6 +1391,8 @@ struct Window {
     SDL_DestroyWindow(window);
     SDL_Quit();
   }
+
+  Descriptor_Pool &get_descriptor_pool() { return desc_pools[cmd_index]; }
 
   u32 find_mem_chunk(u32 prop_flags, u32 memory_type_bits, u32 alignment,
                      u32 size) {
@@ -2046,14 +2051,14 @@ struct Window {
       update_swapchain();
     }
     cmd_index = (frame_id++) % sc_image_count;
-    desc_pools[cmd_index].reset();
+    
     VkResult wait_res =
         vkWaitForFences(device, 1, &frame_fences[cmd_index], VK_TRUE, 1000);
     if (wait_res == VK_TIMEOUT) {
       goto restart;
     }
     vkResetFences(device, 1, &frame_fences[cmd_index]);
-
+    desc_pools[cmd_index].reset();
     VkResult acquire_res = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX,
                                                  sc_free_sem[cmd_index],
                                                  VK_NULL_HANDLE, &image_index);
@@ -2167,37 +2172,37 @@ class Vk_Ctx : public rd::Imm_Ctx {
     STORAGE_IMAGE
   };
   struct Resource_Binding {
-    u32       set;
-    u32       binding;
-    u32       element;
-    Binding_t type;
+    rd::Stage_t stage;
+    u32         set;
+    u32         binding;
+    u32         element;
+    Binding_t   type;
     union {
       struct {
         ID     buf_id;
         size_t offset;
+        size_t size;
       } uniform_buffer;
       struct {
         ID     buf_id;
         size_t offset;
+        size_t size;
       } storage_buffer;
     };
+    Resource_Binding() {}
   };
+
+  Array<Resource_Binding> deferred_bindings;
 
   void flush_graphics_push_constants() {
     if (_push_constants_size > 0 && _push_constants_dirty)
-      vkCmdPushConstants(cmd, get_cur_graphics_pipeline().pipeline_layout,
+      vkCmdPushConstants(cmd, get_or_bake_graphics_pipeline().pipeline_layout,
                          VK_SHADER_STAGE_ALL_GRAPHICS, 0, _push_constants_size,
                          _push_constants);
     _push_constants_dirty = false;
   }
 
-  Graphics_Pipeline_Wrapper &get_cur_graphics_pipeline() {
-    ASSERT_DEBUG(!cur_pso.is_null());
-    return wnd->pipelines[cur_pso];
-  }
-
-  void bind_graphics_pipeline() {
-    begin_pass();
+  Graphics_Pipeline_Wrapper &get_or_bake_graphics_pipeline() {
     if (!wnd->pipeline_cache.contains(graphics_state)) {
       Graphics_Pipeline_Wrapper gw;
       ASSERT_DEBUG(!graphics_state.ps.is_null());
@@ -2212,9 +2217,15 @@ class Vk_Ctx : public rd::Imm_Ctx {
     }
     ID pipe_id = wnd->pipeline_cache.get(graphics_state);
     ASSERT_DEBUG(!pipe_id.is_null());
+    return wnd->pipelines[pipe_id];
+  }
+
+  void bind_graphics_pipeline() {
+    begin_pass();
+    Graphics_Pipeline_Wrapper &gw      = get_or_bake_graphics_pipeline();
+    ID                         pipe_id = gw.get_id();
     if (cur_pso == pipe_id) return;
-    cur_pso                       = pipe_id;
-    Graphics_Pipeline_Wrapper &gw = wnd->pipelines[pipe_id];
+    cur_pso = pipe_id;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gw.pipeline);
   }
   void begin_pass() {
@@ -2253,6 +2264,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
     this->cur_pass = {0};
     _pass_bound    = false;
     clear_state();
+    deferred_bindings.reset();
   }
   VkSemaphore get_on_finish() { return finish_sem; }
   void        begin(ID pass_id) {
@@ -2269,6 +2281,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
     VK_ASSERT_OK(vkBeginCommandBuffer(cmd, &begin_info));
   }
   void init(Window *wnd) {
+    deferred_bindings.init();
     _push_constants_size  = 0;
     _push_constants_dirty = false;
     this->wnd             = wnd;
@@ -2327,6 +2340,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
     vkQueueSubmit(wnd->queue, 1, &submit_info, finish_fence);
   }
   void release() {
+    deferred_bindings.release();
     stack.release();
     vkDestroyFence(wnd->device, finish_fence, NULL);
     vkDestroySemaphore(wnd->device, finish_sem, NULL);
@@ -2439,8 +2453,19 @@ class Vk_Ctx : public rd::Imm_Ctx {
   }
 
   void bind_uniform_buffer(rd::Stage_t stage, u32 set, u32 binding,
-                           Resource_ID buf_id, size_t offset) override {
-    UNIMPLEMENTED;
+                           Resource_ID buf_id, size_t offset,
+                           size_t size) override {
+    Resource_Binding rb;
+    MEMZERO(rb);
+    rb.stage                 = stage;
+    rb.type                  = Binding_t::UNIFORM_BUFFER;
+    rb.set                   = set;
+    rb.binding               = binding;
+    rb.element               = 0;
+    rb.uniform_buffer.buf_id = buf_id.id;
+    rb.uniform_buffer.offset = offset;
+    rb.uniform_buffer.size   = size;
+    deferred_bindings.push(rb);
   }
   void bind_storage_buffer(rd::Stage_t stage, u32 set, u32 binding,
                            Resource_ID buf_id, size_t offset) override {
@@ -2462,7 +2487,66 @@ class Vk_Ctx : public rd::Imm_Ctx {
                      u32 num_levels) override {
     UNIMPLEMENTED;
   }
-  void  flush_bindings() override { UNIMPLEMENTED; }
+  void flush_bindings() override {
+    Graphics_Pipeline_Wrapper &gw = get_or_bake_graphics_pipeline();
+    { // vs bindings
+      InlineArray<Pair<u32, VkDescriptorSet>, 8> sets;
+      sets.init();
+      defer(sets.release());
+      gw.vs_reflection.baked_layouts.iter_pairs(
+          [&](u32 set_index, VkDescriptorSetLayout layout) {
+            VkDescriptorSet set = wnd->get_descriptor_pool().allocate(layout);
+            sets.push({set_index, set});
+          });
+      ito(sets.size) {
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                gw.pipeline_layout, sets[i].first, 1,
+                                &sets[i].second, 0, NULL);
+      }
+    }
+    { // ps bindings
+      InlineArray<Pair<u32, VkDescriptorSet>, 8> sets;
+      sets.init();
+      defer(sets.release());
+      gw.ps_reflection.baked_layouts.iter_pairs(
+          [&](u32 set_index, VkDescriptorSetLayout layout) {
+            VkDescriptorSet set = wnd->get_descriptor_pool().allocate(layout);
+            sets.push({set_index, set});
+          });
+      ito(sets.size) {
+        jto(deferred_bindings.size) {
+          Resource_Binding &rb = deferred_bindings[j];
+          if (rb.set != sets[i].first) continue;
+          if (rb.stage == rd::Stage_t::PIXEL) {
+            if (rb.type == Binding_t::UNIFORM_BUFFER) {
+              VkDescriptorBufferInfo binfo;
+              MEMZERO(binfo);
+              binfo.buffer = wnd->buffers[rb.uniform_buffer.buf_id].buffer;
+              binfo.offset = rb.uniform_buffer.offset;
+              binfo.range  = rb.uniform_buffer.size;
+              VkWriteDescriptorSet wset;
+              MEMZERO(wset);
+              wset.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+              wset.descriptorCount = 1;
+              wset.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+              wset.dstArrayElement = 0;
+              wset.dstBinding      = rb.binding;
+              wset.dstSet          = sets[i].second;
+              wset.pBufferInfo     = &binfo;
+              vkUpdateDescriptorSets(wnd->device, 1, &wset, 0, NULL);
+            } else {
+              UNIMPLEMENTED;
+            }
+          }
+        }
+
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                gw.pipeline_layout, sets[i].first, 1,
+                                &sets[i].second, 0, NULL);
+      }
+    }
+    deferred_bindings.reset();
+  }
   void *map_buffer(Resource_ID res_id) override {
     return wnd->map_buffer(res_id);
   }

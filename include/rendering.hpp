@@ -18,6 +18,7 @@ struct Resource_ID {
   u32  type;
   u32  index() { return id.index(); }
   bool is_null() { return id.is_null(); }
+  void reset() { memset(this, 0, sizeof(*this)); }
 };
 
 static_assert(sizeof(Resource_ID) == 8, "blimey!");
@@ -239,7 +240,7 @@ class Imm_Ctx {
   virtual void OM_set_blend_state(u32 rt_index, Blend_State const &bl) = 0;
 
   virtual void  bind_uniform_buffer(Stage_t stage, u32 set, u32 binding,
-                                    Resource_ID buf_id, size_t offset) = 0;
+                                    Resource_ID buf_id, size_t offset, size_t size) = 0;
   virtual void  bind_storage_buffer(Stage_t stage, u32 set, u32 binding,
                                     Resource_ID buf_id, size_t offset) = 0;
   virtual void  bind_sampled_image(Stage_t stage, u32 set, u32 binding,
@@ -264,7 +265,7 @@ class Imm_Ctx {
   virtual void  dispatch(u32 dim_x, u32 dim_y, u32 dim_z)              = 0;
   virtual void  set_viewport(float x, float y, float width, float height,
                              float mindepth, float maxdepth)           = 0;
-  virtual void  set_scissor(u32 x, u32 y, u32 width, u32 height)      = 0;
+  virtual void  set_scissor(u32 x, u32 y, u32 width, u32 height)       = 0;
 };
 
 struct Clear_Color {

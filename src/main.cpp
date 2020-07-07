@@ -5,9 +5,14 @@ class Simple_Pass : public rd::IPass {
   Resource_ID vs;
   Resource_ID ps;
   u32         width, height;
-
+  Resource_ID uniform_buffer;
   public:
-  void on_end(rd::IResource_Manager *rm) override {}
+  void on_end(rd::IResource_Manager *rm) override {
+    if (uniform_buffer.is_null() == false) {
+      rm->release_resource(uniform_buffer);
+      uniform_buffer.reset();
+    }
+  }
   void on_begin(rd::IResource_Manager *pc) override {
     // rd::Image2D_Create_Info rt0_info;
     // MEMZERO(rt0_info);
@@ -44,12 +49,21 @@ class Simple_Pass : public rd::IPass {
 )"),
                                NULL, 0);
     ps = pc->create_shader_raw(rd::Stage_t::PIXEL, stref_s(R"(
+layout(set = 0, binding = 0, std140) uniform UBO {
+  float4 color;
+} g_ubo;
 @(DECLARE_RENDER_TARGET 0);
 @(ENTRY)
-  @(EXPORT_COLOR 0 float4(1.0, 0.0, 0.0, 1.0));
+  @(EXPORT_COLOR 0 float4(g_ubo.color.xyz, 1.0));
 @(END)
 )"),
                                NULL, 0);
+    rd::Buffer_Create_Info buf_info;
+    MEMZERO(buf_info);
+    buf_info.mem_bits = (u32)rd::Memory_Bits::HOST_VISIBLE;
+    buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER;
+    buf_info.size = 16;
+    uniform_buffer = pc->create_buffer(buf_info);
   }
   void exec(rd::Imm_Ctx *ctx) override {
     rd::Blend_State bs;
@@ -84,6 +98,16 @@ class Simple_Pass : public rd::IPass {
     ctx->PS_set_shader(ps);
     ctx->set_viewport(0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f);
     ctx->set_scissor(0, 0, width / 2, height);
+    {
+      float *ptr = (float*)ctx->map_buffer(uniform_buffer);
+      ptr[0] = 1.0f;
+      ptr[1] = 1.0f;
+      ptr[2] = 0.0f;
+      ptr[3] = 1.0f;
+      ctx->unmap_buffer(uniform_buffer);
+    }
+    ctx->bind_uniform_buffer(rd::Stage_t::PIXEL, 0, 0, uniform_buffer, 0, 16);
+    ctx->flush_bindings();
     ctx->draw(3, 1, 0, 0);
   }
   string_ref get_name() override { return stref_s("simple_pass"); }
