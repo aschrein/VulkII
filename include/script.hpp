@@ -3,6 +3,94 @@
 
 #include "utils.hpp"
 
+static inline bool parse_decimal_int(char const *str, size_t len,
+                                     int32_t *result) {
+  int32_t  final = 0;
+  int32_t  pow   = 1;
+  int32_t  sign  = 1;
+  uint32_t i     = 0;
+  // parsing in reverse order
+  for (; i < len; ++i) {
+    switch (str[len - 1 - i]) {
+    case '0': break;
+    case '1': final += 1 * pow; break;
+    case '2': final += 2 * pow; break;
+    case '3': final += 3 * pow; break;
+    case '4': final += 4 * pow; break;
+    case '5': final += 5 * pow; break;
+    case '6': final += 6 * pow; break;
+    case '7': final += 7 * pow; break;
+    case '8': final += 8 * pow; break;
+    case '9': final += 9 * pow; break;
+    // it's ok to have '-'/'+' as the first char in a string
+    case '-': {
+      if (i == len - 1)
+        sign = -1;
+      else
+        return false;
+      break;
+    }
+    case '+': {
+      if (i == len - 1)
+        sign = 1;
+      else
+        return false;
+      break;
+    }
+    default: return false;
+    }
+    pow *= 10;
+  }
+  *result = sign * final;
+  return true;
+}
+
+static inline bool parse_float(char const *str, size_t len, float *result) {
+  float    final = 0.0f;
+  uint32_t i     = 0;
+  float    sign  = 1.0f;
+  if (str[0] == '-') {
+    sign = -1.0f;
+    i    = 1;
+  }
+  for (; i < len; ++i) {
+    if (str[i] == '.') break;
+    switch (str[i]) {
+    case '0': final = final * 10.0f; break;
+    case '1': final = final * 10.0f + 1.0f; break;
+    case '2': final = final * 10.0f + 2.0f; break;
+    case '3': final = final * 10.0f + 3.0f; break;
+    case '4': final = final * 10.0f + 4.0f; break;
+    case '5': final = final * 10.0f + 5.0f; break;
+    case '6': final = final * 10.0f + 6.0f; break;
+    case '7': final = final * 10.0f + 7.0f; break;
+    case '8': final = final * 10.0f + 8.0f; break;
+    case '9': final = final * 10.0f + 9.0f; break;
+    default: return false;
+    }
+  }
+  i++;
+  float pow = 1.0e-1f;
+  for (; i < len; ++i) {
+    switch (str[i]) {
+    case '0': break;
+    case '1': final += 1.0f * pow; break;
+    case '2': final += 2.0f * pow; break;
+    case '3': final += 3.0f * pow; break;
+    case '4': final += 4.0f * pow; break;
+    case '5': final += 5.0f * pow; break;
+    case '6': final += 6.0f * pow; break;
+    case '7': final += 7.0f * pow; break;
+    case '8': final += 8.0f * pow; break;
+    case '9': final += 9.0f * pow; break;
+    default: return false;
+    }
+    pow *= 1.0e-1f;
+  }
+  *result = sign * final;
+  return true;
+}
+
 struct List {
   string_ref symbol = {};
   u32        id     = 0;
@@ -26,6 +114,11 @@ struct List {
       out.len += (size_t)(th.ptr - out.ptr) - out.len + th.len;
     }
     return out;
+  }
+  i32 parse_int() {
+    i32 res;
+    ASSERT_ALWAYS(parse_decimal_int(symbol.ptr, symbol.len, &res));
+    return res;
   }
   bool nonempty() { return symbol.ptr != 0 && symbol.len != 0; }
   bool cmp_symbol(char const *str) {
@@ -255,94 +348,6 @@ struct List {
     return NULL;
   }
 };
-
-static inline bool parse_decimal_int(char const *str, size_t len,
-                                     int32_t *result) {
-  int32_t  final = 0;
-  int32_t  pow   = 1;
-  int32_t  sign  = 1;
-  uint32_t i     = 0;
-  // parsing in reverse order
-  for (; i < len; ++i) {
-    switch (str[len - 1 - i]) {
-    case '0': break;
-    case '1': final += 1 * pow; break;
-    case '2': final += 2 * pow; break;
-    case '3': final += 3 * pow; break;
-    case '4': final += 4 * pow; break;
-    case '5': final += 5 * pow; break;
-    case '6': final += 6 * pow; break;
-    case '7': final += 7 * pow; break;
-    case '8': final += 8 * pow; break;
-    case '9': final += 9 * pow; break;
-    // it's ok to have '-'/'+' as the first char in a string
-    case '-': {
-      if (i == len - 1)
-        sign = -1;
-      else
-        return false;
-      break;
-    }
-    case '+': {
-      if (i == len - 1)
-        sign = 1;
-      else
-        return false;
-      break;
-    }
-    default: return false;
-    }
-    pow *= 10;
-  }
-  *result = sign * final;
-  return true;
-}
-
-static inline bool parse_float(char const *str, size_t len, float *result) {
-  float    final = 0.0f;
-  uint32_t i     = 0;
-  float    sign  = 1.0f;
-  if (str[0] == '-') {
-    sign = -1.0f;
-    i    = 1;
-  }
-  for (; i < len; ++i) {
-    if (str[i] == '.') break;
-    switch (str[i]) {
-    case '0': final = final * 10.0f; break;
-    case '1': final = final * 10.0f + 1.0f; break;
-    case '2': final = final * 10.0f + 2.0f; break;
-    case '3': final = final * 10.0f + 3.0f; break;
-    case '4': final = final * 10.0f + 4.0f; break;
-    case '5': final = final * 10.0f + 5.0f; break;
-    case '6': final = final * 10.0f + 6.0f; break;
-    case '7': final = final * 10.0f + 7.0f; break;
-    case '8': final = final * 10.0f + 8.0f; break;
-    case '9': final = final * 10.0f + 9.0f; break;
-    default: return false;
-    }
-  }
-  i++;
-  float pow = 1.0e-1f;
-  for (; i < len; ++i) {
-    switch (str[i]) {
-    case '0': break;
-    case '1': final += 1.0f * pow; break;
-    case '2': final += 2.0f * pow; break;
-    case '3': final += 3.0f * pow; break;
-    case '4': final += 4.0f * pow; break;
-    case '5': final += 5.0f * pow; break;
-    case '6': final += 6.0f * pow; break;
-    case '7': final += 7.0f * pow; break;
-    case '8': final += 8.0f * pow; break;
-    case '9': final += 9.0f * pow; break;
-    default: return false;
-    }
-    pow *= 1.0e-1f;
-  }
-  *result = sign * final;
-  return true;
-}
 
 struct Value {
   enum class Value_t : i32 {

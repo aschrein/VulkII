@@ -240,14 +240,12 @@ class Imm_Ctx {
   virtual void OM_set_blend_state(u32 rt_index, Blend_State const &bl) = 0;
 
   virtual void  bind_uniform_buffer(Stage_t stage, u32 set, u32 binding,
-                                    Resource_ID buf_id, size_t offset, size_t size) = 0;
+                                    Resource_ID buf_id, size_t offset,
+                                    size_t size)                       = 0;
+  virtual void  bind_sampler(Stage_t stage, u32 set, u32 binding,
+                             Resource_ID sampler_id)                   = 0;
   virtual void  bind_storage_buffer(Stage_t stage, u32 set, u32 binding,
                                     Resource_ID buf_id, size_t offset) = 0;
-  virtual void  bind_sampled_image(Stage_t stage, u32 set, u32 binding,
-                                   u32 index, Resource_ID image_id,
-                                   Resource_ID sampler_id, u32 layer,
-                                   u32 num_layers, u32 level,
-                                   u32 num_levels)                     = 0;
   virtual void  bind_image(Stage_t stage, u32 set, u32 binding, u32 index,
                            Resource_ID image_id, u32 layer, u32 num_layers,
                            u32 level, u32 num_levels)                  = 0;
@@ -287,16 +285,17 @@ class IResource_Manager {
                                         size_t num_defines)             = 0;
   virtual Resource_ID create_sampler(Sampler_Create_Info const &info)   = 0;
   virtual void        release_resource(Resource_ID id)                  = 0;
-  virtual void add_render_target(Image_Create_Info const &info, u32 layer,
-                                 u32 level, Clear_Color const &cl)      = 0;
+  virtual void add_render_target(string_ref name, Image_Create_Info const &info,
+                                 u32 layer, u32 level,
+                                 Clear_Color const &cl)                 = 0;
   virtual void add_render_target(Resource_ID id, u32 layer, u32 level,
                                  Clear_Color const &cl)                 = 0;
-  virtual void add_depth_target(Image_Create_Info const &info, u32 layer,
-                                u32 level, Clear_Depth const &cl)       = 0;
+  virtual void add_depth_target(string_ref name, Image_Create_Info const &info,
+                                u32 layer, u32 level,
+                                Clear_Depth const &cl)                  = 0;
   virtual void add_depth_target(Resource_ID id, u32 layer, u32 level,
                                 Clear_Depth const &cl)                  = 0;
-  virtual Resource_ID  get_resource(string_ref pass_name,
-                                    string_ref res_name)                = 0;
+  virtual Resource_ID  get_resource(string_ref res_name)                = 0;
   virtual void         assign_name(Resource_ID res_id, string_ref name) = 0;
   virtual Resource_ID  get_swapchain_image()                            = 0;
   virtual Image2D_Info get_swapchain_image_info()                       = 0;

@@ -64,6 +64,7 @@ ELSE()
 ENDIF()
 target_include_directories(vulkii
   PRIVATE
+  3rdparty
   include
   ${INCLUDES}
   "$ENV{VULKAN_SDK}/include"

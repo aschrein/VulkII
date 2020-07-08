@@ -567,6 +567,7 @@ static inline string_ref get_dir(string_ref path) {
 struct string {
   char * ptr;
   size_t len;
+  bool   nonempty() const { return ptr != NULL; }
   string copy() const {
     string out;
     out.ptr = (char *)tl_alloc(len);
@@ -839,6 +840,17 @@ template <typename T, unsigned int N> struct InlineArray {
   T    pop() {
     ASSERT_DEBUG(size > 0);
     return elems[--size];
+  }
+  void remove(T val) {
+    ito(size) {
+      if (elems[i] == val) {
+        for (u32 j = i; j < size - 1; j++) {
+          elems[j] = elems[j + 1];
+        }
+        i--;
+        size--;
+      }
+    }
   }
 };
 

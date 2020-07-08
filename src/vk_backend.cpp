@@ -76,7 +76,7 @@ struct Ref_Cnt : public Slot {
 struct Mem_Chunk : public Ref_Cnt {
   VkDeviceMemory        mem        = VK_NULL_HANDLE;
   VkMemoryPropertyFlags prop_flags = 0;
-  static constexpr u32  PAGE_SIZE  = 0x1000;
+  static constexpr u32  PAGE_SIZE  = 1 << 24;
   u32                   size       = 0;
   u32                   cursor = 0; // points to the next free 4kb byte block
   u32                   memory_type_bits = 0;
@@ -144,6 +144,11 @@ struct Buffer : public Ref_Cnt {
   VkBufferCreateInfo create_info;
   VkAccessFlags      access_flags;
   InlineArray<ID, 8> views;
+  void               init() {
+    memset(this, 0, sizeof(*this));
+    views.init();
+  }
+  void release() { views.release(); }
 };
 
 static inline bool operator==(VkComponentMapping const &a,
@@ -187,6 +192,7 @@ struct Image_Info {
 };
 
 struct Image : public Ref_Cnt {
+  string             name;
   ID                 mem_chunk_id;
   u32                mem_offset;
   VkImageLayout      layout;
@@ -195,7 +201,15 @@ struct Image : public Ref_Cnt {
   VkImage            image;
   Image_Info         info;
   InlineArray<ID, 8> views;
-  bool               is_depth_image() {
+  void               init() {
+    memset(this, 0, sizeof(*this));
+    views.init();
+  }
+  void release() {
+    views.release();
+    name.release();
+  }
+  bool is_depth_image() {
     switch (info.format) {
     case VK_FORMAT_D16_UNORM:
     case VK_FORMAT_D16_UNORM_S8_UINT:
@@ -332,32 +346,84 @@ static char const *parse_parentheses(char const *cur, char const *end, F fn) {
 
 static void execute_preprocessor(List *l, char const *list_end,
                                  String_Builder &builder) {
+  struct Parameter_Evaluator {
+    i32        set;
+    i32        binding;
+    i32        location;
+    string_ref name;
+    string_ref type;
+    string_ref dim;
+
+    void reset() {
+      memset(this, 0, sizeof(*this));
+      set      = -1;
+      binding  = -1;
+      location = -1;
+    }
+    void exec(List *l) {
+      while (l != NULL) {
+        if (l->child != NULL) {
+          exec(l->child);
+        } else if (l->cmp_symbol("location")) {
+          location = l->get(1)->parse_int();
+        } else if (l->cmp_symbol("binding")) {
+          binding = l->get(1)->parse_int();
+        } else if (l->cmp_symbol("set")) {
+          set = l->get(1)->parse_int();
+        } else if (l->cmp_symbol("name")) {
+          name = l->get(1)->symbol;
+        } else if (l->cmp_symbol("type")) {
+          type = l->get(1)->symbol;
+        } else if (l->cmp_symbol("dim")) {
+          dim = l->get(1)->symbol;
+        }
+        l = l->next;
+      }
+    }
+  };
+  Parameter_Evaluator param_eval;
   if (l->child) {
     execute_preprocessor(l->child, list_end, builder);
     return;
   }
-  if (l->cmp_symbol("OUTPUT")) {
-    i32        location;
-    string_ref loc_str = l->get(1)->symbol;
-    ASSERT_ALWAYS(parse_decimal_int(loc_str.ptr, loc_str.len, &location));
-    builder.putf("layout(location = %i) out %.*s %.*s", location,
-                 STRF(l->get(2)->symbol), STRF(l->get(3)->symbol));
-  } else if (l->cmp_symbol("INPUT")) {
-    i32        location;
-    string_ref loc_str = l->get(1)->symbol;
-    ASSERT_ALWAYS(parse_decimal_int(loc_str.ptr, loc_str.len, &location));
-    builder.putf("layout(location = %i) out %.*s %.*s", location,
-                 STRF(l->get(2)->symbol), STRF(l->get(3)->symbol));
+  if (l->cmp_symbol("DECLARE_OUTPUT")) {
+    param_eval.reset();
+    param_eval.exec(l->next);
+    builder.putf("layout(location = %i) out %.*s %.*s;", param_eval.location,
+                 STRF(param_eval.type), STRF(param_eval.name));
+  } else if (l->cmp_symbol("DECLARE_INPUT")) {
+    param_eval.reset();
+    param_eval.exec(l->next);
+    builder.putf("layout(location = %i) in %.*s %.*s;", param_eval.location,
+                 STRF(param_eval.type), STRF(param_eval.name));
+  } else if (l->cmp_symbol("DECLARE_SAMPLER")) {
+    param_eval.reset();
+    param_eval.exec(l->next);
+    builder.putf("layout(set = %i, binding = %i) uniform sampler %.*s;",
+                 param_eval.set, param_eval.binding, STRF(param_eval.name));
+  } else if (l->cmp_symbol("DECLARE_IMAGE")) {
+    param_eval.reset();
+    param_eval.exec(l->next);
+    if (param_eval.type == stref_s("SAMPLED")) {
+      // uniform layout(binding=2) texture1D g_tTex_unused2;
+      // uniform layout(binding=2) sampler g_sSamp3[2];
+      // layout(binding = 0, rgba32f) uniform readonly mediump image2D imageM;
+      builder.putf("layout(set = %i, binding = %i) uniform texture%.*s %.*s;",
+                   param_eval.set, param_eval.binding, STRF(param_eval.dim),
+                   STRF(param_eval.name));
+    } else {
+      UNIMPLEMENTED;
+    }
+
   } else if (l->cmp_symbol("ENTRY")) {
     builder.putf("void main() {");
   } else if (l->cmp_symbol("END")) {
     builder.putf("}");
   } else if (l->cmp_symbol("DECLARE_RENDER_TARGET")) {
-    i32        location;
-    string_ref loc_str = l->get(1)->symbol;
-    ASSERT_ALWAYS(parse_decimal_int(loc_str.ptr, loc_str.len, &location));
-    builder.putf("layout(location = %i) out float4 out_rt%i", location,
-                 location);
+    param_eval.reset();
+    param_eval.exec(l->next);
+    builder.putf("layout(location = %i) out float4 out_rt%i;",
+                 param_eval.location, param_eval.location);
   } else if (l->cmp_symbol("EXPORT_POSITION")) {
     string_ref next = l->get(1)->symbol;
     builder.putf("gl_Position = %.*s", (int)(size_t)(list_end - next.ptr - 1),
@@ -369,8 +435,24 @@ static void execute_preprocessor(List *l, char const *list_end,
     string_ref next = l->get(2)->symbol;
     builder.putf("out_rt%i = %.*s", location,
                  (int)(size_t)(list_end - next.ptr - 1), next.ptr);
+  } else if (l->cmp_symbol("DECLARE_UNIFORM_BUFFER")) {
+    param_eval.reset();
+    param_eval.exec(l->next);
+    builder.putf("layout(set = %i, binding = %i, std140) uniform UBO {\n",
+                 param_eval.set, param_eval.binding);
+    List *cur = l->next;
+    while (cur != NULL) {
+      if (cur->child != NULL && cur->child->cmp_symbol("add_field")) {
+        param_eval.reset();
+        param_eval.exec(cur->child->next);
+        builder.putf("  %.*s %.*s;\n", STRF(param_eval.type),
+                     STRF(param_eval.name));
+      }
+      cur = cur->next;
+    }
+    builder.putf("};\n");
   } else {
-    // UNIMPLEMENTED;
+    UNIMPLEMENTED;
   }
 }
 
@@ -381,6 +463,9 @@ static void preprocess_shader(String_Builder &builder, string_ref body) {
 #define float2        vec2
 #define float3        vec3
 #define float4        vec4
+#define float2x2      mat2
+#define float3x3      mat3
+#define float4x4      mat4
 #define int2          ivec2
 #define int3          ivec3
 #define int4          ivec4
@@ -391,12 +476,10 @@ static void preprocess_shader(String_Builder &builder, string_ref body) {
 #define float3x3      mat3
 #define float4x4      mat4
 #define VERTEX_INDEX  gl_VertexIndex
-#define OUTPUT(x)     layout(location = x) out
-#define INPUT(x)      layout(location = x) in
-#define VERTEX_INDEX  gl_VertexIndex
-#define EXPORT_POSITION(p)  gl_Position = p
-#define RENDER_TARGET(x);  layout(location = x) out float4 out_rt##x
-#define EXPORT_COLOR0(p)  out_rt0 = p
+#define lerp          mix
+#define float2_splat(x)  vec2(x, x)
+#define float3_splat(x)  vec3(x, x, x)
+#define float4_splat(x)  vec4(x, x, x, x)
 
 )");
   char const *cur       = body.ptr;
@@ -852,6 +935,8 @@ struct Shader_Reflection {
 
     Array<VkDescriptorSetLayout> out;
     out.init();
+    baked_layouts.release();
+    baked_layouts.init();
     set_table.iter_pairs([&](u32                            set_index,
                              Table<u32, Shader_Descriptor> &binding_table) {
       constexpr u32 MAX_BINDINGS = 0x40;
@@ -1251,6 +1336,7 @@ struct Window {
     void                        release_item(Buffer &buf) {
       vkDestroyBuffer(wnd->device, buf.buffer, NULL);
       wnd->mem_chunks[buf.mem_chunk_id.index()].rem_reference();
+      buf.release();
       MEMZERO(buf);
     }
     void init(Window *wnd) {
@@ -1262,11 +1348,12 @@ struct Window {
     static constexpr char const NAME[] = "Image_Array";
     Window *                    wnd    = NULL;
     void                        release_item(Image &img) {
-      if (img.mem_chunk_id.is_null() ==
-          false) { // True in case of swap chain images
+      if (img.mem_chunk_id.is_null() == false) {
+        // True in case of swap chain images
         vkDestroyImage(wnd->device, img.image, NULL);
         wnd->mem_chunks[img.mem_chunk_id.index()].rem_reference();
       }
+      img.release();
       MEMZERO(img);
     }
     void init(Window *wnd) {
@@ -1342,11 +1429,11 @@ struct Window {
       Resource_Array::init();
     }
   } samplers;
-  ID                                            cur_pass;
-  Hash_Table<string_ref, ID>                    named_render_passes;
-  Hash_Table<string_ref, Pair<ID, Resource_ID>> named_resources;
-  Hash_Table<Graphics_Pipeline_State, ID>       pipeline_cache;
-  Hash_Table<u64, ID>                           shader_cache;
+  ID                                      cur_pass;
+  Hash_Table<string_ref, ID>              named_render_passes;
+  Hash_Table<string_ref, Resource_ID>     named_resources;
+  Hash_Table<Graphics_Pipeline_State, ID> pipeline_cache;
+  Hash_Table<u64, ID>                     shader_cache;
 
   void init_ds() {
     named_resources.init();
@@ -1482,6 +1569,7 @@ struct Window {
     VkMemoryRequirements reqs;
     vkGetBufferMemoryRequirements(device, buf, &reqs);
     Buffer new_buf;
+    new_buf.init();
     new_buf.buffer       = buf;
     new_buf.access_flags = 0;
     new_buf.create_info  = cinfo;
@@ -1581,13 +1669,14 @@ struct Window {
     VK_ASSERT_OK(vkCreateImageView(device, &cinfo, NULL, &img_view.view));
     img_view.img_id = res_id;
     img.add_reference();
-
-    return {image_views.push(img_view), (i32)Resource_Type::IMAGE_VIEW};
+    ID view_id = image_views.push(img_view);
+    img.views.push(view_id);
+    return {view_id, (i32)Resource_Type::IMAGE_VIEW};
   }
 
   Resource_ID create_image(u32 width, u32 height, u32 depth, u32 layers,
                            u32 levels, VkFormat format, u32 usage_flags,
-                           u32 mem_flags) {
+                           u32 mem_flags, string_ref name = string_ref{}) {
     u32               prop_flags = to_vk_memory_bits(mem_flags);
     VkImage           image;
     VkImageCreateInfo cinfo;
@@ -1608,12 +1697,16 @@ struct Window {
       cinfo.format        = format;
       cinfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
       cinfo.tiling        = VK_IMAGE_TILING_OPTIMAL;
-      cinfo.usage         = to_vk_image_usage_bits(mem_flags);
+      cinfo.usage         = to_vk_image_usage_bits(usage_flags);
       VK_ASSERT_OK(vkCreateImage(device, &cinfo, NULL, &image));
     }
     VkMemoryRequirements reqs;
     vkGetImageMemoryRequirements(device, image, &reqs);
     Image new_image;
+    new_image.init();
+    if (name.ptr != NULL) {
+      new_image.name = make_string(name);
+    }
     new_image.image              = image;
     new_image.access_flags       = 0;
     new_image.info.arrayLayers   = cinfo.arrayLayers;
@@ -1639,20 +1732,38 @@ struct Window {
     Mem_Chunk &chunk       = mem_chunks[chunk_index];
     new_image.mem_offset   = chunk.alloc(reqs.alignment, reqs.size);
     vkBindImageMemory(device, new_image.image, chunk.mem, new_image.mem_offset);
-    return {images.push(new_image), (u32)Resource_Type::IMAGE};
+    ID          img_id = images.push(new_image);
+    Resource_ID res_id = {img_id, (u32)Resource_Type::IMAGE};
+    if (name.ptr != NULL) {
+      named_resources.insert(new_image.name.ref(), res_id);
+    }
+    return res_id;
   }
 
   void release_resource(Resource_ID res_id) {
-    if (res_id.type == (u32)Resource_Type::BUFFER) {
+    if (res_id.type == (u32)Resource_Type::PASS) {
+      Render_Pass &pass = render_passes[res_id.id];
+      named_render_passes.remove(pass.name.ref());
+      render_passes.remove(res_id.id, 3);
+    } else if (res_id.type == (u32)Resource_Type::BUFFER) {
       Buffer &buf = buffers[res_id.id];
       buf.rem_reference();
       ito(buf.views.size) buffer_views.remove(buf.views[i], 3);
     } else if (res_id.type == (u32)Resource_Type::BUFFER_VIEW) {
+      BufferView &view = buffer_views[res_id.id];
+      Buffer &buf = buffers[view.buf_id];
+      buf.views.remove(res_id.id);
       buffer_views.remove(res_id.id, 3);
     } else if (res_id.type == (u32)Resource_Type::IMAGE_VIEW) {
+      ImageView &view = image_views[res_id.id];
+      Image &img = images[view.img_id];
+      img.views.remove(res_id.id);
       image_views.remove(res_id.id, 3);
     } else if (res_id.type == (u32)Resource_Type::IMAGE) {
       Image &img = images[res_id.id];
+      if (img.name.nonempty()) {
+        named_resources.remove(img.name.ref());
+      }
       img.rem_reference();
       ito(img.views.size) image_views.remove(img.views[i], 3);
     } else if (res_id.type == (u32)Resource_Type::SHADER) {
@@ -1755,7 +1866,7 @@ struct Window {
     vkGetSwapchainImagesKHR(device, swapchain, &sc_image_count, raw_images);
     ito(sc_image_count) {
       Image image;
-      MEMZERO(image);
+      image.init();
       image.image              = raw_images[i];
       image.access_flags       = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
       image.layout             = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1798,10 +1909,10 @@ struct Window {
       MEMZERO(dependency);
       dependency.srcSubpass    = VK_SUBPASS_EXTERNAL;
       dependency.dstSubpass    = 0;
-      dependency.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-      dependency.dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-      dependency.srcAccessMask = 0;
-      dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+      dependency.srcStageMask  =
+    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; dependency.dstStageMask  =
+    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; dependency.srcAccessMask =
+    0; dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
       VkRenderPassCreateInfo info;
       MEMZERO(info);
       info.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -2051,7 +2162,7 @@ struct Window {
       update_swapchain();
     }
     cmd_index = (frame_id++) % sc_image_count;
-    
+
     VkResult wait_res =
         vkWaitForFences(device, 1, &frame_fences[cmd_index], VK_TRUE, 1000);
     if (wait_res == VK_TIMEOUT) {
@@ -2104,8 +2215,8 @@ struct Window {
     }
     VkClearColorValue clear_color = {{1.0f, 0.0f, 0.0f, 1.0f}};
     vkCmdClearColorImage(cmd_buffers[cmd_index], sc_images[image_index],
-                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1,
-                         &srange);*/
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color,
+    1, &srange);*/
 
     Image &img = images[sc_images[image_index]];
     img.barrier(cmd_buffers[cmd_index], VK_ACCESS_MEMORY_READ_BIT,
@@ -2168,7 +2279,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
     UNIFORM_BUFFER,
     STORAGE_BUFFER,
     IMAGE,
-    SAMPLED_IMAGE,
+    SAMPLER,
     STORAGE_IMAGE
   };
   struct Resource_Binding {
@@ -2188,6 +2299,16 @@ class Vk_Ctx : public rd::Imm_Ctx {
         size_t offset;
         size_t size;
       } storage_buffer;
+      struct {
+        ID  image_id;
+        u32 layer;
+        u32 num_layers;
+        u32 level;
+        u32 num_levels;
+      } image;
+      struct {
+        ID sampler_id;
+      } sampler;
     };
     Resource_Binding() {}
   };
@@ -2255,6 +2376,74 @@ class Vk_Ctx : public rd::Imm_Ctx {
     if (!_pass_bound) return;
     vkCmdEndRenderPass(cmd);
     _pass_bound = false;
+  }
+  void update_descriptor_set(rd::Stage_t stage, u32 index,
+                             VkDescriptorSet set) {
+    jto(deferred_bindings.size) {
+      Resource_Binding &rb = deferred_bindings[j];
+      if (rb.set != index) continue;
+      if (rb.stage != stage) continue;
+      if (rb.type == Binding_t::UNIFORM_BUFFER) {
+        VkDescriptorBufferInfo binfo;
+        MEMZERO(binfo);
+        binfo.buffer = wnd->buffers[rb.uniform_buffer.buf_id].buffer;
+        binfo.offset = rb.uniform_buffer.offset;
+        binfo.range  = rb.uniform_buffer.size;
+        VkWriteDescriptorSet wset;
+        MEMZERO(wset);
+        wset.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wset.descriptorCount = 1;
+        wset.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        wset.dstArrayElement = rb.element;
+        wset.dstBinding      = rb.binding;
+        wset.dstSet          = set;
+        wset.pBufferInfo     = &binfo;
+        vkUpdateDescriptorSets(wnd->device, 1, &wset, 0, NULL);
+      } else if (rb.type == Binding_t::IMAGE) {
+        VkDescriptorImageInfo binfo;
+        MEMZERO(binfo);
+        Image &img = wnd->images[rb.image.image_id];
+        img.barrier(cmd, VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        ID view_id =
+            wnd->create_image_view(img.id, rb.image.level, rb.image.num_levels,
+                                   rb.image.layer, rb.image.num_layers)
+                .id;
+        ImageView &view   = wnd->image_views[view_id];
+        binfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        binfo.imageView   = view.view;
+        binfo.sampler     = VK_NULL_HANDLE;
+        VkWriteDescriptorSet wset;
+        MEMZERO(wset);
+        wset.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wset.descriptorCount = 1;
+        wset.descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        wset.dstArrayElement = rb.element;
+        wset.dstBinding      = rb.binding;
+        wset.dstSet          = set;
+        wset.pImageInfo      = &binfo;
+        vkUpdateDescriptorSets(wnd->device, 1, &wset, 0, NULL);
+      } else if (rb.type == Binding_t::SAMPLER) {
+        VkDescriptorImageInfo binfo;
+        MEMZERO(binfo);
+        Sampler &sampler  = wnd->samplers[rb.sampler.sampler_id];
+        binfo.imageLayout = VK_IMAGE_LAYOUT_MAX_ENUM;
+        binfo.imageView   = VK_NULL_HANDLE;
+        binfo.sampler     = sampler.sampler;
+        VkWriteDescriptorSet wset;
+        MEMZERO(wset);
+        wset.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wset.descriptorCount = 1;
+        wset.descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLER;
+        wset.dstArrayElement = rb.element;
+        wset.dstBinding      = rb.binding;
+        wset.dstSet          = set;
+        wset.pImageInfo      = &binfo;
+        vkUpdateDescriptorSets(wnd->device, 1, &wset, 0, NULL);
+      } else {
+        UNIMPLEMENTED;
+      }
+    }
   }
 
   public:
@@ -2474,13 +2663,31 @@ class Vk_Ctx : public rd::Imm_Ctx {
   void bind_image(rd::Stage_t stage, u32 set, u32 binding, u32 index,
                   Resource_ID image_id, u32 layer, u32 num_layers, u32 level,
                   u32 num_levels) override {
-    UNIMPLEMENTED;
+    Resource_Binding rb;
+    MEMZERO(rb);
+    rb.stage            = stage;
+    rb.type             = Binding_t::IMAGE;
+    rb.set              = set;
+    rb.binding          = binding;
+    rb.element          = index;
+    rb.image.image_id   = image_id.id;
+    rb.image.layer      = layer;
+    rb.image.level      = level;
+    rb.image.num_layers = num_layers;
+    rb.image.num_levels = num_levels;
+    deferred_bindings.push(rb);
   }
-  void bind_sampled_image(rd::Stage_t stage, u32 set, u32 binding, u32 index,
-                          Resource_ID image_id, Resource_ID sampler_id,
-                          u32 layer, u32 num_layers, u32 level,
-                          u32 num_levels) override {
-    UNIMPLEMENTED;
+  void bind_sampler(rd::Stage_t stage, u32 set, u32 binding,
+                    Resource_ID sampler_id) override {
+    Resource_Binding rb;
+    MEMZERO(rb);
+    rb.stage              = stage;
+    rb.type               = Binding_t::SAMPLER;
+    rb.set                = set;
+    rb.binding            = binding;
+    rb.element            = 0;
+    rb.sampler.sampler_id = sampler_id.id;
+    deferred_bindings.push(rb);
   }
   void bind_rw_image(rd::Stage_t stage, u32 set, u32 binding, u32 index,
                      Resource_ID image_id, u32 layer, u32 num_layers, u32 level,
@@ -2488,6 +2695,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
     UNIMPLEMENTED;
   }
   void flush_bindings() override {
+    end_pass();
     Graphics_Pipeline_Wrapper &gw = get_or_bake_graphics_pipeline();
     { // vs bindings
       InlineArray<Pair<u32, VkDescriptorSet>, 8> sets;
@@ -2499,6 +2707,8 @@ class Vk_Ctx : public rd::Imm_Ctx {
             sets.push({set_index, set});
           });
       ito(sets.size) {
+        update_descriptor_set(rd::Stage_t::VERTEX, sets[i].first,
+                              sets[i].second);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 gw.pipeline_layout, sets[i].first, 1,
                                 &sets[i].second, 0, NULL);
@@ -2514,32 +2724,8 @@ class Vk_Ctx : public rd::Imm_Ctx {
             sets.push({set_index, set});
           });
       ito(sets.size) {
-        jto(deferred_bindings.size) {
-          Resource_Binding &rb = deferred_bindings[j];
-          if (rb.set != sets[i].first) continue;
-          if (rb.stage == rd::Stage_t::PIXEL) {
-            if (rb.type == Binding_t::UNIFORM_BUFFER) {
-              VkDescriptorBufferInfo binfo;
-              MEMZERO(binfo);
-              binfo.buffer = wnd->buffers[rb.uniform_buffer.buf_id].buffer;
-              binfo.offset = rb.uniform_buffer.offset;
-              binfo.range  = rb.uniform_buffer.size;
-              VkWriteDescriptorSet wset;
-              MEMZERO(wset);
-              wset.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-              wset.descriptorCount = 1;
-              wset.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-              wset.dstArrayElement = 0;
-              wset.dstBinding      = rb.binding;
-              wset.dstSet          = sets[i].second;
-              wset.pBufferInfo     = &binfo;
-              vkUpdateDescriptorSets(wnd->device, 1, &wset, 0, NULL);
-            } else {
-              UNIMPLEMENTED;
-            }
-          }
-        }
-
+        update_descriptor_set(rd::Stage_t::PIXEL, sets[i].first,
+                              sets[i].second);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 gw.pipeline_layout, sets[i].first, 1,
                                 &sets[i].second, 0, NULL);
@@ -2581,7 +2767,12 @@ class VkResource_Manager : public rd::IResource_Manager {
   Window *   wnd;
   ID         cached_pass;
   rd::IPass *pPass;
-
+  Pool<char> string_pool;
+  string_ref move_string(string_ref str) {
+    char *ptr = string_pool.alloc(str.len);
+    memcpy(ptr, str.ptr, str.len);
+    return string_ref{ptr, str.len};
+  }
   struct Get_Or_Create_RT {
     bool                  is_set;
     ID                    id;
@@ -2591,6 +2782,7 @@ class VkResource_Manager : public rd::IResource_Manager {
     u32                   level;
     rd::Clear_Color       clear_color;
     rd::Clear_Depth       clear_depth;
+    string_ref            name;
 
     ID view_id;
 
@@ -2616,6 +2808,7 @@ class VkResource_Manager : public rd::IResource_Manager {
 
   public:
   void init(Window *wnd, rd::IPass *pPass) {
+    string_pool = Pool<char>::create(1 << 10);
     this->wnd   = wnd;
     cached_pass = {0};
     rts.init();
@@ -2625,12 +2818,15 @@ class VkResource_Manager : public rd::IResource_Manager {
     this->pPass = pPass;
   }
   void release() {
+    string_pool.release();
     if (cached_pass.is_null() == false)
       wnd->render_passes.remove(cached_pass, 3);
   }
   void on_pass_begin() {
+    ito(rts.size) rts[i].reset();
     rts.init();
     depth_target.reset();
+    string_pool.reset();
   }
   void on_pass_end() {}
   ID   get_pass() {
@@ -2646,9 +2842,7 @@ class VkResource_Manager : public rd::IResource_Manager {
     if (invalidate) {
       // release old resources
       if (!cached_pass.is_null()) {
-        wnd->named_render_passes.remove(
-            wnd->render_passes[cached_pass].name.ref());
-        wnd->render_passes.remove(cached_pass, 3);
+        wnd->release_resource({cached_pass, (u32)Resource_Type::PASS});
         ito(cached_rts.size) {
           if (cached_rts[i].is_id == false) {
             wnd->release_resource(
@@ -2679,7 +2873,8 @@ class VkResource_Manager : public rd::IResource_Manager {
                      rts[i].create_info.depth, rts[i].create_info.layers,
                      rts[i].create_info.levels,
                      to_vk(rts[i].create_info.format),
-                     rts[i].create_info.usage_bits, rts[i].create_info.mem_bits)
+                     rts[i].create_info.usage_bits, rts[i].create_info.mem_bits,
+                     rts[i].name)
                   .id;
           rts[i].view_id = wnd->create_image_view(rts[i].id, rts[i].level, 1,
                                                   rts[i].layer, 1)
@@ -2700,7 +2895,8 @@ class VkResource_Manager : public rd::IResource_Manager {
                                 depth_target.create_info.levels,
                                 to_vk(depth_target.create_info.format),
                                 depth_target.create_info.usage_bits,
-                                depth_target.create_info.mem_bits)
+                                depth_target.create_info.mem_bits,
+                                depth_target.name)
                   .id;
           depth_target.view_id =
               wnd->create_image_view(depth_target.id, depth_target.level, 1,
@@ -2924,8 +3120,9 @@ class VkResource_Manager : public rd::IResource_Manager {
     return {id, (u32)Resource_Type::SAMPLER};
   }
   void release_resource(Resource_ID id) override { wnd->release_resource(id); }
-  void add_render_target(rd::Image_Create_Info const &info, u32 layer,
-                         u32 level, rd::Clear_Color const &cl) override {
+  void add_render_target(string_ref name, rd::Image_Create_Info const &info,
+                         u32 layer, u32 level,
+                         rd::Clear_Color const &cl) override {
     Get_Or_Create_RT gorc;
     gorc.reset();
     gorc.is_set      = true;
@@ -2934,6 +3131,7 @@ class VkResource_Manager : public rd::IResource_Manager {
     gorc.level       = level;
     gorc.clear_color = cl;
     gorc.is_id       = false;
+    gorc.name        = move_string(name);
     rts.push(gorc);
   }
   void add_render_target(Resource_ID id, u32 layer, u32 level,
@@ -2949,7 +3147,8 @@ class VkResource_Manager : public rd::IResource_Manager {
     gorc.is_id       = true;
     rts.push(gorc);
   }
-  void add_depth_target(rd::Image_Create_Info const &info, u32 layer, u32 level,
+  void add_depth_target(string_ref name, rd::Image_Create_Info const &info,
+                        u32 layer, u32 level,
                         rd::Clear_Depth const &cl) override {
     Get_Or_Create_RT gorc;
     gorc.reset();
@@ -2959,6 +3158,7 @@ class VkResource_Manager : public rd::IResource_Manager {
     gorc.level       = level;
     gorc.clear_depth = cl;
     gorc.is_id       = false;
+    gorc.name        = move_string(name);
     depth_target     = gorc;
   }
   void add_depth_target(Resource_ID id, u32 layer, u32 level,
@@ -2974,8 +3174,11 @@ class VkResource_Manager : public rd::IResource_Manager {
     gorc.is_id       = true;
     depth_target     = gorc;
   }
-  Resource_ID get_resource(string_ref pass_name, string_ref res_name) override {
-    UNIMPLEMENTED;
+  Resource_ID get_resource(string_ref res_name) override {
+    if (wnd->named_resources.contains(res_name)) {
+      return wnd->named_resources.get(res_name);
+    }
+    return Resource_ID{0, 0};
   }
   void assign_name(Resource_ID res_id, string_ref name) override {
     UNIMPLEMENTED;
@@ -3063,6 +3266,7 @@ class VkPass_Mng : public rd::Pass_Mng {
         } else
           passes[i].ctx[cur_ctx]->submit(NULL);
         last_ctx = passes[i].ctx[cur_ctx];
+        passes[i].pass->on_end(passes[i].rsmng);
         passes[i].rsmng->on_pass_end();
       }
       if (last_ctx != NULL) {
