@@ -5,6 +5,8 @@
 
 #include <functional>
 
+#define SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS
+
 #ifdef __linux__
 #define VK_USE_PLATFORM_XCB_KHR
 #include <SDL2/SDL.h>

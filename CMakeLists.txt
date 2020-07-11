@@ -17,6 +17,7 @@ ENDIF()
 add_executable(vulkii
 src/main.cpp
 src/vk_backend.cpp
+src/files.cpp
 )
 IF (WIN32)
   set(SDL2_PATH ${CMAKE_SOURCE_DIR}/bin/SDL2)

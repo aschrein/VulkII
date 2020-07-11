@@ -1,22 +1,7 @@
 #include "rendering.hpp"
 #include "script.hpp"
-#include <glm/glm.hpp>
-#include <glm/gtx/quaternion.hpp>
 
-using namespace glm;
-
-using int2     = ivec2;
-using int3     = ivec3;
-using int4     = ivec4;
-using uint2    = uvec2;
-using uint3    = uvec3;
-using uint4    = uvec4;
-using float2   = vec2;
-using float3   = vec3;
-using float4   = vec4;
-using float2x2 = mat2;
-using float3x3 = mat3;
-using float4x4 = mat4;
+#include "scene.hpp"
 
 static void setup_default_state(rd::Imm_Ctx *ctx, u32 num_rts = 1) {
   rd::Blend_State bs;
@@ -316,6 +301,7 @@ class Merge_Pass : public rd::IPass {
 int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
+  PBR_Model model = load_gltf_pbr(stref_s("models/old_tree/scene.gltf"));
   rd::Pass_Mng *pmng = rd::Pass_Mng::create(rd::Impl_t::VULKAN);
   pmng->add_pass(new Opaque_Pass);
   pmng->add_pass(new Merge_Pass);

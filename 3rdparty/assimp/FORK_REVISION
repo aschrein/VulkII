@@ -1,8 +1,0 @@
-commit 094b808880243e7a15ced3a1bad1fd25a5209e29
-Merge: e4e97684 f938a6b7
-Author: Kim Kulling <kimkulling@users.noreply.github.com>
-Date:   Fri Jun 12 15:04:51 2020 +0200
-
-    Merge pull request #3279 from assimp/migenius-migenius-fix-texcoord
-    
-    add a unittest.
