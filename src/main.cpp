@@ -64,15 +64,15 @@ class Opaque_Pass : public rd::IPass {
   }
   void on_begin(rd::IResource_Manager *pc) override {
     rd::Image2D_Info info = pc->get_swapchain_image_info();
-    width                 = info.width;
-    height                = info.height;
+    width                 = 64;
+    height                = 64;
 
     rd::Clear_Color cl;
     cl.clear = true;
     cl.r     = 0.0f;
     cl.g     = 0.0f;
-    cl.b     = 0.0f;
-    cl.a     = 0.0f;
+    cl.b     = 1.0f;
+    cl.a     = 1.0f;
 
     rd::Image_Create_Info rt0_info;
     MEMZERO(rt0_info);
@@ -141,7 +141,7 @@ class Opaque_Pass : public rd::IPass {
       ptr[3]     = 1.0f;
       ctx->unmap_buffer(uniform_buffer);
     }
-    ctx->bind_uniform_buffer(rd::Stage_t::PIXEL, 0, 0, uniform_buffer, 0, 16);
+    ctx->bind_uniform_buffer(0, 0, uniform_buffer, 0, 16);
     ctx->flush_bindings();
     ctx->draw(3, 1, 0, 0);
   }
@@ -159,6 +159,7 @@ class Merge_Pass : public rd::IPass {
   Resource_ID uniform_buffer;
   Resource_ID sampler;
   Resource_ID my_image;
+  Timer       timer;
 
   struct Uniform {
     float2x2 rot;
@@ -166,6 +167,7 @@ class Merge_Pass : public rd::IPass {
   } uniform_data;
 
   public:
+  Merge_Pass() { timer.init(); }
   void on_end(rd::IResource_Manager *rm) override {
     if (uniform_buffer.is_null() == false) {
       rm->release_resource(uniform_buffer);
@@ -185,14 +187,29 @@ class Merge_Pass : public rd::IPass {
     cl.a     = 0.0f;
 
     pc->add_render_target(pc->get_swapchain_image(), 0, 0, cl);
-    if (vs.is_null())
-      vs = pc->create_shader_raw(rd::Stage_t::VERTEX, stref_s(R"(
+    static string_ref            shader    = stref_s(R"(
 @(DECLARE_UNIFORM_BUFFER
   (set 0)
   (binding 0)
-  (add_field (type float2x2) (name rot))
+  (add_field (type float4)   (name rot))
   (add_field (type float4)   (name color))
 )
+@(DECLARE_IMAGE
+  (type SAMPLED)
+  (dim 2D)
+  (set 0)
+  (binding 1)
+  (format RGBA32_FLOAT)
+  (name my_image)
+)
+@(DECLARE_SAMPLER
+  (set 0)
+  (binding 2)
+  (name my_sampler)
+)
+
+#ifdef VERTEX
+
 @(DECLARE_OUTPUT
   (location 0)
   (type float2)
@@ -202,34 +219,19 @@ class Merge_Pass : public rd::IPass {
 @(ENTRY)
   float x = -1.0 + float((VERTEX_INDEX & 1) << 2);
   float y = -1.0 + float((VERTEX_INDEX & 2) << 1);
-  tex_coords = rot * float2(x * 0.5 + 0.5, y * 0.5 + 0.5);
+  float2 pos = float2x2(rot.x, rot.y,
+                        rot.z, rot.w) * float2(x, y);
+  tex_coords = float2x2(rot.x, rot.y,
+                        rot.z, rot.w) * pos * 0.5 + float2(0.5, 0.5);
   @(EXPORT_POSITION
-      float4(x, y, 0.5, 1.0)
+      float4(pos.xy, 0.5, 1.0)
   );
 @(END)
-)"),
-                                 NULL, 0);
-    if (ps.is_null())
-      ps = pc->create_shader_raw(rd::Stage_t::PIXEL, stref_s(R"(
-@(DECLARE_UNIFORM_BUFFER
-  (set 1)
-  (binding 0)
-  (add_field (type float2x2) (name rot))
-  (add_field (type float4)   (name color))
-)
-@(DECLARE_IMAGE
-  (type SAMPLED)
-  (dim 2D)
-  (set 1)
-  (binding 1)
-  (format RGBA32_FLOAT)
-  (name my_image)
-)
-@(DECLARE_SAMPLER
-  (set 1)
-  (binding 2)
-  (name my_sampler)
-)
+
+#endif
+
+#ifdef PIXEL
+
 @(DECLARE_INPUT
   (location 0)
   (type float2)
@@ -246,8 +248,18 @@ class Merge_Pass : public rd::IPass {
             0.5)
         );
 @(END)
-)"),
-                                 NULL, 0);
+
+#endif
+)");
+    Pair<string_ref, string_ref> defines[] = {
+        {stref_s("VERTEX"), {}},
+        {stref_s("PIXEL"), {}},
+    };
+    if (vs.is_null())
+      vs = pc->create_shader_raw(rd::Stage_t::VERTEX, shader, &defines[0], 1);
+    if (ps.is_null())
+      ps = pc->create_shader_raw(rd::Stage_t::PIXEL, shader, &defines[1], 1);
+
     rd::Buffer_Create_Info buf_info;
     MEMZERO(buf_info);
     buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
@@ -260,15 +272,18 @@ class Merge_Pass : public rd::IPass {
       info.address_mode_u = rd::Address_Mode::CLAMP_TO_EDGE;
       info.address_mode_v = rd::Address_Mode::CLAMP_TO_EDGE;
       info.address_mode_w = rd::Address_Mode::CLAMP_TO_EDGE;
-      info.mag_filter     = rd::Filter::NEAREST;
-      info.min_filter     = rd::Filter::NEAREST;
+      info.mag_filter     = rd::Filter::LINEAR;
+      info.min_filter     = rd::Filter::LINEAR;
       info.mip_mode       = rd::Filter::NEAREST;
+      info.anisotropy     = true;
+      info.max_anisotropy = 16.0f;
       sampler             = pc->create_sampler(info);
     }
     my_image = pc->get_resource(stref_s("opaque_pass/rt0"));
   }
   void exec(rd::Imm_Ctx *ctx) override {
     if (my_image.is_null()) return;
+    timer.update();
     setup_default_state(ctx);
     ctx->VS_set_shader(vs);
     ctx->PS_set_shader(ps);
@@ -276,20 +291,17 @@ class Merge_Pass : public rd::IPass {
     ctx->set_scissor(0, 0, width, height);
     {
       Uniform *ptr = (Uniform *)ctx->map_buffer(uniform_buffer);
-      ptr->rot     = float2x2( //
-          1.0f, 0.0,       //
-          0.0, 1.0f        //
+      ptr->rot     = float2x2(                                    //
+          std::cos(timer.cur_time), std::sin(timer.cur_time), //
+          -std::sin(timer.cur_time), std::cos(timer.cur_time) //
       );
-      ptr->color   = float4(1.0f, 0.0f, 0.0f, 1.0f);
+      ptr->color =
+          float4(0.5f + 0.5f * std::cos(timer.cur_time), 0.0f, 0.0f, 1.0f);
       ctx->unmap_buffer(uniform_buffer);
     }
-    ctx->bind_uniform_buffer(rd::Stage_t::PIXEL, 1, 0, uniform_buffer, 0,
-                             sizeof(Uniform));
-    ctx->bind_uniform_buffer(rd::Stage_t::VERTEX, 0, 0, uniform_buffer, 0,
-                             sizeof(Uniform));
-    ctx->bind_image(rd::Stage_t::PIXEL, 1, 1, 0, my_image, 0, 1, 0, 1);
-    ctx->bind_sampler(rd::Stage_t::PIXEL, 1, 2, sampler);
-
+    ctx->bind_uniform_buffer(0, 0, uniform_buffer, 0, sizeof(Uniform));
+    ctx->bind_image(0, 1, 0, my_image, 0, 1, 0, 1);
+    ctx->bind_sampler(0, 2, sampler);
     ctx->flush_bindings();
     ctx->draw(3, 1, 0, 0);
   }
@@ -297,6 +309,7 @@ class Merge_Pass : public rd::IPass {
   void       release(rd::IResource_Manager *rm) override {
     rm->release_resource(vs);
     rm->release_resource(ps);
+    timer.release();
   }
 };
 

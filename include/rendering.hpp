@@ -183,7 +183,7 @@ struct Blend_State {
   u32          color_write_mask;
 };
 
-enum class Stage_t { UNKNOWN = 0, VERTEX, PIXEL, COMPUTE };
+enum class Stage_t { UNKNOWN = 0, VERTEX, PIXEL, COMPUTE, BINDING };
 
 enum class Attriute_t {
   UNKNOWN = 0,
@@ -239,31 +239,29 @@ class Imm_Ctx {
   virtual void MS_set_state(MS_State const &ds_state)                  = 0;
   virtual void OM_set_blend_state(u32 rt_index, Blend_State const &bl) = 0;
 
-  virtual void  bind_uniform_buffer(Stage_t stage, u32 set, u32 binding,
-                                    Resource_ID buf_id, size_t offset,
-                                    size_t size)                       = 0;
-  virtual void  bind_sampler(Stage_t stage, u32 set, u32 binding,
-                             Resource_ID sampler_id)                   = 0;
-  virtual void  bind_storage_buffer(Stage_t stage, u32 set, u32 binding,
-                                    Resource_ID buf_id, size_t offset) = 0;
-  virtual void  bind_image(Stage_t stage, u32 set, u32 binding, u32 index,
-                           Resource_ID image_id, u32 layer, u32 num_layers,
-                           u32 level, u32 num_levels)                  = 0;
-  virtual void  bind_rw_image(Stage_t stage, u32 set, u32 binding, u32 index,
-                              Resource_ID image_id, u32 layer, u32 num_layers,
-                              u32 level, u32 num_levels)               = 0;
-  virtual void  flush_bindings()                                       = 0;
-  virtual void *map_buffer(Resource_ID id)                             = 0;
-  virtual void  unmap_buffer(Resource_ID id)                           = 0;
-  virtual void  push_constants(void const *data, size_t size)          = 0;
+  virtual void bind_uniform_buffer(u32 set, u32 binding, Resource_ID buf_id,
+                                   size_t offset, size_t size)            = 0;
+  virtual void bind_sampler(u32 set, u32 binding, Resource_ID sampler_id) = 0;
+  virtual void bind_storage_buffer(u32 set, u32 binding,
+                                   Resource_ID buf_id, size_t offset)     = 0;
+  virtual void bind_image(u32 set, u32 binding, u32 index, Resource_ID image_id,
+                          u32 layer, u32 num_layers, u32 level,
+                          u32 num_levels)                                 = 0;
+  virtual void bind_rw_image(u32 set, u32 binding, u32 index,
+                             Resource_ID image_id, u32 layer, u32 num_layers,
+                             u32 level, u32 num_levels)                   = 0;
+  virtual void flush_bindings()                                           = 0;
+  virtual void *map_buffer(Resource_ID id)                                = 0;
+  virtual void  unmap_buffer(Resource_ID id)                              = 0;
+  virtual void  push_constants(void const *data, size_t size)             = 0;
   virtual void  draw_indexed(u32 indices, u32 instances, u32 first_index,
-                             u32 first_instance, i32 vertex_offset)    = 0;
+                             u32 first_instance, i32 vertex_offset)       = 0;
   virtual void  draw(u32 vertices, u32 instances, u32 first_vertex,
-                     u32 first_instance)                               = 0;
-  virtual void  dispatch(u32 dim_x, u32 dim_y, u32 dim_z)              = 0;
+                     u32 first_instance)                                  = 0;
+  virtual void  dispatch(u32 dim_x, u32 dim_y, u32 dim_z)                 = 0;
   virtual void  set_viewport(float x, float y, float width, float height,
-                             float mindepth, float maxdepth)           = 0;
-  virtual void  set_scissor(u32 x, u32 y, u32 width, u32 height)       = 0;
+                             float mindepth, float maxdepth)              = 0;
+  virtual void  set_scissor(u32 x, u32 y, u32 width, u32 height)          = 0;
 };
 
 struct Clear_Color {

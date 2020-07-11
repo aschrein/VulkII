@@ -8,6 +8,27 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
+
+static inline double time() { return ((double)clock()) / CLOCKS_PER_SEC; }
+
+struct Timer {
+  double cur_time;
+  double old_time;
+  double dt;
+  void   init() {
+    cur_time = time();
+    old_time = time();
+    dt       = 0.0;
+  }
+  void update() {
+    cur_time = time();
+    dt       = cur_time - old_time;
+    old_time = cur_time;
+  }
+  void release() {}
+};
+
 #define ASSERT_ALWAYS(x)                                                       \
   do {                                                                         \
     if (!(x)) {                                                                \
@@ -841,6 +862,10 @@ template <typename T, unsigned int N> struct InlineArray {
     ASSERT_DEBUG(size > 0);
     return elems[--size];
   }
+  void resize(size_t new_size) {
+    ASSERT_DEBUG(new_size <= N);
+    size = new_size;
+  }
   void remove(T val) {
     ito(size) {
       if (elems[i] == val) {
@@ -860,7 +885,12 @@ struct Array {
   T *    ptr;
   size_t size;
   size_t capacity;
-  void   init(uint32_t capacity = 0) {
+  Array  clone() const {
+    Array out;
+    out.init(ptr, size);
+    return out;
+  }
+  void init(uint32_t capacity = 0) {
     if (capacity != 0)
       ptr = (T *)Allcator_t::alloc(sizeof(T) * capacity);
     else
@@ -1215,6 +1245,13 @@ struct Hash_Table {
         f(item.key.key, item.key.value);
       }
     }
+  }
+
+  Hash_Table clone() const {
+    Hash_Table out;
+    out.set.arr        = set.arr.clone();
+    out.set.item_count = set.item_count;
+    return out;
   }
 };
 #endif
