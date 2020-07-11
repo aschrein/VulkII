@@ -250,7 +250,6 @@ class Imm_Ctx {
   virtual void bind_rw_image(u32 set, u32 binding, u32 index,
                              Resource_ID image_id, u32 layer, u32 num_layers,
                              u32 level, u32 num_levels)                   = 0;
-  virtual void flush_bindings()                                           = 0;
   virtual void *map_buffer(Resource_ID id)                                = 0;
   virtual void  unmap_buffer(Resource_ID id)                              = 0;
   virtual void  push_constants(void const *data, size_t size)             = 0;

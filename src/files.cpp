@@ -140,17 +140,18 @@ PBR_Model load_gltf_pbr(string_ref filename) {
       // Read indices
       u32 index_stride = 0;
       if (primitive->indices->component_type == cgltf_component_type_r_16u) {
-        opaque_mesh.index_type = Index_t::U16;
+        opaque_mesh.index_type = rd::Index_t::UINT16;
         index_stride           = 2;
       } else if (primitive->indices->component_type ==
                  cgltf_component_type_r_32u) {
-        opaque_mesh.index_type = Index_t::U32;
+        opaque_mesh.index_type = rd::Index_t::UINT32;
         index_stride           = 4;
       } else {
         UNIMPLEMENTED;
       }
       opaque_mesh.index_data.reserve(primitive->indices->count * index_stride);
-      auto write_index_data = [&](u8 *src, size_t size) {
+      opaque_mesh.num_indices = primitive->indices->count;
+      auto write_index_data   = [&](u8 *src, size_t size) {
         ito(size) opaque_mesh.index_data.push(src[i]);
       };
       if (primitive->indices->component_type == cgltf_component_type_r_16u) {
@@ -170,6 +171,8 @@ PBR_Model load_gltf_pbr(string_ref filename) {
         UNIMPLEMENTED;
       }
       // Read attributes
+      opaque_mesh.max = vec3(-1.0e10f);
+      opaque_mesh.min = vec3(1.0e10f);
       opaque_mesh.attribute_data.reserve(primitive->indices->count *
                                          sizeof(Vertex_Full));
       auto write_attribute_data = [&](u8 *src, size_t size) {
@@ -183,6 +186,12 @@ PBR_Model load_gltf_pbr(string_ref filename) {
       for (u32 attribute_index = 0;
            attribute_index < primitive->attributes_count; attribute_index++) {
         cgltf_attribute *attribute = &primitive->attributes[attribute_index];
+        align_attribute_data();
+        if (opaque_mesh.num_vertices == 0)
+          opaque_mesh.num_vertices = attribute->data->count;
+        else {
+          ASSERT_ALWAYS(attribute->data->count == opaque_mesh.num_vertices);
+        }
         ASSERT_ALWAYS(attribute->data->is_sparse == false);
         ASSERT_ALWAYS(attribute->data->extensions_count == 0);
         ASSERT_ALWAYS(attribute->data->normalized == false);
@@ -197,12 +206,18 @@ PBR_Model load_gltf_pbr(string_ref filename) {
           a.format = rd::Format::RGB32_FLOAT;
           a.offset = opaque_mesh.attribute_data.size;
           a.stride = 12;
-          a.type   = Attribute_t::POSITION;
+          a.type   = rd::Attriute_t::POSITION;
           opaque_mesh.attributes.push(a);
-          align_attribute_data();
+          
           ito(attribute->data->count) {
             float pos[3];
             cgltf_accessor_read_float(attribute->data, i, pos, 3);
+            opaque_mesh.max.x = MAX(opaque_mesh.max.x, pos[0]);
+            opaque_mesh.max.y = MAX(opaque_mesh.max.y, pos[1]);
+            opaque_mesh.max.z = MAX(opaque_mesh.max.z, pos[2]);
+            opaque_mesh.min.x = MIN(opaque_mesh.min.x, pos[0]);
+            opaque_mesh.min.y = MIN(opaque_mesh.min.y, pos[1]);
+            opaque_mesh.min.z = MIN(opaque_mesh.min.z, pos[2]);
             write_attribute_data((u8 *)pos, 12);
           }
           break;
@@ -217,9 +232,8 @@ PBR_Model load_gltf_pbr(string_ref filename) {
           a.format = rd::Format::RGB32_FLOAT;
           a.offset = opaque_mesh.attribute_data.size;
           a.stride = 12;
-          a.type   = Attribute_t::NORMAL;
+          a.type   = rd::Attriute_t::NORMAL;
           opaque_mesh.attributes.push(a);
-          align_attribute_data();
           ito(attribute->data->count) {
             float pos[3];
             cgltf_accessor_read_float(attribute->data, i, pos, 3);
@@ -237,9 +251,8 @@ PBR_Model load_gltf_pbr(string_ref filename) {
           a.format = rd::Format::RGBA32_FLOAT;
           a.offset = opaque_mesh.attribute_data.size;
           a.stride = 16;
-          a.type   = Attribute_t::TANGENT;
+          a.type   = rd::Attriute_t::TANGENT;
           opaque_mesh.attributes.push(a);
-          align_attribute_data();
           ito(attribute->data->count) {
             float pos[4];
             cgltf_accessor_read_float(attribute->data, i, pos, 4);
@@ -258,17 +271,16 @@ PBR_Model load_gltf_pbr(string_ref filename) {
           a.offset = opaque_mesh.attribute_data.size;
           a.stride = 8;
           if (attribute->index == 0)
-            a.type = Attribute_t::UV0;
+            a.type = rd::Attriute_t::TEXCOORD0;
           else if (attribute->index == 1)
-            a.type = Attribute_t::UV1;
+            a.type = rd::Attriute_t::TEXCOORD1;
           else if (attribute->index == 2)
-            a.type = Attribute_t::UV2;
+            a.type = rd::Attriute_t::TEXCOORD2;
           else if (attribute->index == 3)
-            a.type = Attribute_t::UV3;
+            a.type = rd::Attriute_t::TEXCOORD3;
           else
             UNIMPLEMENTED;
           opaque_mesh.attributes.push(a);
-          align_attribute_data();
           ito(attribute->data->count) {
             float pos[2];
             cgltf_accessor_read_float(attribute->data, i, pos, 2);
@@ -328,7 +340,6 @@ PBR_Model load_gltf_pbr(string_ref filename) {
       continue; // This node has already been loaded as part of some node
     out.nodes[0].children.push(load_node(node));
   }
-  
 
   vec3 max = vec3(-1.0e10f);
   vec3 min = vec3(1.0e10f);

@@ -21,6 +21,25 @@ using float2x2 = mat2;
 using float3x3 = mat3;
 using float4x4 = mat4;
 
+#ifdef __clang__
+#define ALIGN16 __attribute__((aligned(16)))
+#else
+#define ALIGN16 __declspec(align(16))
+#endif
+
+typedef ivec2 ALIGN16 aint2;
+typedef ivec3 ALIGN16 aint3;
+typedef ivec4 ALIGN16 aint4;
+typedef uvec2 ALIGN16 auint2;
+typedef uvec3 ALIGN16 auint3;
+typedef uvec4 ALIGN16 auint4;
+typedef vec2 ALIGN16  afloat2;
+typedef vec3 ALIGN16  afloat3;
+typedef vec4 ALIGN16  afloat4;
+typedef mat2 ALIGN16  afloat2x2;
+typedef mat3 ALIGN16  afloat3x3;
+typedef mat4 ALIGN16  afloat4x4;
+
 static constexpr float PI                  = 3.1415926;
 static constexpr float TWO_PI              = 6.2831852;
 static constexpr float FOUR_PI             = 12.566370;
@@ -267,20 +286,6 @@ struct Image2D_Raw {
   };
 };
 
-enum class Index_t { U32, U16 };
-
-enum class Attribute_t {
-  NONE = 0,
-  POSITION,
-  NORMAL,
-  BINORMAL,
-  TANGENT,
-  UV0,
-  UV1,
-  UV2,
-  UV3
-};
-
 static inline float3 safe_normalize(float3 v) {
   return v / (glm::length(v) + 1.0e-5f);
 }
@@ -336,21 +341,24 @@ struct PBR_Material {
 };
 
 struct Attribute {
-  Attribute_t type;
-  rd::Format  format;
-  u32         offset;
-  u32         stride;
+  rd::Attriute_t type;
+  rd::Format     format;
+  u32            offset;
+  u32            stride;
 };
 
 struct Raw_Mesh_Opaque {
   Array<u8>                  attribute_data;
   Array<u8>                  index_data;
-  Index_t                    index_type;
+  rd::Index_t                index_type;
   InlineArray<Attribute, 16> attributes;
   u32                        num_vertices;
   u32                        num_indices;
+  float3                     min;
+  float3                     max;
 
   void init() {
+    MEMZERO(*this);
     attributes.init();
     attribute_data.init();
     index_data.init();
@@ -361,11 +369,18 @@ struct Raw_Mesh_Opaque {
     index_data.release();
   }
 
+  Attribute get_attribute(rd::Attriute_t type) {
+    ito(attributes.size) {
+      if (attributes[i].type == type) return attributes[i];
+    }
+    TRAP;
+  }
+
   float3 fetch_position(u32 index) {
     ito(attributes.size) {
       switch (attributes[i].type) {
 
-      case Attribute_t::POSITION:
+      case rd::Attriute_t ::POSITION:
         ASSERT_PANIC(attributes[i].format == rd::Format::RGB32_FLOAT);
         float3 pos;
         memcpy(&pos,
@@ -383,56 +398,56 @@ struct Raw_Mesh_Opaque {
     MEMZERO(v);
     ito(attributes.size) {
       switch (attributes[i].type) {
-      case Attribute_t::NORMAL:
+      case rd::Attriute_t ::NORMAL:
         ASSERT_PANIC(attributes[i].format == rd::Format::RGB32_FLOAT);
         memcpy(&v.normal,
                attribute_data.at(index * attributes[i].stride +
                                  attributes[i].offset),
                12);
         break;
-      case Attribute_t::BINORMAL:
+      case rd::Attriute_t ::BINORMAL:
         ASSERT_PANIC(attributes[i].format == rd::Format::RGB32_FLOAT);
         memcpy(&v.binormal,
                attribute_data.at(index * attributes[i].stride +
                                  attributes[i].offset),
                12);
         break;
-      case Attribute_t::TANGENT:
+      case rd::Attriute_t ::TANGENT:
         ASSERT_PANIC(attributes[i].format == rd::Format::RGB32_FLOAT);
         memcpy(&v.tangent,
                attribute_data.at(index * attributes[i].stride +
                                  attributes[i].offset),
                12);
         break;
-      case Attribute_t::POSITION:
+      case rd::Attriute_t ::POSITION:
         ASSERT_PANIC(attributes[i].format == rd::Format::RGB32_FLOAT);
         memcpy(&v.position,
                attribute_data.at(index * attributes[i].stride +
                                  attributes[i].offset),
                12);
         break;
-      case Attribute_t::UV0:
+      case rd::Attriute_t ::TEXCOORD0:
         ASSERT_PANIC(attributes[i].format == rd::Format::RG32_FLOAT);
         memcpy(&v.u0,
                attribute_data.at(index * attributes[i].stride +
                                  attributes[i].offset),
                8);
         break;
-      case Attribute_t::UV1:
+      case rd::Attriute_t ::TEXCOORD1:
         ASSERT_PANIC(attributes[i].format == rd::Format::RG32_FLOAT);
         memcpy(&v.u1,
                attribute_data.at(index * attributes[i].stride +
                                  attributes[i].offset),
                8);
         break;
-      case Attribute_t::UV2:
+      case rd::Attriute_t ::TEXCOORD2:
         ASSERT_PANIC(attributes[i].format == rd::Format::RG32_FLOAT);
         memcpy(&v.u2,
                attribute_data.at(index * attributes[i].stride +
                                  attributes[i].offset),
                8);
         break;
-      case Attribute_t::UV3:
+      case rd::Attriute_t ::TEXCOORD3:
         ASSERT_PANIC(attributes[i].format == rd::Format::RG32_FLOAT);
         memcpy(&v.u3,
                attribute_data.at(index * attributes[i].stride +
@@ -447,7 +462,7 @@ struct Raw_Mesh_Opaque {
 
   Tri_Index get_tri_index(u32 id) {
     Tri_Index o;
-    if (index_type == Index_t::U16) {
+    if (index_type == rd::Index_t::UINT16) {
       o.i0 = (u32) * (u16 *)index_data.at(2 * (id * 3 + 0));
       o.i1 = (u32) * (u16 *)index_data.at(2 * (id * 3 + 1));
       o.i2 = (u32) * (u16 *)index_data.at(2 * (id * 3 + 2));

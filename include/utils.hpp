@@ -1216,6 +1216,10 @@ struct Hash_Table {
     return &set.arr[id].key.value;
   }
 
+  void reset() {
+    set.reset();
+  }
+
   void remove(K key) { return set.remove(Map_Pair<K, V>{key, {}}); }
 
   bool insert(K key, V value) { return set.insert(Map_Pair<K, V>{key, value}); }
