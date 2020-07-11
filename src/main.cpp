@@ -25,10 +25,10 @@ struct Camera {
   void init() {
     phi      = PI / 2.0f;
     theta    = PI / 2.0f;
-    distance = 60.0f;
+    distance = 6.0f;
     mx       = 0.0f;
     my       = 0.0f;
-    look_at  = float3(0.0f, 0.0f, 0.0f);
+    look_at  = float3(0.0f, -4.0f, 0.0f);
     aspect   = 1.0;
     fov      = PI / 2.0;
     znear    = 1.0e-3f;
@@ -101,12 +101,11 @@ struct GPUMesh {
   Timer       timer;
 
   struct Push_Constants {
-    afloat3   min;
-    afloat3   max;
+    aint4     material_textures;
     afloat4x4 model;
   };
 
-  static_assert(sizeof(Push_Constants) == 96, "Uniform packing is wrong");
+  static_assert(sizeof(Push_Constants) == 80, "Uniform packing is wrong");
 
   void init(PBR_Model *model, u32 mesh_index) {
     memset(this, 0, sizeof(*this));
@@ -153,12 +152,16 @@ struct GPUMesh {
       data_uploaded = true;
     }
     {
+      PBR_Material &mat = model->materials[mesh_index];
       Push_Constants pc;
       MEMZERO(pc);
-      pc.min   = mesh.min;
-      pc.max   = mesh.max;
-      pc.model = rotate(float4x4(1.0f), (float)timer.cur_time, float3(0.0f, 1.0f, 0.0f)) *
-                 scale(float4x4(1.0f), float3(1.0f, -1.0f, 1.0f));
+      pc.material_textures.x = mat.albedo_id;
+      pc.material_textures.y = -1;
+      pc.material_textures.z = -1;
+      pc.material_textures.w = -1;
+      pc.model = rotate(float4x4(1.0f), (float)timer.cur_time,
+                        float3(0.0f, 1.0f, 0.0f)) *
+                 scale(float4x4(1.0f), float3(1.0f, -1.0f, 1.0f) * 0.04f);
       ctx->push_constants(&pc, sizeof(pc));
     }
     Attribute pos_attr = mesh.get_attribute(rd::Attriute_t::POSITION);
@@ -197,13 +200,19 @@ struct GPUMesh {
 };
 
 class Opaque_Pass : public rd::IPass {
-  Resource_ID    vs;
-  Resource_ID    ps;
-  u32            width, height;
-  Resource_ID    uniform_buffer;
-  Array<GPUMesh> gpu_meshes;
-  PBR_Model      model;
-  Camera         camera;
+  Resource_ID        vs;
+  Resource_ID        ps;
+  u32                width, height;
+  Resource_ID        uniform_buffer;
+  Resource_ID        staging_buffer;
+  Resource_ID        texture_sampler;
+  bool               dummy_initialized;
+  Resource_ID        dummy_texture;
+  u32                current_streaming_id;
+  Array<GPUMesh>     gpu_meshes;
+  Array<Resource_ID> gpu_textures;
+  PBR_Model          model;
+  Camera             camera;
 
   struct Uniform {
     afloat4x4 viewproj;
@@ -213,9 +222,20 @@ class Opaque_Pass : public rd::IPass {
 
   public:
   Opaque_Pass() {
+    vs.reset();
+    ps.reset();
+    width  = 0;
+    height = 0;
+    uniform_buffer.reset();
+    staging_buffer.reset();
+    texture_sampler.reset();
+    dummy_initialized = false;
+    dummy_texture.reset();
+    current_streaming_id = 0;
+    gpu_textures.init();
     gpu_meshes.init();
-    model = load_gltf_pbr(stref_s("models/old_tree/scene.gltf"));
-
+    model                = load_gltf_pbr(stref_s("models/low_poly_ellie/scene.gltf"));
+    current_streaming_id = 0;
     gpu_meshes.resize(model.meshes.size);
     ito(model.meshes.size) { gpu_meshes[i].init(&model, i); }
 
@@ -226,9 +246,43 @@ class Opaque_Pass : public rd::IPass {
       rm->release_resource(uniform_buffer);
       uniform_buffer.reset();
     }
+    if (staging_buffer.is_null() == false) {
+      rm->release_resource(staging_buffer);
+      staging_buffer.reset();
+    }
   }
   void on_begin(rd::IResource_Manager *pc) override {
-
+    if (dummy_texture.is_null()) {
+      rd::Image_Create_Info info;
+      MEMZERO(info);
+      info.format     = rd::Format::RGBA8_UNORM;
+      info.width      = 16;
+      info.height     = 16;
+      info.depth      = 1;
+      info.layers     = 1;
+      info.levels     = 1;
+      info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
+      info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_SAMPLED |
+                        (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST;
+      dummy_texture = pc->create_image(info);
+    }
+    if (gpu_textures.size == 0) {
+      gpu_textures.resize(model.images.size);
+      ito(model.images.size) {
+        rd::Image_Create_Info info;
+        MEMZERO(info);
+        info.format     = model.images[i].format;
+        info.width      = model.images[i].width;
+        info.height     = model.images[i].height;
+        info.depth      = 1;
+        info.layers     = 1;
+        info.levels     = 1;
+        info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
+        info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_SAMPLED |
+                          (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST;
+        gpu_textures[i] = pc->create_image(info);
+      }
+    }
     ito(model.meshes.size) { gpu_meshes[i].update_buffers(pc); }
 
     rd::Image2D_Info info = pc->get_swapchain_image_info();
@@ -241,7 +295,7 @@ class Opaque_Pass : public rd::IPass {
       cl.clear = true;
       cl.r     = 0.0f;
       cl.g     = 0.0f;
-      cl.b     = 1.0f;
+      cl.b     = 0.0f;
       cl.a     = 1.0f;
       rd::Image_Create_Info rt0_info;
       MEMZERO(rt0_info);
@@ -273,17 +327,30 @@ class Opaque_Pass : public rd::IPass {
                         (u32)rd::Image_Usage_Bits::USAGE_SAMPLED;
       pc->add_depth_target(stref_s("opaque_pass/ds"), info, 0, 0, cl);
     }
-    vs = pc->create_shader_raw(rd::Stage_t::VERTEX, stref_s(R"(
+    static string_ref            shader    = stref_s(R"(
 @(DECLARE_UNIFORM_BUFFER
   (set 0)
   (binding 0)
   (add_field (type float4x4) (name viewproj))
 )
 @(DECLARE_PUSH_CONSTANTS
-  (add_field (type float3)   (name mesh_min))
-  (add_field (type float3)   (name mesh_max))
+  (add_field (type int4)     (name mesh_textures))
   (add_field (type float4x4) (name world_matrix))
 )
+@(DECLARE_IMAGE
+  (type SAMPLED)
+  (array_size 1024)
+  (dim 2D)
+  (set 1)
+  (binding 1)
+  (name material_textures)
+)
+@(DECLARE_SAMPLER
+  (set 1)
+  (binding 0)
+  (name my_sampler)
+)
+#ifdef VERTEX
 @(DECLARE_INPUT
   (location 0)
   (type float3)
@@ -302,15 +369,12 @@ class Opaque_Pass : public rd::IPass {
 
 @(ENTRY)
   tex_coords = vertex_uv0;
-  float3 dsize = mesh_max - mesh_min;
-  float scale = max(dsize.x, max(dsize.y, dsize.z));
   @(EXPORT_POSITION
-      viewproj * world_matrix * float4(vertex_position * 50.0 / scale, 1.0)
+      viewproj * world_matrix * float4(vertex_position, 1.0)
   );
 @(END)
-)"),
-                               NULL, 0);
-    ps = pc->create_shader_raw(rd::Stage_t::PIXEL, stref_s(R"(
+#endif
+#ifdef PIXEL
 @(DECLARE_INPUT
   (location 0)
   (type float2)
@@ -320,10 +384,22 @@ class Opaque_Pass : public rd::IPass {
   (location 0)
 )
 @(ENTRY)
-  @(EXPORT_COLOR 0 float4(tex_coords.xy, 0.0, 1.0));
+  float4 albedo = float4(0.0, 1.0, 1.0, 1.0);  
+  if (mesh_textures.x >= 0) {
+    albedo = texture(sampler2D(material_textures[nonuniformEXT(mesh_textures.x)], my_sampler), tex_coords);
+  }
+  @(EXPORT_COLOR 0 float4(albedo.rgb, 1.0));
 @(END)
-)"),
-                               NULL, 0);
+#endif
+)");
+    Pair<string_ref, string_ref> defines[] = {
+        {stref_s("VERTEX"), {}},
+        {stref_s("PIXEL"), {}},
+    };
+    if (vs.is_null())
+      vs = pc->create_shader_raw(rd::Stage_t::VERTEX, shader, &defines[0], 1);
+    if (ps.is_null())
+      ps = pc->create_shader_raw(rd::Stage_t::PIXEL, shader, &defines[1], 1);
     {
       rd::Buffer_Create_Info buf_info;
       MEMZERO(buf_info);
@@ -332,8 +408,44 @@ class Opaque_Pass : public rd::IPass {
       buf_info.size       = sizeof(Uniform);
       uniform_buffer      = pc->create_buffer(buf_info);
     }
+    if (current_streaming_id < gpu_textures.size) {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
+      buf_info.size       = 1 << 12;
+      staging_buffer      = pc->create_buffer(buf_info);
+    }
+    if (texture_sampler.is_null()) {
+      rd::Sampler_Create_Info info;
+      MEMZERO(info);
+      info.address_mode_u = rd::Address_Mode::CLAMP_TO_EDGE;
+      info.address_mode_v = rd::Address_Mode::CLAMP_TO_EDGE;
+      info.address_mode_w = rd::Address_Mode::CLAMP_TO_EDGE;
+      info.mag_filter     = rd::Filter::NEAREST;
+      info.min_filter     = rd::Filter::NEAREST;
+      info.mip_mode       = rd::Filter::NEAREST;
+      info.anisotropy     = false;
+      info.max_anisotropy = 16.0f;
+      texture_sampler     = pc->create_sampler(info);
+    }
   }
   void exec(rd::Imm_Ctx *ctx) override {
+    if (dummy_initialized == false) {
+      u32 *ptr = (u32 *)ctx->map_buffer(staging_buffer);
+      ito(16 * 16) { ptr[i] = 0xff0000ffu; }
+      ctx->unmap_buffer(staging_buffer);
+      ctx->copy_buffer_to_image(staging_buffer, 0, dummy_texture, 0, 0);
+      dummy_initialized = true;
+    } else if (current_streaming_id < gpu_textures.size) {
+      void *ptr = ctx->map_buffer(staging_buffer);
+      memcpy(ptr, model.images[current_streaming_id].data,
+             model.images[current_streaming_id].get_size_in_bytes());
+      ctx->unmap_buffer(staging_buffer);
+      ctx->copy_buffer_to_image(staging_buffer, 0,
+                                gpu_textures[current_streaming_id], 0, 0);
+      current_streaming_id++;
+    }
     setup_default_state(ctx);
     rd::DS_State ds_state;
     MEMZERO(ds_state);
@@ -352,14 +464,24 @@ class Opaque_Pass : public rd::IPass {
       ctx->unmap_buffer(uniform_buffer);
     }
     ctx->bind_uniform_buffer(0, 0, uniform_buffer, 0, sizeof(Uniform));
+    ito(gpu_textures.size) {
+      if (i < current_streaming_id) {
+        ctx->bind_image(1, 1, i, gpu_textures[i], 0, 1, 0, 1);
+      } else {
+        ctx->bind_image(1, 1, i, dummy_texture, 0, 1, 0, 1);
+      }
+    }
+    ctx->bind_sampler(1, 0, texture_sampler);
     ito(model.meshes.size) { gpu_meshes[i].draw(ctx); }
   }
   string_ref get_name() override { return stref_s("opaque_pass"); }
   void       release(rd::IResource_Manager *rm) override {
     ito(model.meshes.size) { gpu_meshes[i].release(rm); }
+    ito(gpu_textures.size) { rm->release_resource(gpu_textures[i]); }
     rm->release_resource(vs);
     rm->release_resource(ps);
     gpu_meshes.release();
+    gpu_textures.release();
   }
 };
 
@@ -446,10 +568,10 @@ class Merge_Pass : public rd::IPass {
 )
 @(ENTRY)
   @(EXPORT_COLOR 0
-        lerp(
-            float4(color.xyz, 1.0),
-            texture(sampler2D(my_image, my_sampler), tex_coords),
-            color.a)
+        // lerp(
+        //    float4(color.xyz, 1.0),
+            pow(texture(sampler2D(my_image, my_sampler), tex_coords), float4(1.0/2.2))
+        //    , color.a)
         );
 @(END)
 #endif

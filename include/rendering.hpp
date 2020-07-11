@@ -242,8 +242,8 @@ class Imm_Ctx {
   virtual void bind_uniform_buffer(u32 set, u32 binding, Resource_ID buf_id,
                                    size_t offset, size_t size)            = 0;
   virtual void bind_sampler(u32 set, u32 binding, Resource_ID sampler_id) = 0;
-  virtual void bind_storage_buffer(u32 set, u32 binding,
-                                   Resource_ID buf_id, size_t offset)     = 0;
+  virtual void bind_storage_buffer(u32 set, u32 binding, Resource_ID buf_id,
+                                   size_t offset)                         = 0;
   virtual void bind_image(u32 set, u32 binding, u32 index, Resource_ID image_id,
                           u32 layer, u32 num_layers, u32 level,
                           u32 num_levels)                                 = 0;
@@ -261,6 +261,9 @@ class Imm_Ctx {
   virtual void  set_viewport(float x, float y, float width, float height,
                              float mindepth, float maxdepth)              = 0;
   virtual void  set_scissor(u32 x, u32 y, u32 width, u32 height)          = 0;
+  virtual void  copy_buffer_to_image(Resource_ID buf_id, size_t offset,
+                                     Resource_ID img_id, u32 dst_layer,
+                                     u32 dst_level)                       = 0;
 };
 
 struct Clear_Color {

@@ -193,6 +193,81 @@ struct Image_Info {
   VkSharingMode         sharingMode;
 };
 
+VkFormat to_vk(rd::Format format) {
+  // clang-format off
+  switch (format) {
+  case rd::Format::RGBA8_UNORM     : return VK_FORMAT_R8G8B8A8_UNORM      ;
+  case rd::Format::RGBA8_SNORM     : return VK_FORMAT_R8G8B8A8_SNORM      ;
+  case rd::Format::RGBA8_SRGBA     : return VK_FORMAT_R8G8B8A8_SRGB       ;
+  case rd::Format::RGBA8_UINT      : return VK_FORMAT_R8G8B8A8_UINT       ;
+
+  case rd::Format::RGB8_UNORM      : return VK_FORMAT_R8G8B8_UNORM        ;
+  case rd::Format::RGB8_SNORM      : return VK_FORMAT_R8G8B8_SNORM        ;
+  case rd::Format::RGB8_SRGBA      : return VK_FORMAT_R8G8B8_SRGB         ;
+  case rd::Format::RGB8_UINT       : return VK_FORMAT_R8G8B8_UINT         ;
+
+  case rd::Format::RGBA32_FLOAT    : return VK_FORMAT_R32G32B32A32_SFLOAT ;
+  case rd::Format::RGB32_FLOAT     : return VK_FORMAT_R32G32B32_SFLOAT    ;
+  case rd::Format::RG32_FLOAT      : return VK_FORMAT_R32G32_SFLOAT       ;
+  case rd::Format::R32_FLOAT       : return VK_FORMAT_R32_SFLOAT          ;
+  case rd::Format::D32_FLOAT       : return VK_FORMAT_D32_SFLOAT          ;
+  default: UNIMPLEMENTED;
+  }
+  // clang-format on
+}
+
+rd::Format from_vk(VkFormat format) {
+  // clang-format off
+  switch (format) {
+  case VK_FORMAT_B8G8R8A8_UNORM      : return rd::Format::BGRA8_UNORM     ;
+  case VK_FORMAT_B8G8R8_UNORM        : return rd::Format::BGR8_UNORM      ;
+
+  case VK_FORMAT_R8G8B8A8_UNORM      : return rd::Format::RGBA8_UNORM     ;
+  case VK_FORMAT_R8G8B8A8_SNORM      : return rd::Format::RGBA8_SNORM     ;
+  case VK_FORMAT_R8G8B8A8_SRGB       : return rd::Format::RGBA8_SRGBA     ;
+  case VK_FORMAT_R8G8B8A8_UINT       : return rd::Format::RGBA8_UINT      ;
+
+  case VK_FORMAT_R8G8B8_UNORM        : return rd::Format::RGB8_UNORM      ;
+  case VK_FORMAT_R8G8B8_SNORM        : return rd::Format::RGB8_SNORM      ;
+  case VK_FORMAT_R8G8B8_SRGB         : return rd::Format::RGB8_SRGBA      ;
+  case VK_FORMAT_R8G8B8_UINT         : return rd::Format::RGB8_UINT       ;
+
+  case VK_FORMAT_R32G32B32A32_SFLOAT : return rd::Format::RGBA32_FLOAT    ;
+  case VK_FORMAT_R32G32B32_SFLOAT    : return rd::Format::RGB32_FLOAT     ;
+  case VK_FORMAT_R32G32_SFLOAT       : return rd::Format::RG32_FLOAT      ;
+  case VK_FORMAT_R32_SFLOAT          : return rd::Format::R32_FLOAT       ;
+  case VK_FORMAT_D32_SFLOAT          : return rd::Format::D32_FLOAT       ;
+  default: UNIMPLEMENTED;
+  }
+  // clang-format on
+}
+
+u32 get_format_size(VkFormat format) {
+  // clang-format off
+  switch (format) {
+  case VK_FORMAT_B8G8R8A8_UNORM      : return 4     ;
+  case VK_FORMAT_B8G8R8_UNORM        : return 4     ;
+                                              
+  case VK_FORMAT_R8G8B8A8_UNORM      : return 4     ;
+  case VK_FORMAT_R8G8B8A8_SNORM      : return 4     ;
+  case VK_FORMAT_R8G8B8A8_SRGB       : return 4     ;
+  case VK_FORMAT_R8G8B8A8_UINT       : return 4     ;
+                                              
+  case VK_FORMAT_R8G8B8_UNORM        : return 4     ;
+  case VK_FORMAT_R8G8B8_SNORM        : return 4     ;
+  case VK_FORMAT_R8G8B8_SRGB         : return 4     ;
+  case VK_FORMAT_R8G8B8_UINT         : return 4     ;
+                                              
+  case VK_FORMAT_R32G32B32A32_SFLOAT : return 16    ;
+  case VK_FORMAT_R32G32B32_SFLOAT    : return 12    ;
+  case VK_FORMAT_R32G32_SFLOAT       : return 8     ;
+  case VK_FORMAT_R32_SFLOAT          : return 4     ;
+  case VK_FORMAT_D32_SFLOAT          : return 4     ;
+  default: UNIMPLEMENTED;
+  }
+  // clang-format on
+}
+
 struct Image : public Ref_Cnt {
   string             name;
   ID                 mem_chunk_id;
@@ -203,6 +278,7 @@ struct Image : public Ref_Cnt {
   VkImage            image;
   Image_Info         info;
   InlineArray<ID, 8> views;
+  u32                getbpp() const { return get_format_size(info.format); }
   void               init() {
     memset(this, 0, sizeof(*this));
     views.init();
@@ -352,15 +428,17 @@ static void execute_preprocessor(List *l, char const *list_end,
     i32        set;
     i32        binding;
     i32        location;
+    i32        array_size;
     string_ref name;
     string_ref type;
     string_ref dim;
 
     void reset() {
       memset(this, 0, sizeof(*this));
-      set      = -1;
-      binding  = -1;
-      location = -1;
+      set        = -1;
+      binding    = -1;
+      location   = -1;
+      array_size = -1;
     }
     void exec(List *l) {
       while (l != NULL) {
@@ -370,6 +448,8 @@ static void execute_preprocessor(List *l, char const *list_end,
           location = l->get(1)->parse_int();
         } else if (l->cmp_symbol("binding")) {
           binding = l->get(1)->parse_int();
+        } else if (l->cmp_symbol("array_size")) {
+          array_size = l->get(1)->parse_int();
         } else if (l->cmp_symbol("set")) {
           set = l->get(1)->parse_int();
         } else if (l->cmp_symbol("name")) {
@@ -410,9 +490,16 @@ static void execute_preprocessor(List *l, char const *list_end,
       // uniform layout(binding=2) texture1D g_tTex_unused2;
       // uniform layout(binding=2) sampler g_sSamp3[2];
       // layout(binding = 0, rgba32f) uniform readonly mediump image2D imageM;
-      builder.putf("layout(set = %i, binding = %i) uniform texture%.*s %.*s;",
-                   param_eval.set, param_eval.binding, STRF(param_eval.dim),
-                   STRF(param_eval.name));
+      if (param_eval.array_size > 0) {
+        builder.putf(
+            "layout(set = %i, binding = %i) uniform texture%.*s %.*s[%i];",
+            param_eval.set, param_eval.binding, STRF(param_eval.dim),
+            STRF(param_eval.name), param_eval.array_size);
+      } else {
+        builder.putf("layout(set = %i, binding = %i) uniform texture%.*s %.*s;",
+                     param_eval.set, param_eval.binding, STRF(param_eval.dim),
+                     STRF(param_eval.name));
+      }
     } else {
       UNIMPLEMENTED;
     }
@@ -679,55 +766,6 @@ VkClearValue to_vk(rd::Clear_Depth cl) {
   out.depthStencil.depth   = cl.d;
   out.depthStencil.stencil = 0;
   return out;
-}
-
-VkFormat to_vk(rd::Format format) {
-  // clang-format off
-  switch (format) {
-  case rd::Format::RGBA8_UNORM     : return VK_FORMAT_R8G8B8A8_UNORM      ;
-  case rd::Format::RGBA8_SNORM     : return VK_FORMAT_R8G8B8A8_SNORM      ;
-  case rd::Format::RGBA8_SRGBA     : return VK_FORMAT_R8G8B8A8_SRGB       ;
-  case rd::Format::RGBA8_UINT      : return VK_FORMAT_R8G8B8A8_UINT       ;
-
-  case rd::Format::RGB8_UNORM      : return VK_FORMAT_R8G8B8_UNORM        ;
-  case rd::Format::RGB8_SNORM      : return VK_FORMAT_R8G8B8_SNORM        ;
-  case rd::Format::RGB8_SRGBA      : return VK_FORMAT_R8G8B8_SRGB         ;
-  case rd::Format::RGB8_UINT       : return VK_FORMAT_R8G8B8_UINT         ;
-
-  case rd::Format::RGBA32_FLOAT    : return VK_FORMAT_R32G32B32A32_SFLOAT ;
-  case rd::Format::RGB32_FLOAT     : return VK_FORMAT_R32G32B32_SFLOAT    ;
-  case rd::Format::RG32_FLOAT      : return VK_FORMAT_R32G32_SFLOAT       ;
-  case rd::Format::R32_FLOAT       : return VK_FORMAT_R32_SFLOAT          ;
-  case rd::Format::D32_FLOAT       : return VK_FORMAT_D32_SFLOAT          ;
-  default: UNIMPLEMENTED;
-  }
-  // clang-format on
-}
-
-rd::Format from_vk(VkFormat format) {
-  // clang-format off
-  switch (format) {
-  case VK_FORMAT_B8G8R8A8_UNORM      : return rd::Format::BGRA8_UNORM     ;
-  case VK_FORMAT_B8G8R8_UNORM        : return rd::Format::BGR8_UNORM      ;
-
-  case VK_FORMAT_R8G8B8A8_UNORM      : return rd::Format::RGBA8_UNORM     ;
-  case VK_FORMAT_R8G8B8A8_SNORM      : return rd::Format::RGBA8_SNORM     ;
-  case VK_FORMAT_R8G8B8A8_SRGB       : return rd::Format::RGBA8_SRGBA     ;
-  case VK_FORMAT_R8G8B8A8_UINT       : return rd::Format::RGBA8_UINT      ;
-
-  case VK_FORMAT_R8G8B8_UNORM        : return rd::Format::RGB8_UNORM      ;
-  case VK_FORMAT_R8G8B8_SNORM        : return rd::Format::RGB8_SNORM      ;
-  case VK_FORMAT_R8G8B8_SRGB         : return rd::Format::RGB8_SRGBA      ;
-  case VK_FORMAT_R8G8B8_UINT         : return rd::Format::RGB8_UINT       ;
-
-  case VK_FORMAT_R32G32B32A32_SFLOAT : return rd::Format::RGBA32_FLOAT    ;
-  case VK_FORMAT_R32G32B32_SFLOAT    : return rd::Format::RGB32_FLOAT     ;
-  case VK_FORMAT_R32G32_SFLOAT       : return rd::Format::RG32_FLOAT      ;
-  case VK_FORMAT_R32_SFLOAT          : return rd::Format::R32_FLOAT       ;
-  case VK_FORMAT_D32_SFLOAT          : return rd::Format::D32_FLOAT       ;
-  default: UNIMPLEMENTED;
-  }
-  // clang-format on
 }
 
 VkBlendFactor to_vk(rd::Blend_Factor bf) {
@@ -2200,6 +2238,22 @@ struct Window {
   }
 };
 
+struct Resource_Path {
+  u32  set;
+  u32  binding;
+  u32  element;
+  bool operator==(Resource_Path const &that) const {
+    return                         //
+        set == that.set &&         //
+        binding == that.binding && //
+        element == that.element;
+  }
+};
+
+u64 hash_of(Resource_Path const &path) {
+  return hash_of(path.set) ^ hash_of(path.binding) ^ hash_of(path.element);
+}
+
 class Vk_Ctx : public rd::Imm_Ctx {
   Window *                                wnd;
   Graphics_Pipeline_State                 graphics_state;
@@ -2220,6 +2274,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
   struct Resource_Binding {
     u32       set;
     u32       binding;
+    u32       dummy;
     u32       element;
     Binding_t type;
     union {
@@ -2249,7 +2304,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
 
   template <typename K, typename V>
   using Table = Hash_Table<K, V, Default_Allocator, 0x10>;
-  Table<u32, Table<u32, Resource_Binding>> deferred_bindings;
+  Table<Resource_Path, Resource_Binding> deferred_bindings;
 
   struct VBO_Binding {
     VkBuffer     buffer;
@@ -2409,72 +2464,70 @@ class Vk_Ctx : public rd::Imm_Ctx {
   }
 
   void update_descriptor_set(u32 index, VkDescriptorSet set) {
-    deferred_bindings.iter_pairs(
-        [&](u32 set_index, Table<u32, Resource_Binding> &bindings) {
-          bindings.iter_pairs([&](u32 binding_index, Resource_Binding &rb) {
-            if (rb.set != index) return;
-            if (rb.type == Binding_t::UNIFORM_BUFFER) {
-              VkDescriptorBufferInfo binfo;
-              MEMZERO(binfo);
-              binfo.buffer = wnd->buffers[rb.uniform_buffer.buf_id].buffer;
-              binfo.offset = rb.uniform_buffer.offset;
-              binfo.range  = rb.uniform_buffer.size;
-              VkWriteDescriptorSet wset;
-              MEMZERO(wset);
-              wset.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-              wset.descriptorCount = 1;
-              wset.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-              wset.dstArrayElement = rb.element;
-              wset.dstBinding      = rb.binding;
-              wset.dstSet          = set;
-              wset.pBufferInfo     = &binfo;
-              vkUpdateDescriptorSets(wnd->device, 1, &wset, 0, NULL);
-            } else if (rb.type == Binding_t::IMAGE) {
-              VkDescriptorImageInfo binfo;
-              MEMZERO(binfo);
-              Image &img = wnd->images[rb.image.image_id];
-              img.barrier(cmd, VK_ACCESS_SHADER_READ_BIT,
-                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-              ID view_id = wnd->create_image_view(
-                                  img.id, rb.image.level, rb.image.num_levels,
-                                  rb.image.layer, rb.image.num_layers)
-                               .id;
-              ImageView &view   = wnd->image_views[view_id];
-              binfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-              binfo.imageView   = view.view;
-              binfo.sampler     = VK_NULL_HANDLE;
-              VkWriteDescriptorSet wset;
-              MEMZERO(wset);
-              wset.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-              wset.descriptorCount = 1;
-              wset.descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-              wset.dstArrayElement = rb.element;
-              wset.dstBinding      = rb.binding;
-              wset.dstSet          = set;
-              wset.pImageInfo      = &binfo;
-              vkUpdateDescriptorSets(wnd->device, 1, &wset, 0, NULL);
-            } else if (rb.type == Binding_t::SAMPLER) {
-              VkDescriptorImageInfo binfo;
-              MEMZERO(binfo);
-              Sampler &sampler  = wnd->samplers[rb.sampler.sampler_id];
-              binfo.imageLayout = VK_IMAGE_LAYOUT_MAX_ENUM;
-              binfo.imageView   = VK_NULL_HANDLE;
-              binfo.sampler     = sampler.sampler;
-              VkWriteDescriptorSet wset;
-              MEMZERO(wset);
-              wset.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-              wset.descriptorCount = 1;
-              wset.descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLER;
-              wset.dstArrayElement = rb.element;
-              wset.dstBinding      = rb.binding;
-              wset.dstSet          = set;
-              wset.pImageInfo      = &binfo;
-              vkUpdateDescriptorSets(wnd->device, 1, &wset, 0, NULL);
-            } else {
-              UNIMPLEMENTED;
-            }
-          });
-        });
+    deferred_bindings.iter_pairs([&](Resource_Path const &   path,
+                                     Resource_Binding const &rb) {
+      if (rb.set != index) return;
+      if (rb.type == Binding_t::UNIFORM_BUFFER) {
+        VkDescriptorBufferInfo binfo;
+        MEMZERO(binfo);
+        binfo.buffer = wnd->buffers[rb.uniform_buffer.buf_id].buffer;
+        binfo.offset = rb.uniform_buffer.offset;
+        binfo.range  = rb.uniform_buffer.size;
+        VkWriteDescriptorSet wset;
+        MEMZERO(wset);
+        wset.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wset.descriptorCount = 1;
+        wset.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        wset.dstArrayElement = rb.element;
+        wset.dstBinding      = rb.binding;
+        wset.dstSet          = set;
+        wset.pBufferInfo     = &binfo;
+        vkUpdateDescriptorSets(wnd->device, 1, &wset, 0, NULL);
+      } else if (rb.type == Binding_t::IMAGE) {
+        VkDescriptorImageInfo binfo;
+        MEMZERO(binfo);
+        Image &img = wnd->images[rb.image.image_id];
+        img.barrier(cmd, VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        ID view_id =
+            wnd->create_image_view(img.id, rb.image.level, rb.image.num_levels,
+                                   rb.image.layer, rb.image.num_layers)
+                .id;
+        ImageView &view   = wnd->image_views[view_id];
+        binfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        binfo.imageView   = view.view;
+        binfo.sampler     = VK_NULL_HANDLE;
+        VkWriteDescriptorSet wset;
+        MEMZERO(wset);
+        wset.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wset.descriptorCount = 1;
+        wset.descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        wset.dstArrayElement = rb.element;
+        wset.dstBinding      = rb.binding;
+        wset.dstSet          = set;
+        wset.pImageInfo      = &binfo;
+        vkUpdateDescriptorSets(wnd->device, 1, &wset, 0, NULL);
+      } else if (rb.type == Binding_t::SAMPLER) {
+        VkDescriptorImageInfo binfo;
+        MEMZERO(binfo);
+        Sampler &sampler  = wnd->samplers[rb.sampler.sampler_id];
+        binfo.imageLayout = VK_IMAGE_LAYOUT_MAX_ENUM;
+        binfo.imageView   = VK_NULL_HANDLE;
+        binfo.sampler     = sampler.sampler;
+        VkWriteDescriptorSet wset;
+        MEMZERO(wset);
+        wset.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wset.descriptorCount = 1;
+        wset.descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLER;
+        wset.dstArrayElement = rb.element;
+        wset.dstBinding      = rb.binding;
+        wset.dstSet          = set;
+        wset.pImageInfo      = &binfo;
+        vkUpdateDescriptorSets(wnd->device, 1, &wset, 0, NULL);
+      } else {
+        UNIMPLEMENTED;
+      }
+    });
   }
 
   public:
@@ -2553,10 +2606,6 @@ class Vk_Ctx : public rd::Imm_Ctx {
     vkQueueSubmit(wnd->queue, 1, &submit_info, finish_fence);
   }
   void release() {
-    deferred_bindings.iter_pairs(
-        [&](u32 set_index, Table<u32, Resource_Binding> &bindings) {
-          bindings.release();
-        });
     deferred_bindings.release();
     stack.release();
     vkDestroyFence(wnd->device, finish_fence, NULL);
@@ -2585,10 +2634,6 @@ class Vk_Ctx : public rd::Imm_Ctx {
   }
   void clear_state() override {
     graphics_state.reset();
-    deferred_bindings.iter_pairs(
-        [&](u32 set_index, Table<u32, Resource_Binding> &bindings) {
-          bindings.release();
-        });
     deferred_bindings.reset();
     cpu_cmd.reset();
     current_draw.release();
@@ -2680,8 +2725,9 @@ class Vk_Ctx : public rd::Imm_Ctx {
     graphics_state.blend_states[rt_index] = bs;
   }
 
-  void insert_binding(u32 set, u32 binding, Resource_Binding rb) {
-    if (deferred_bindings.contains(set)) {
+  void insert_binding(Resource_Binding rb) {
+    deferred_bindings.insert({rb.set, rb.binding, rb.element}, rb);
+    /*if (deferred_bindings.contains(set)) {
       Table<u32, Resource_Binding> &bindings = deferred_bindings.get_ref(set);
       if (bindings.contains(binding)) {
         bindings.insert(binding, rb);
@@ -2693,7 +2739,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       bindings.init();
       bindings.insert(binding, rb);
       deferred_bindings.insert(set, bindings);
-    }
+    }*/
   }
 
   void bind_uniform_buffer(u32 set, u32 binding, Resource_ID buf_id,
@@ -2707,7 +2753,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
     rb.uniform_buffer.buf_id = buf_id.id;
     rb.uniform_buffer.offset = offset;
     rb.uniform_buffer.size   = size;
-    insert_binding(set, binding, rb);
+    insert_binding(rb);
   }
   void bind_storage_buffer(u32 set, u32 binding, Resource_ID buf_id,
                            size_t offset) override {
@@ -2727,7 +2773,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
     rb.image.level      = level;
     rb.image.num_layers = num_layers;
     rb.image.num_levels = num_levels;
-    insert_binding(set, binding, rb);
+    insert_binding(rb);
   }
   void bind_sampler(u32 set, u32 binding, Resource_ID sampler_id) override {
     Resource_Binding rb;
@@ -2737,7 +2783,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
     rb.binding            = binding;
     rb.element            = 0;
     rb.sampler.sampler_id = sampler_id.id;
-    insert_binding(set, binding, rb);
+    insert_binding(rb);
   }
   void bind_rw_image(u32 set, u32 binding, u32 index, Resource_ID image_id,
                      u32 layer, u32 num_layers, u32 level,
@@ -2763,6 +2809,34 @@ class Vk_Ctx : public rd::Imm_Ctx {
       update_descriptor_set(i, set);
       current_draw.sets[i] = set;
     }
+  }
+  void copy_buffer_to_image(Resource_ID buf_id, size_t offset,
+                            Resource_ID img_id, u32 dst_layer,
+                            u32 dst_level) override {
+    Buffer &buffer           = wnd->buffers[buf_id.id];
+    Image & image            = wnd->images[img_id.id];
+    auto    old_access_flags = image.access_flags;
+    auto    old_layout       = image.layout;
+
+    image.barrier(cmd, VK_ACCESS_TRANSFER_WRITE_BIT,
+                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkBufferImageCopy info;
+    MEMZERO(info);
+    info.bufferOffset    = offset;
+    info.bufferRowLength = 0;//image.getbpp() * image.info.extent.width;
+    info.imageExtent     = image.info.extent;
+    info.imageOffset     = VkOffset3D{0, 0, 0};
+    VkImageSubresourceLayers subres;
+    MEMZERO(subres);
+    subres.aspectMask      = image.aspect;
+    subres.baseArrayLayer  = dst_layer;
+    subres.layerCount      = 1;
+    subres.mipLevel        = dst_level;
+    info.imageSubresource  = subres;
+    info.bufferImageHeight = image.info.extent.height;
+    vkCmdCopyBufferToImage(cmd, buffer.buffer, image.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &info);
+    image.barrier(cmd, old_access_flags, old_layout);
   }
   void draw_indexed(u32 index_count, u32 instance_count, u32 first_index,
                     u32 first_instance, i32 vertex_offset) override {

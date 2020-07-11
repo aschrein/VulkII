@@ -197,6 +197,7 @@ struct Image2D_Raw {
     this->data   = (u8 *)tl_alloc(size);
     memcpy(this->data, data, size);
   }
+  u32  get_size_in_bytes() { return get_bpp() * width * height; }
   void release() {
     if (data != NULL) tl_free(data);
     MEMZERO(*this);

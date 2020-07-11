@@ -134,6 +134,7 @@ PBR_Model load_gltf_pbr(string_ref filename) {
           pbrmat.normal_id =
               load_texture(material->normal_texture.texture->image->uri,
                            rd::Format::RGBA8_UNORM);
+        out.materials.push(pbrmat);
       }
       Raw_Mesh_Opaque opaque_mesh;
       opaque_mesh.init();
@@ -208,7 +209,7 @@ PBR_Model load_gltf_pbr(string_ref filename) {
           a.stride = 12;
           a.type   = rd::Attriute_t::POSITION;
           opaque_mesh.attributes.push(a);
-          
+
           ito(attribute->data->count) {
             float pos[3];
             cgltf_accessor_read_float(attribute->data, i, pos, 3);
@@ -287,6 +288,11 @@ PBR_Model load_gltf_pbr(string_ref filename) {
             write_attribute_data((u8 *)pos, 8);
           }
 
+          break;
+        }
+        case cgltf_attribute_type_weights:
+        case cgltf_attribute_type_joints: {
+          // Skip
           break;
         }
         default: UNIMPLEMENTED;
