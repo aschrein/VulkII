@@ -39,8 +39,18 @@ class Opaque_Pass : public rd::IPass {
   Resource_ID ps;
   u32         width, height;
   Resource_ID uniform_buffer;
+  Resource_ID vertex_buffer;
+  Resource_ID index_buffer;
+  PBR_Model   model;
+  struct Vertex {
+    float4 pos;
+    float2 uv0;
+  };
 
   public:
+  Opaque_Pass() {
+    model = load_gltf_pbr(stref_s("models/old_tree/scene.gltf"));
+  }
   void on_end(rd::IResource_Manager *rm) override {
     if (uniform_buffer.is_null() == false) {
       rm->release_resource(uniform_buffer);
@@ -73,6 +83,16 @@ class Opaque_Pass : public rd::IPass {
     pc->add_render_target(stref_s("opaque_pass/rt0"), rt0_info, 0, 0, cl);
 
     vs = pc->create_shader_raw(rd::Stage_t::VERTEX, stref_s(R"(
+@(DECLARE_INPUT
+  (location 0)
+  (type float4)
+  (name vertex_position)
+)
+@(DECLARE_INPUT
+  (location 1)
+  (type float2)
+  (name vertex_uv0)
+)
 @(DECLARE_OUTPUT
   (location 0)
   (type float2)
@@ -80,13 +100,9 @@ class Opaque_Pass : public rd::IPass {
 )
 
 @(ENTRY)
-  float x = -1.0 + float((VERTEX_INDEX & 1) << 2);
-  float y = -1.0 + float((VERTEX_INDEX & 2) << 1);
-  tex_coords = float2(x * 0.5 + 0.5, y * 0.5 + 0.5);
-  x /= 4.0;
-  y /= 4.0;
+  tex_coords = vertex_uv0;
   @(EXPORT_POSITION
-      float4(x, y, 0.5, 1.0)
+      vertex_position
   );
 @(END)
 )"),
@@ -105,12 +121,30 @@ class Opaque_Pass : public rd::IPass {
 @(END)
 )"),
                                NULL, 0);
-    rd::Buffer_Create_Info buf_info;
-    MEMZERO(buf_info);
-    buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
-    buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER;
-    buf_info.size       = 16;
-    uniform_buffer      = pc->create_buffer(buf_info);
+    {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER;
+      buf_info.size       = 16;
+      uniform_buffer      = pc->create_buffer(buf_info);
+    }
+    if (vertex_buffer.is_null()) {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
+      buf_info.size       = sizeof(Vertex) * 4;
+      vertex_buffer       = pc->create_buffer(buf_info);
+    }
+    if (index_buffer.is_null()) {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER;
+      buf_info.size       = sizeof(u32) * 6;
+      index_buffer        = pc->create_buffer(buf_info);
+    }
   }
   void exec(rd::Imm_Ctx *ctx) override {
     setup_default_state(ctx);
@@ -126,14 +160,62 @@ class Opaque_Pass : public rd::IPass {
       ptr[3]     = 1.0f;
       ctx->unmap_buffer(uniform_buffer);
     }
+    {
+      Vertex *ptr = (Vertex *)ctx->map_buffer(vertex_buffer);
+      float   d   = 0.4f;
+      ptr[0].pos  = float4(-d, -d, 0.0f, 1.0f);
+      ptr[0].uv0  = float2(0.0f, 0.0f);
+      ptr[1].pos  = float4(-d, d, 0.0f, 1.0f);
+      ptr[1].uv0  = float2(0.0f, 1.0f);
+      ptr[2].pos  = float4(d, d, 0.0f, 1.0f);
+      ptr[2].uv0  = float2(1.0f, 0.0f);
+      ptr[3].pos  = float4(d, -d, 0.0f, 1.0f);
+      ptr[3].uv0  = float2(1.0f, 1.0f);
+      ctx->unmap_buffer(vertex_buffer);
+    }
+    {
+      u32 *ptr = (u32 *)ctx->map_buffer(index_buffer);
+      ptr[0]   = 0;
+      ptr[1]   = 1;
+      ptr[2]   = 2;
+      ptr[3]   = 0;
+      ptr[4]   = 2;
+      ptr[5]   = 3;
+      ctx->unmap_buffer(index_buffer);
+    }
     ctx->bind_uniform_buffer(0, 0, uniform_buffer, 0, 16);
+    ctx->IA_set_vertex_buffer(0, vertex_buffer, 0, sizeof(Vertex),
+                              rd::Input_Rate::VERTEX);
+    ctx->IA_set_index_buffer(index_buffer, 0, rd::Index_t::UINT32);
+    {
+      rd::Attribute_Info info;
+      MEMZERO(info);
+      info.binding  = 0;
+      info.format   = rd::Format::RGBA32_FLOAT;
+      info.location = 0;
+      info.offset   = OFFSETOF(Vertex, pos);
+      info.type     = rd::Attriute_t::POSITION;
+      ctx->IA_set_attribute(info);
+    }
+    {
+      rd::Attribute_Info info;
+      MEMZERO(info);
+      info.binding  = 0;
+      info.format   = rd::Format::RG32_FLOAT;
+      info.location = 1;
+      info.offset   = OFFSETOF(Vertex, uv0);
+      info.type     = rd::Attriute_t::TEXCOORD0;
+      ctx->IA_set_attribute(info);
+    }
     ctx->flush_bindings();
-    ctx->draw(3, 1, 0, 0);
+    ctx->draw_indexed(6, 1, 0, 0, 0);
   }
   string_ref get_name() override { return stref_s("opaque_pass"); }
   void       release(rd::IResource_Manager *rm) override {
     rm->release_resource(vs);
     rm->release_resource(ps);
+    rm->release_resource(vertex_buffer);
+    rm->release_resource(index_buffer);
   }
 };
 
@@ -301,7 +383,6 @@ class Merge_Pass : public rd::IPass {
 int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
-  PBR_Model model = load_gltf_pbr(stref_s("models/old_tree/scene.gltf"));
   rd::Pass_Mng *pmng = rd::Pass_Mng::create(rd::Impl_t::VULKAN);
   pmng->add_pass(new Opaque_Pass);
   pmng->add_pass(new Merge_Pass);

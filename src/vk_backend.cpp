@@ -2604,11 +2604,11 @@ class Vk_Ctx : public rd::Imm_Ctx {
     if (res_id.is_null()) {
       return;
     }
-    end_pass();
-    ASSERT_DEBUG(res_id.type == (i32)Resource_Type::SHADER);
+    ASSERT_DEBUG(res_id.type == (i32)Resource_Type::BUFFER);
     Buffer &     buf     = wnd->buffers[res_id.id];
     VkDeviceSize doffset = (VkDeviceSize)offset;
     vkCmdBindVertexBuffers(cmd, index, 1, &buf.buffer, &doffset);
+
     graphics_state.num_bindings = MAX(graphics_state.num_bindings, index + 1);
     graphics_state.bindings[index].binding = index;
     if (rate == rd::Input_Rate::VERTEX)
