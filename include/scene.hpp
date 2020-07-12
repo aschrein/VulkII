@@ -195,14 +195,14 @@ struct Image2D_Raw {
     this->format = format;
     u32 size     = get_bpp() * width * height;
     this->data   = (u8 *)tl_alloc(size);
-    memcpy(this->data, data, size);
+    if (data != NULL) memcpy(this->data, data, size);
   }
-  u32  get_size_in_bytes() { return get_bpp() * width * height; }
+  u32  get_size_in_bytes() const { return get_bpp() * width * height; }
   void release() {
     if (data != NULL) tl_free(data);
     MEMZERO(*this);
   }
-  u32 get_bpp() {
+  u32 get_bpp() const {
     switch (format) {
     case rd::Format::RGBA8_UNORM:
     case rd::Format::RGBA8_SRGBA: return 4u;
@@ -210,7 +210,7 @@ struct Image2D_Raw {
     default: ASSERT_PANIC(false && "unsupported format");
     }
   }
-  vec4 load(uint2 coord) {
+  vec4 load(int2 coord) const {
     u32 bpc = 4u;
     switch (format) {
     case rd::Format::RGBA8_UNORM:
@@ -225,6 +225,8 @@ struct Image2D_Raw {
     };
     uint2 size = uint2(width, height);
     if (coord.x >= size.x) coord.x = size.x - 1;
+    if (coord.x < 0) coord.x = 0;
+    if (coord.y < 0) coord.y = 0;
     if (coord.y >= size.y) coord.y = size.y - 1;
     switch (format) {
     case rd::Format::RGBA8_UNORM: {
@@ -257,8 +259,59 @@ struct Image2D_Raw {
     }
     default: ASSERT_PANIC(false && "unsupported format");
     }
-  };
-  vec4 sample(vec2 uv) {
+  }
+  void write(int2 coord, float4 pixel) {
+    u32 bpc = 4u;
+    switch (format) {
+    case rd::Format::RGBA8_UNORM:
+    case rd::Format::RGBA8_SRGBA: bpc = 4u; break;
+    case rd::Format::RGB32_FLOAT: bpc = 12u; break;
+    case rd::Format::RGBA32_FLOAT: bpc = 16u; break;
+    default: ASSERT_PANIC(false && "unsupported format");
+    }
+    uint2 size = uint2(width, height);
+    if (coord.x >= size.x) coord.x = size.x - 1;
+    if (coord.x < 0) coord.x = 0;
+    if (coord.y < 0) coord.y = 0;
+    if (coord.y >= size.y) coord.y = size.y - 1;
+    switch (format) {
+      // clang-format off
+    case rd::Format::RGBA8_UNORM: {
+      data[coord.x * bpc + coord.y * size.x * bpc + 0u] = (u8)((float)clamp(pixel.r, 0.0f, 1.0f) * 255.0f);
+      data[coord.x * bpc + coord.y * size.x * bpc + 1u] = (u8)((float)clamp(pixel.g, 0.0f, 1.0f) * 255.0f);
+      data[coord.x * bpc + coord.y * size.x * bpc + 2u] = (u8)((float)clamp(pixel.b, 0.0f, 1.0f) * 255.0f);
+      data[coord.x * bpc + coord.y * size.x * bpc + 3u] = (u8)((float)clamp(pixel.a, 0.0f, 1.0f) * 255.0f);
+      break;
+    }
+    case rd::Format::RGBA8_SRGBA: {
+      pixel.r    = std::pow(pixel.r, 1.0f/2.2f);
+      pixel.g    = std::pow(pixel.g, 1.0f/2.2f);
+      pixel.b    = std::pow(pixel.b, 1.0f/2.2f);
+      pixel.a    = std::pow(pixel.a, 1.0f/2.2f);
+      data[coord.x * bpc + coord.y * size.x * bpc + 0u] = (u8)((float)clamp(pixel.r, 0.0f, 1.0f) * 255.0f);
+      data[coord.x * bpc + coord.y * size.x * bpc + 1u] = (u8)((float)clamp(pixel.g, 0.0f, 1.0f) * 255.0f);
+      data[coord.x * bpc + coord.y * size.x * bpc + 2u] = (u8)((float)clamp(pixel.b, 0.0f, 1.0f) * 255.0f);
+      data[coord.x * bpc + coord.y * size.x * bpc + 3u] = (u8)((float)clamp(pixel.a, 0.0f, 1.0f) * 255.0f);
+      break;
+    }
+    case rd::Format::RGB32_FLOAT: {
+      data[coord.x * bpc + coord.y * size.x * bpc + 0u] = (u8)((float)clamp(pixel.r, 0.0f, 1.0f) * 255.0f);
+      data[coord.x * bpc + coord.y * size.x * bpc + 1u] = (u8)((float)clamp(pixel.g, 0.0f, 1.0f) * 255.0f);
+      data[coord.x * bpc + coord.y * size.x * bpc + 2u] = (u8)((float)clamp(pixel.b, 0.0f, 1.0f) * 255.0f);
+      break;
+    }
+    case rd::Format::RGBA32_FLOAT: {
+      data[coord.x * bpc + coord.y * size.x * bpc + 0u] = (u8)((float)clamp(pixel.r, 0.0f, 1.0f) * 255.0f);
+      data[coord.x * bpc + coord.y * size.x * bpc + 1u] = (u8)((float)clamp(pixel.g, 0.0f, 1.0f) * 255.0f);
+      data[coord.x * bpc + coord.y * size.x * bpc + 2u] = (u8)((float)clamp(pixel.b, 0.0f, 1.0f) * 255.0f);
+      data[coord.x * bpc + coord.y * size.x * bpc + 3u] = (u8)((float)clamp(pixel.a, 0.0f, 1.0f) * 255.0f);
+      break;
+    }
+    // clang-format on
+    default: ASSERT_PANIC(false && "unsupported format");
+    }
+  }
+  vec4 sample(vec2 uv) const {
     ivec2 size    = ivec2(width, height);
     vec2  suv     = uv * vec2(float(size.x - 1u), float(size.y - 1u));
     ivec2 coord[] = {
@@ -284,7 +337,26 @@ struct Image2D_Raw {
     vec4 result = vec4(0.0f, 0.0f, 0.0f, 0.0f);
     ito(4) result += load(uint2(coord[i].x, coord[i].y)) * weights[i];
     return result;
-  };
+  }
+  Image2D_Raw downsample() const {
+    u32 new_width   = MAX(1, width >> 1);
+    u32 new_height  = MAX(1, height >> 1);
+
+    Image2D_Raw out;
+    out.init(new_width, new_height, format, NULL);
+
+    ito(new_height) {
+      jto(new_width) {
+        float4 p00 = load({j * 2 + 0, i * 2 + 0});
+        float4 p01 = load({j * 2 + 0, i * 2 + 1});
+        float4 p10 = load({j * 2 + 1, i * 2 + 0});
+        float4 p11 = load({j * 2 + 1, i * 2 + 1});
+        out.write({j, i}, (p00 + p01 + p10 + p11) / 4.0f);
+      }
+    }
+
+    return out;
+  }
 };
 
 static inline float3 safe_normalize(float3 v) {

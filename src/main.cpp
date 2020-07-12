@@ -641,8 +641,8 @@ int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
   rd::Pass_Mng *pmng = rd::Pass_Mng::create(rd::Impl_t::VULKAN);
-  pmng->add_pass(new Opaque_Pass);
-  pmng->add_pass(new Merge_Pass);
+  pmng->add_render_pass(new Opaque_Pass);
+  pmng->add_render_pass(new Merge_Pass);
   pmng->loop();
   return 0;
 }

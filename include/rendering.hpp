@@ -313,7 +313,7 @@ class IPass {
 struct Pass_Mng {
   static Pass_Mng *create(Impl_t type);
   virtual void     loop()                = 0;
-  virtual void     add_pass(IPass *pass) = 0;
+  virtual void     add_render_pass(IPass *pass) = 0;
   virtual void     release()             = 0;
 };
 

@@ -146,7 +146,22 @@ struct Buffer : public Ref_Cnt {
   VkBufferCreateInfo create_info;
   VkAccessFlags      access_flags;
   InlineArray<ID, 8> views;
-  void               init() {
+
+  void barrier(VkCommandBuffer cmd, VkAccessFlags new_access_flags) {
+    VkBufferMemoryBarrier bar;
+    MEMZERO(bar);
+    bar.sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    bar.srcAccessMask       = access_flags;
+    bar.dstAccessMask       = new_access_flags;
+    bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bar.buffer              = buffer;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 1,
+                         &bar, 0, NULL);
+    access_flags = new_access_flags;
+  }
+  void init() {
     memset(this, 0, sizeof(*this));
     views.init();
   }
@@ -2305,6 +2320,8 @@ class Vk_Ctx : public rd::Imm_Ctx {
   template <typename K, typename V>
   using Table = Hash_Table<K, V, Default_Allocator, 0x10>;
   Table<Resource_Path, Resource_Binding> deferred_bindings;
+  VkDescriptorSet                        set_cache[0x10];
+  u64                                    set_dirty_flags;
 
   struct VBO_Binding {
     VkBuffer     buffer;
@@ -2468,9 +2485,11 @@ class Vk_Ctx : public rd::Imm_Ctx {
                                      Resource_Binding const &rb) {
       if (rb.set != index) return;
       if (rb.type == Binding_t::UNIFORM_BUFFER) {
+        Buffer &buffer = wnd->buffers[rb.uniform_buffer.buf_id];
+        buffer.barrier(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         VkDescriptorBufferInfo binfo;
         MEMZERO(binfo);
-        binfo.buffer = wnd->buffers[rb.uniform_buffer.buf_id].buffer;
+        binfo.buffer = buffer.buffer;
         binfo.offset = rb.uniform_buffer.offset;
         binfo.range  = rb.uniform_buffer.size;
         VkWriteDescriptorSet wset;
@@ -2550,6 +2569,8 @@ class Vk_Ctx : public rd::Imm_Ctx {
     VK_ASSERT_OK(vkBeginCommandBuffer(cmd, &begin_info));
   }
   void init(Window *wnd) {
+    set_dirty_flags = 0;
+    memset(set_cache, 0, sizeof(set_cache));
     deferred_bindings.init();
     cpu_cmd.init();
     this->wnd = wnd;
@@ -2633,6 +2654,8 @@ class Vk_Ctx : public rd::Imm_Ctx {
     vkCmdSetScissor(cmd, 0, 1, scissors);
   }
   void clear_state() override {
+    set_dirty_flags = 0;
+    memset(set_cache, 0, sizeof(set_cache));
     graphics_state.reset();
     deferred_bindings.reset();
     cpu_cmd.reset();
@@ -2726,6 +2749,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
   }
 
   void insert_binding(Resource_Binding rb) {
+    set_dirty_flags |= (1 << rb.set);
     deferred_bindings.insert({rb.set, rb.binding, rb.element}, rb);
     /*if (deferred_bindings.contains(set)) {
       Table<u32, Resource_Binding> &bindings = deferred_bindings.get_ref(set);
@@ -2804,10 +2828,16 @@ class Vk_Ctx : public rd::Imm_Ctx {
     current_draw.sets.resize(gw.set_layouts.size);
     ito(gw.set_layouts.size) {
       if (gw.set_layouts[i] == VK_NULL_HANDLE) continue;
-      VkDescriptorSet set =
-          wnd->get_descriptor_pool().allocate(gw.set_layouts[i]);
-      update_descriptor_set(i, set);
-      current_draw.sets[i] = set;
+      if ((set_dirty_flags & (1 << i)) == 0 && set_cache[i] != VK_NULL_HANDLE) {
+        current_draw.sets[i] = set_cache[i];
+      } else {
+        VkDescriptorSet set =
+            wnd->get_descriptor_pool().allocate(gw.set_layouts[i]);
+        update_descriptor_set(i, set);
+        set_dirty_flags &= ~(1 << i);
+        set_cache[i] = set;
+        current_draw.sets[i] = set;
+      }
     }
   }
   void copy_buffer_to_image(Resource_ID buf_id, size_t offset,
@@ -2823,7 +2853,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
     VkBufferImageCopy info;
     MEMZERO(info);
     info.bufferOffset    = offset;
-    info.bufferRowLength = 0;//image.getbpp() * image.info.extent.width;
+    info.bufferRowLength = 0; // image.getbpp() * image.info.extent.width;
     info.imageExtent     = image.info.extent;
     info.imageOffset     = VkOffset3D{0, 0, 0};
     VkImageSubresourceLayers subres;
@@ -3392,7 +3422,7 @@ class VkPass_Mng : public rd::Pass_Mng {
         wnd->end_frame(NULL);
     }
   }
-  void add_pass(rd::IPass *pass) override {
+  void add_render_pass(rd::IPass *pass) override {
     Pass_Wrapper pw;
     pw.pass    = pass;
     pw.cur_ctx = 0;
