@@ -3,6 +3,12 @@
 
 #include "scene.hpp"
 
+#ifdef __linux__
+#include <SDL2/SDL.h>
+#else
+#include <SDL.h>
+#endif
+
 struct Camera {
   float  phi;
   float  theta;
@@ -59,6 +65,8 @@ struct Camera {
   }
   float4x4 viewproj() { return proj * view; }
 };
+
+Camera g_camera;
 
 static void setup_default_state(rd::Imm_Ctx *ctx, u32 num_rts = 1) {
   rd::Blend_State bs;
@@ -152,14 +160,14 @@ struct GPUMesh {
       data_uploaded = true;
     }
     {
-      PBR_Material &mat = model->materials[mesh_index];
+      PBR_Material & mat = model->materials[mesh_index];
       Push_Constants pc;
       MEMZERO(pc);
       pc.material_textures.x = mat.albedo_id;
       pc.material_textures.y = -1;
       pc.material_textures.z = -1;
       pc.material_textures.w = -1;
-      pc.model = rotate(float4x4(1.0f), (float)timer.cur_time,
+      pc.model = rotate(float4x4(1.0f), (float)0.0f, // timer.cur_time,
                         float3(0.0f, 1.0f, 0.0f)) *
                  scale(float4x4(1.0f), float3(1.0f, -1.0f, 1.0f) * 0.04f);
       ctx->push_constants(&pc, sizeof(pc));
@@ -212,7 +220,6 @@ class Opaque_Pass : public rd::IPass {
   Array<GPUMesh>     gpu_meshes;
   Array<Resource_ID> gpu_textures;
   PBR_Model          model;
-  Camera             camera;
 
   struct Uniform {
     afloat4x4 viewproj;
@@ -234,12 +241,10 @@ class Opaque_Pass : public rd::IPass {
     current_streaming_id = 0;
     gpu_textures.init();
     gpu_meshes.init();
-    model                = load_gltf_pbr(stref_s("models/low_poly_ellie/scene.gltf"));
+    model = load_gltf_pbr(stref_s("models/low_poly_ellie/scene.gltf"));
     current_streaming_id = 0;
     gpu_meshes.resize(model.meshes.size);
     ito(model.meshes.size) { gpu_meshes[i].init(&model, i); }
-
-    camera.init();
   }
   void on_end(rd::IResource_Manager *rm) override {
     if (uniform_buffer.is_null() == false) {
@@ -288,8 +293,8 @@ class Opaque_Pass : public rd::IPass {
     rd::Image2D_Info info = pc->get_swapchain_image_info();
     width                 = info.width;
     height                = info.height;
-    camera.aspect         = (float)width / height;
-    camera.update();
+    g_camera.aspect       = (float)width / height;
+    g_camera.update();
     {
       rd::Clear_Color cl;
       cl.clear = true;
@@ -307,7 +312,8 @@ class Opaque_Pass : public rd::IPass {
       rt0_info.levels     = 1;
       rt0_info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
       rt0_info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_RT |
-                            (u32)rd::Image_Usage_Bits::USAGE_SAMPLED;
+                            (u32)rd::Image_Usage_Bits::USAGE_SAMPLED |
+                            (u32)rd::Image_Usage_Bits::USAGE_UAV;
       pc->add_render_target(stref_s("opaque_pass/rt0"), rt0_info, 0, 0, cl);
     }
     {
@@ -460,7 +466,7 @@ class Opaque_Pass : public rd::IPass {
     {
       Uniform *ptr = (Uniform *)ctx->map_buffer(uniform_buffer);
 
-      ptr->viewproj = camera.viewproj();
+      ptr->viewproj = g_camera.viewproj();
       ctx->unmap_buffer(uniform_buffer);
     }
     ctx->bind_uniform_buffer(0, 0, uniform_buffer, 0, sizeof(Uniform));
@@ -482,6 +488,233 @@ class Opaque_Pass : public rd::IPass {
     rm->release_resource(ps);
     gpu_meshes.release();
     gpu_textures.release();
+  }
+};
+
+class Postprocess_Pass : public rd::IPass {
+  Resource_ID cs;
+  u32         width, height;
+  Resource_ID uniform_buffer;
+  Resource_ID sampler;
+  Resource_ID input_image;
+  Resource_ID output_image;
+  struct Feedback_Buffer {
+    Resource_ID buffer;
+    Resource_ID fence;
+    bool        in_fly;
+    void        reset() {
+      in_fly = false;
+      buffer.reset();
+      fence.reset();
+    }
+    void release(rd::IResource_Manager *rm) {
+      if (buffer.is_null() == false) rm->release_resource(buffer);
+      if (fence.is_null() == false) rm->release_resource(fence);
+      reset();
+    }
+  } feedback_buffer;
+  Timer timer;
+
+  struct Uniform {
+    afloat4 color;
+    ai32    control;
+  } uniform_data;
+  static_assert(sizeof(uniform_data) == 32, "Uniform packing is wrong");
+
+  public:
+  Postprocess_Pass() {
+    timer.init();
+    uniform_buffer.reset();
+    sampler.reset();
+    input_image.reset();
+    output_image.reset();
+    feedback_buffer.reset();
+  }
+  void on_end(rd::IResource_Manager *rm) override {
+    if (uniform_buffer.is_null() == false) {
+      rm->release_resource(uniform_buffer);
+      uniform_buffer.reset();
+    }
+  }
+  void on_begin(rd::IResource_Manager *pc) override {
+    if (cs.is_null())
+      cs = pc->create_shader_raw(rd::Stage_t::COMPUTE, stref_s(R"(
+@(DECLARE_UNIFORM_BUFFER
+  (set 0)
+  (binding 0)
+  (add_field (type float4)   (name color))
+  (add_field (type u32)      (name control_flags))
+)
+#define CONTROL_ENABLE_FEEDBACK 1
+bool is_control_set(uint bits) {
+  return (control_flags & bits) != 0;
+}
+@(DECLARE_IMAGE
+  (type READ_ONLY)
+  (dim 2D)
+  (set 0)
+  (binding 1)
+  (format RGBA32_FLOAT)
+  (name my_image)
+)
+@(DECLARE_IMAGE
+  (type WRITE_ONLY)
+  (dim 2D)
+  (set 0)
+  (binding 2)
+  (format RGBA32_FLOAT)
+  (name out_image)
+)
+struct BVH_Node {
+  float3 min;
+  float3 max;
+  u32    flags;
+};
+@(DECLARE_BUFFER
+  (type READ_ONLY)
+  (set 0)
+  (binding 3)
+  (type BVH_Node)
+  (name bvh_nodes)
+)
+struct Dummy {
+  uint4    flags;
+};
+@(DECLARE_BUFFER
+  (type READ_ONLY)
+  (set 0)
+  (binding 4)
+  (type Dummy)
+  (name dummy)
+)
+float4 op_laplace(int2 coords) {
+  float4 val00 = image_load(my_image, coords + int2(-1, 0));
+  float4 val01 = image_load(my_image, coords + int2(1, 0));
+  float4 val10 = image_load(my_image, coords + int2(0, -1));
+  float4 val11 = image_load(my_image, coords + int2(0, 1));
+  float4 center = image_load(my_image, coords);
+  float4 laplace = abs(center * 4.0 - val00 - val01 - val10 - val11) / 4.0;
+  return laplace;
+  // float intensity = dot(laplace, float4_splat(1.0)); 
+  // return intensity > 0.5 ? float4_splat(1.0) : float4_splat(0.0);
+}
+
+@(GROUP_SIZE 16 16 1)
+@(ENTRY)
+  int2 dim = imageSize(my_image);
+  if (GLOBAL_THREAD_INDEX.x > dim.x || GLOBAL_THREAD_INDEX.y > dim.y)
+    return;
+  float2 uv = GLOBAL_THREAD_INDEX.xy / dim.xy;
+  float4 in_val = op_laplace(int2(GLOBAL_THREAD_INDEX.xy));
+  if (dot(in_val, float4_splat(1.0)) < 0.01) {
+    in_val = float4(float2(LOCAL_THREAD_INDEX.xy) / 16.0, 0.0, 1.0);
+  }
+  //image_load(my_image, GLOBAL_THREAD_INDEX.xy);
+  in_val = pow(in_val, float4(1.0/2.2));
+  if (GLOBAL_THREAD_INDEX.y == 777 && is_control_set(CONTROL_ENABLE_FEEDBACK)) {
+    Dummy d;
+    d.flags.x = GLOBAL_THREAD_INDEX.x;
+    d.flags.y = GLOBAL_THREAD_INDEX.y;
+    d.flags.z = GLOBAL_THREAD_INDEX.z;
+    d.flags.w = 666;
+    buffer_store(dummy, GLOBAL_THREAD_INDEX.x, d);
+  }
+  image_store(out_image, GLOBAL_THREAD_INDEX.xy, in_val);
+@(END)
+)"),
+                                 NULL, 0);
+    {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER;
+      buf_info.size       = sizeof(uniform_data);
+      uniform_buffer      = pc->create_buffer(buf_info);
+    }
+    if (sampler.is_null()) {
+      rd::Sampler_Create_Info info;
+      MEMZERO(info);
+      info.address_mode_u = rd::Address_Mode::CLAMP_TO_EDGE;
+      info.address_mode_v = rd::Address_Mode::CLAMP_TO_EDGE;
+      info.address_mode_w = rd::Address_Mode::CLAMP_TO_EDGE;
+      info.mag_filter     = rd::Filter::LINEAR;
+      info.min_filter     = rd::Filter::LINEAR;
+      info.mip_mode       = rd::Filter::NEAREST;
+      info.anisotropy     = true;
+      info.max_anisotropy = 16.0f;
+      sampler             = pc->create_sampler(info);
+    }
+    input_image         = pc->get_resource(stref_s("opaque_pass/rt0"));
+    rd::Image_Info info = pc->get_image_info(input_image);
+
+    if (output_image.is_null() || width != info.width ||
+        height != info.height) {
+      if (output_image.is_null() == false) pc->release_resource(output_image);
+      width  = info.width;
+      height = info.height;
+      rd::Image_Create_Info info;
+      MEMZERO(info);
+      info.format     = rd::Format::RGBA32_FLOAT;
+      info.width      = width;
+      info.height     = height;
+      info.depth      = 1;
+      info.layers     = 1;
+      info.levels     = 1;
+      info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
+      info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_UAV |
+                        (u32)rd::Image_Usage_Bits::USAGE_SAMPLED;
+      output_image = pc->create_image(info);
+      pc->assign_name(output_image, stref_s("postprocess/img0"));
+    }
+    if (feedback_buffer.in_fly == false) {
+      if (feedback_buffer.buffer.is_null()) {
+        rd::Buffer_Create_Info buf_info;
+        MEMZERO(buf_info);
+        buf_info.mem_bits      = (u32)rd::Memory_Bits::HOST_VISIBLE;
+        buf_info.usage_bits    = (u32)rd::Buffer_Usage_Bits::USAGE_UAV;
+        buf_info.size          = 1 << 12;
+        feedback_buffer.buffer = pc->create_buffer(buf_info);
+      }
+      feedback_buffer.fence = pc->get_fence(rd::Fence_Position::PASS_FINISED);
+    }
+  }
+  void exec(rd::Imm_Ctx *ctx) override {
+    if (input_image.is_null()) return;
+    timer.update();
+    ctx->CS_set_shader(cs);
+    {
+      Uniform *ptr = (Uniform *)ctx->map_buffer(uniform_buffer);
+      ptr->color   = float4(0.5f + 0.5f * std::cos(timer.cur_time), 0.0f, 0.0f,
+                          0.5f + 0.5f * std::cos(timer.cur_time));
+      ptr->control = 0;
+      ptr->control |= feedback_buffer.in_fly ? 0 : 1;
+      ctx->unmap_buffer(uniform_buffer);
+    }
+    ctx->bind_uniform_buffer(0, 0, uniform_buffer, 0, sizeof(Uniform));
+    ctx->bind_rw_image(0, 1, 0, input_image, 0, 1, 0, 1);
+    ctx->bind_rw_image(0, 2, 0, output_image, 0, 1, 0, 1);
+    if (feedback_buffer.in_fly == false) {
+      ctx->bind_storage_buffer(0, 4, feedback_buffer.buffer, 0, 1 << 12);
+      feedback_buffer.in_fly = true;
+    } else {
+      if (ctx->get_fence_state(feedback_buffer.fence)) {
+        u32 *ptr = (u32 *)ctx->map_buffer(feedback_buffer.buffer);
+        fprintf(stdout, "feedback buffer is finished: %i %i %i %i ... \n",
+                ptr[0], ptr[1], ptr[2], ptr[3]);
+        ctx->unmap_buffer(feedback_buffer.buffer);
+        feedback_buffer.in_fly = false;
+      } else {
+        fprintf(stdout, "feedback buffer is buisy\n");
+      }
+    }
+    // ctx->bind_sampler(0, 2, sampler);
+    ctx->dispatch((width + 15) / 16, (height + 15) / 16, 1);
+  }
+  string_ref get_name() override { return stref_s("postprocess_pass"); }
+  void       release(rd::IResource_Manager *rm) override {
+    rm->release_resource(cs);
+    rm->release_resource(feedback_buffer.buffer);
+    timer.release();
   }
 };
 
@@ -568,11 +801,8 @@ class Merge_Pass : public rd::IPass {
 )
 @(ENTRY)
   @(EXPORT_COLOR 0
-        // lerp(
-        //    float4(color.xyz, 1.0),
-            pow(texture(sampler2D(my_image, my_sampler), tex_coords), float4(1.0/2.2))
-        //    , color.a)
-        );
+    texture(sampler2D(my_image, my_sampler), tex_coords)
+  );
 @(END)
 #endif
 )");
@@ -604,7 +834,7 @@ class Merge_Pass : public rd::IPass {
       info.max_anisotropy = 16.0f;
       sampler             = pc->create_sampler(info);
     }
-    my_image = pc->get_resource(stref_s("opaque_pass/rt0"));
+    my_image = pc->get_resource(stref_s("postprocess/img0"));
   }
   void exec(rd::Imm_Ctx *ctx) override {
     if (my_image.is_null()) return;
@@ -637,12 +867,40 @@ class Merge_Pass : public rd::IPass {
   }
 };
 
+class Event_Consumer : public rd::IEvent_Consumer {
+  i32 last_m_x = -1;
+  i32 last_m_y = -1;
+
+  public:
+  void consume(void *_event) override {
+
+    SDL_Event *event = (SDL_Event *)_event;
+    if (event->type == SDL_MOUSEMOTION) {
+      SDL_MouseMotionEvent *m       = (SDL_MouseMotionEvent *)event;
+      i32                   cur_m_x = m->x;
+      i32                   cur_m_y = m->y;
+      if ((m->state & 1) != 0 && last_m_x > 0) {
+        i32 dx = cur_m_x - last_m_x;
+        i32 dy = cur_m_y - last_m_y;
+        g_camera.phi += (float)(dx)*g_camera.aspect * 5.0e-3f;
+        g_camera.theta += (float)(dy)*5.0e-3f;
+      }
+      last_m_x = cur_m_x;
+      last_m_y = cur_m_y;
+    }
+  }
+};
+
 int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
-  rd::Pass_Mng *pmng = rd::Pass_Mng::create(rd::Impl_t::VULKAN);
-  pmng->add_render_pass(new Opaque_Pass);
-  pmng->add_render_pass(new Merge_Pass);
+  g_camera.init();
+  Event_Consumer event_consumer;
+  rd::Pass_Mng * pmng = rd::Pass_Mng::create(rd::Impl_t::VULKAN);
+  pmng->set_event_consumer(&event_consumer);
+  pmng->add_pass(rd::Pass_t::RENDER, new Opaque_Pass);
+  pmng->add_pass(rd::Pass_t::COMPUTE, new Postprocess_Pass);
+  pmng->add_pass(rd::Pass_t::RENDER, new Merge_Pass);
   pmng->loop();
   return 0;
 }

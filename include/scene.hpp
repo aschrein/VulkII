@@ -27,6 +27,8 @@ using float4x4 = mat4;
 #define ALIGN16 __declspec(align(16))
 #endif
 
+typedef i32 ALIGN16   ai32;
+typedef u32 ALIGN16   au32;
 typedef ivec2 ALIGN16 aint2;
 typedef ivec3 ALIGN16 aint3;
 typedef ivec4 ALIGN16 aint4;
@@ -339,8 +341,8 @@ struct Image2D_Raw {
     return result;
   }
   Image2D_Raw downsample() const {
-    u32 new_width   = MAX(1, width >> 1);
-    u32 new_height  = MAX(1, height >> 1);
+    u32 new_width  = MAX(1, width >> 1);
+    u32 new_height = MAX(1, height >> 1);
 
     Image2D_Raw out;
     out.init(new_width, new_height, format, NULL);

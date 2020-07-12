@@ -62,6 +62,7 @@ enum class Resource_Type : u32 {
   PASS,
   BUFFER_VIEW,
   IMAGE_VIEW,
+  FENCE,
   NONE
 };
 
@@ -447,6 +448,7 @@ static void execute_preprocessor(List *l, char const *list_end,
     string_ref name;
     string_ref type;
     string_ref dim;
+    string_ref format;
 
     void reset() {
       memset(this, 0, sizeof(*this));
@@ -473,8 +475,17 @@ static void execute_preprocessor(List *l, char const *list_end,
           type = l->get(1)->symbol;
         } else if (l->cmp_symbol("dim")) {
           dim = l->get(1)->symbol;
+        } else if (l->cmp_symbol("format")) {
+          format = l->get(1)->symbol;
         }
         l = l->next;
+      }
+    }
+    string_ref format_to_glsl() {
+      if (format == stref_s("RGBA32_FLOAT")) {
+        return stref_s("rgba32f");
+      } else {
+        UNIMPLEMENTED;
       }
     }
   };
@@ -515,10 +526,59 @@ static void execute_preprocessor(List *l, char const *list_end,
                      param_eval.set, param_eval.binding, STRF(param_eval.dim),
                      STRF(param_eval.name));
       }
+    } else if (param_eval.type == stref_s("WRITE_ONLY")) {
+      if (param_eval.array_size > 0) {
+        builder.putf("layout(set = %i, binding = %i, %.*s) uniform writeonly "
+                     "image%.*s %.*s[%i];",
+                     param_eval.set, param_eval.binding,
+                     STRF(param_eval.format_to_glsl()), STRF(param_eval.dim),
+                     STRF(param_eval.name), param_eval.array_size);
+      } else {
+        builder.putf("layout(set = %i, binding = %i, %.*s) uniform writeonly "
+                     "image%.*s %.*s;",
+                     param_eval.set, param_eval.binding,
+                     STRF(param_eval.format_to_glsl()), STRF(param_eval.dim),
+                     STRF(param_eval.name));
+      }
+    } else if (param_eval.type == stref_s("READ_ONLY")) {
+      if (param_eval.array_size > 0) {
+        builder.putf("layout(set = %i, binding = %i, %.*s) uniform readonly "
+                     "image%.*s %.*s[%i];",
+                     param_eval.set, param_eval.binding,
+                     STRF(param_eval.format_to_glsl()), STRF(param_eval.dim),
+                     STRF(param_eval.name), param_eval.array_size);
+      } else {
+        builder.putf("layout(set = %i, binding = %i, %.*s) uniform readonly "
+                     "image%.*s %.*s;",
+                     param_eval.set, param_eval.binding,
+                     STRF(param_eval.format_to_glsl()), STRF(param_eval.dim),
+                     STRF(param_eval.name));
+      }
+    } else if (param_eval.type == stref_s("READ_WRITE")) {
+      if (param_eval.array_size > 0) {
+        builder.putf("layout(set = %i, binding = %i, %.*s) uniform "
+                     "image%.*s %.*s[%i];",
+                     param_eval.set, param_eval.binding,
+                     STRF(param_eval.format_to_glsl()), STRF(param_eval.dim),
+                     STRF(param_eval.name), param_eval.array_size);
+      } else {
+        builder.putf("layout(set = %i, binding = %i, %.*s) uniform "
+                     "image%.*s %.*s;",
+                     param_eval.set, param_eval.binding,
+                     STRF(param_eval.format_to_glsl()), STRF(param_eval.dim),
+                     STRF(param_eval.name));
+      }
     } else {
       UNIMPLEMENTED;
     }
 
+  } else if (l->cmp_symbol("GROUP_SIZE")) {
+    i32 group_size_x = l->get(1)->parse_int();
+    i32 group_size_y = l->get(2)->parse_int();
+    i32 group_size_z = l->get(3)->parse_int();
+    builder.putf(
+        "layout(local_size_x = %i, local_size_y = %i, local_size_z = %i) in;",
+        group_size_x, group_size_y, group_size_z);
   } else if (l->cmp_symbol("ENTRY")) {
     builder.putf("void main() {");
   } else if (l->cmp_symbol("END")) {
@@ -556,6 +616,14 @@ static void execute_preprocessor(List *l, char const *list_end,
       cur = cur->next;
     }
     builder.putf("};\n");
+  } else if (l->cmp_symbol("DECLARE_BUFFER")) {
+    param_eval.reset();
+    param_eval.exec(l->next);
+    builder.putf("layout(set = %i, binding = %i, std140) buffer SBO_%i_%i {\n",
+                 param_eval.set, param_eval.binding, param_eval.set,
+                 param_eval.binding);
+    builder.putf("  %.*s internal_data[];\n", STRF(param_eval.type));
+    builder.putf("} %.*s;\n", STRF(param_eval.name));
   } else if (l->cmp_symbol("DECLARE_PUSH_CONSTANTS")) {
     param_eval.reset();
     param_eval.exec(l->next);
@@ -595,11 +663,22 @@ static void preprocess_shader(String_Builder &builder, string_ref body) {
 #define float2x2      mat2
 #define float3x3      mat3
 #define float4x4      mat4
+#define u32 uint
+#define i32 int
+#define f32 float
+#define f64 double
 #define VERTEX_INDEX  gl_VertexIndex
+#define GLOBAL_THREAD_INDEX  gl_GlobalInvocationID
+#define LOCAL_THREAD_INDEX  gl_LocalInvocationID
 #define lerp          mix
 #define float2_splat(x)  vec2(x, x)
 #define float3_splat(x)  vec3(x, x, x)
 #define float4_splat(x)  vec4(x, x, x, x)
+
+#define image_load(image, coords) imageLoad(image, ivec2(coords))
+#define image_store(image, coords, data) imageStore(image, ivec2(coords), data)
+#define buffer_load(buffer, index) buffer.data[index]
+#define buffer_store(buffer, index, data) buffer.internal_data[index] = data
 
 )");
   char const *cur       = body.ptr;
@@ -1141,7 +1220,6 @@ struct Graphics_Pipeline_Wrapper : public Slot {
   VkShaderModule                        ps_module;
   VkShaderModule                        vs_module;
   InlineArray<VkDescriptorSetLayout, 8> set_layouts;
-  u32                                   uniform_size;
   u32                                   push_constants_size;
 
   void release(VkDevice device) {
@@ -1296,6 +1374,88 @@ struct Graphics_Pipeline_Wrapper : public Slot {
       info.stageCount = 2;
       VK_ASSERT_OK(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &info,
                                              NULL, &pipeline));
+    }
+  }
+};
+
+struct Fence : public Slot {
+  VkFence fence;
+  void    init() { MEMZERO(*this); }
+  void    release() {}
+};
+
+struct Compute_Pipeline_Wrapper : public Slot {
+  VkPipelineLayout                      pipeline_layout;
+  VkPipeline                            pipeline;
+  VkShaderModule                        cs_module;
+  InlineArray<VkDescriptorSetLayout, 8> set_layouts;
+  u32                                   push_constants_size;
+
+  void release(VkDevice device) {
+    ito(set_layouts.size) {
+      if (set_layouts[i] != VK_NULL_HANDLE)
+        vkDestroyDescriptorSetLayout(device, set_layouts[i], NULL);
+    }
+    set_layouts.release();
+    vkDestroyPipelineLayout(device, pipeline_layout, NULL);
+    vkDestroyPipeline(device, pipeline, NULL);
+    vkDestroyShaderModule(device, cs_module, NULL);
+    MEMZERO(*this);
+  }
+
+  void init(VkDevice     device, //
+            Shader_Info &cs_shader) {
+    MEMZERO(*this);
+    MEMZERO(set_layouts);
+    push_constants_size = 0;
+    VkPipelineShaderStageCreateInfo stages[1];
+    Shader_Reflection::Table<u32,
+                             Shader_Reflection::Table<u32, Shader_Descriptor>>
+        merged_set_table;
+    merged_set_table.init();
+    defer(merged_set_table.release());
+    {
+      cs_module = cs_shader.compile(device);
+      VkPipelineShaderStageCreateInfo stage;
+      MEMZERO(stage);
+      stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+      stage.stage  = VK_SHADER_STAGE_VERTEX_BIT;
+      stage.module = cs_module;
+      stage.pName  = "main";
+      stages[0]    = stage;
+      Shader_Reflection cs_reflection = reflect_shader(cs_shader);
+      push_constants_size =
+          MAX(cs_reflection.push_constants_size, push_constants_size);
+      cs_reflection.merge_into(merged_set_table);
+      defer(cs_reflection.release(device));
+    }
+    Shader_Reflection::create_layouts(device, merged_set_table, set_layouts);
+    {
+      VkPipelineLayoutCreateInfo pipe_layout_info;
+      MEMZERO(pipe_layout_info);
+      pipe_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+      pipe_layout_info.pSetLayouts    = &set_layouts[0];
+      pipe_layout_info.setLayoutCount = set_layouts.size;
+      VkPushConstantRange push_range;
+      push_range.offset     = 0;
+      push_range.stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
+      push_range.size       = push_constants_size;
+      ;
+      if (push_range.size > 0) {
+        pipe_layout_info.pPushConstantRanges    = &push_range;
+        pipe_layout_info.pushConstantRangeCount = 1;
+      }
+      VK_ASSERT_OK(vkCreatePipelineLayout(device, &pipe_layout_info, NULL,
+                                          &pipeline_layout));
+    }
+    {
+      VkComputePipelineCreateInfo info;
+      MEMZERO(info);
+      info.sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+      info.layout = pipeline_layout;
+      info.stage  = stages[0];
+      VK_ASSERT_OK(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &info,
+                                            NULL, &pipeline));
     }
   }
 };
@@ -1506,6 +1666,31 @@ struct Window {
       Resource_Array::init();
     }
   } pipelines;
+  struct Compute_Pipe_Array
+      : Resource_Array<Compute_Pipeline_Wrapper, Compute_Pipe_Array> {
+    static constexpr char const NAME[] = "Compute_Pipe_Array";
+    Window *                    wnd    = NULL;
+    void                        release_item(Compute_Pipeline_Wrapper &item) {
+      item.release(wnd->device);
+      MEMZERO(item);
+    }
+    void init(Window *wnd) {
+      this->wnd = wnd;
+      Resource_Array::init();
+    }
+  } compute_pipelines;
+  struct Fence_Array : Resource_Array<Fence, struct Fence_Array> {
+    static constexpr char const NAME[] = "Compute_Pipe_Array";
+    Window *                    wnd    = NULL;
+    void                        release_item(Fence &item) {
+      vkDestroyFence(wnd->device, item.fence, NULL);
+      MEMZERO(item);
+    }
+    void init(Window *wnd) {
+      this->wnd = wnd;
+      Resource_Array::init();
+    }
+  } fences;
   struct Sampler_Array : Resource_Array<Sampler, Sampler_Array> {
     static constexpr char const NAME[] = "Sampler_Array";
     Window *                    wnd    = NULL;
@@ -1522,12 +1707,14 @@ struct Window {
   Hash_Table<string_ref, ID>              named_render_passes;
   Hash_Table<string_ref, Resource_ID>     named_resources;
   Hash_Table<Graphics_Pipeline_State, ID> pipeline_cache;
+  Hash_Table<ID, ID>                      compute_pipeline_cache;
   Hash_Table<u64, ID>                     shader_cache;
 
   void init_ds() {
     named_resources.init();
     shader_cache.init();
     pipeline_cache.init();
+    compute_pipeline_cache.init();
     mem_chunks.init();
     named_render_passes.init();
     buffers.init(this);
@@ -1538,12 +1725,15 @@ struct Window {
     image_views.init(this);
     render_passes.init(this);
     pipelines.init(this);
+    compute_pipelines.init(this);
+    fences.init(this);
   }
 
   void release() {
     named_resources.release();
     shader_cache.release();
     pipeline_cache.release();
+    compute_pipeline_cache.release();
     buffers.release();
     samplers.release();
     images.release();
@@ -1553,6 +1743,8 @@ struct Window {
     image_views.release();
     render_passes.release();
     pipelines.release();
+    compute_pipelines.release();
+    fences.release();
     ito(mem_chunks.size) mem_chunks[i].release(device);
     mem_chunks.release();
     vkDeviceWaitIdle(device);
@@ -1704,6 +1896,18 @@ struct Window {
     return module;
   }
 
+  Resource_ID create_fence(bool signaled) {
+    VkFenceCreateInfo info;
+    MEMZERO(info);
+    info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    if (signaled) info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    Fence fence;
+    fence.init();
+    VK_ASSERT_OK(vkCreateFence(device, &info, NULL, &fence.fence));
+    ID fence_id = fences.push(fence);
+    return {fence_id, (u32)Resource_Type::FENCE};
+  }
+
   Resource_ID create_image_view(ID res_id, u32 base_level, u32 levels,
                                 u32 base_layer, u32 layers) {
     Image &   img = images[res_id];
@@ -1777,8 +1981,12 @@ struct Window {
                      : VK_IMAGE_TYPE_3D;
       cinfo.format        = format;
       cinfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-      cinfo.tiling        = VK_IMAGE_TILING_OPTIMAL;
-      cinfo.usage         = to_vk_image_usage_bits(usage_flags);
+      /*if ((usage_flags & (u32)rd::Image_Usage_Bits::USAGE_RT) != 0 ||
+          (usage_flags & (u32)rd::Image_Usage_Bits::USAGE_DT) != 0)*/
+      cinfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+      /* else
+         cinfo.tiling = VK_IMAGE_TILING_LINEAR;*/
+      cinfo.usage = to_vk_image_usage_bits(usage_flags);
       VK_ASSERT_OK(vkCreateImage(device, &cinfo, NULL, &image));
     }
     VkMemoryRequirements reqs;
@@ -1821,6 +2029,20 @@ struct Window {
     return res_id;
   }
 
+  void assign_name(Resource_ID res_id, string_ref name) {
+    if (res_id.type == (u32)Resource_Type::IMAGE) {
+      Image &img = images[res_id.id];
+      if (img.name.nonempty()) {
+        named_resources.remove(img.name.ref());
+      }
+      img.name.release();
+      img.name = make_string(name);
+      named_resources.insert(img.name.ref(), res_id);
+    } else {
+      TRAP;
+    }
+  }
+
   void release_resource(Resource_ID res_id) {
     if (res_id.type == (u32)Resource_Type::PASS) {
       Render_Pass &pass = render_passes[res_id.id];
@@ -1849,6 +2071,8 @@ struct Window {
       ito(img.views.size) image_views.remove(img.views[i], 3);
     } else if (res_id.type == (u32)Resource_Type::SHADER) {
       shaders.remove(res_id.id, 3);
+    } else if (res_id.type == (u32)Resource_Type::FENCE) {
+      fences.remove(res_id.id, 3);
     } else {
       TRAP;
     }
@@ -2169,6 +2393,8 @@ struct Window {
     image_views.tick();
     render_passes.tick();
     pipelines.tick();
+    compute_pipelines.tick();
+    fences.tick();
     images.for_each([this](Image &image) {
       if (!image.is_referenced()) images.remove(image.get_id(), 3);
     });
@@ -2270,10 +2496,11 @@ u64 hash_of(Resource_Path const &path) {
 }
 
 class Vk_Ctx : public rd::Imm_Ctx {
+  rd::Pass_t                              type;
   Window *                                wnd;
   Graphics_Pipeline_State                 graphics_state;
+  ID                                      cs;
   VkCommandBuffer                         cmd;
-  VkFence                                 finish_fence;
   VkSemaphore                             finish_sem;
   InlineArray<Graphics_Pipeline_State, 8> stack;
   ID                                      cur_pass;
@@ -2334,7 +2561,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
     VkIndexType  indexType;
   };
 
-  enum class Cmd_t : u8 { DRAW = 0, PUSH_CONSTANTS };
+  enum class Cmd_t : u8 { DRAW = 0, PUSH_CONSTANTS, DISPATCH, BARRIER };
 
   struct Deferred_Push_Constants {
     u8 push_constants[128];
@@ -2363,6 +2590,27 @@ class Vk_Ctx : public rd::Imm_Ctx {
     };
     void init() { memset(this, 0, sizeof(*this)); }
     void release() {}
+  };
+
+  struct Deferred_Dispatch {
+    ID                              pso;
+    InlineArray<VkDescriptorSet, 8> sets;
+    union {
+      struct {
+        u32 x, y, z;
+      } dispatch;
+    };
+    void init() { memset(this, 0, sizeof(*this)); }
+    void release() {}
+  };
+
+  struct Deferred_Barrier {
+    bool             image;
+    ID               res_id;
+    VkImageLayout    new_layout;
+    VkAccessFlagBits new_access_flags;
+    void             init() { memset(this, 0, sizeof(*this)); }
+    void             release() {}
   };
 
   struct CPU_Command_Buffer {
@@ -2396,8 +2644,9 @@ class Vk_Ctx : public rd::Imm_Ctx {
   };
   CPU_Command_Buffer cpu_cmd;
   Deferred_Draw      current_draw;
+  Deferred_Dispatch  current_dispatch;
 
-  void flush_draws() {
+  void flush_render_pass() {
     Render_Pass &pass = wnd->render_passes[cur_pass];
     ito(pass.rts.size) {
       Image &img = wnd->images[pass.rts[i]];
@@ -2434,14 +2683,15 @@ class Vk_Ctx : public rd::Imm_Ctx {
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 gw.pipeline_layout, 0, dd.sets.size,
                                 &dd.sets[0], 0, NULL);
-        if (gw.push_constants_size != 0) jto(dd.vbos.size) {
-            vkCmdBindVertexBuffers(cmd, j, 1, &dd.vbos[j].buffer,
-                                   &dd.vbos[j].offset);
-          }
+        jto(dd.vbos.size) {
+          vkCmdBindVertexBuffers(cmd, j, 1, &dd.vbos[j].buffer,
+                                 &dd.vbos[j].offset);
+        }
         if (pc_dirty) {
           vkCmdPushConstants(cmd, gw.pipeline_layout,
                              VK_SHADER_STAGE_ALL_GRAPHICS, 0,
                              gw.push_constants_size, pc.push_constants);
+          pc_dirty = false;
         }
         if (dd.indexed) {
           vkCmdBindIndexBuffer(cmd, dd.ibo.buffer, dd.ibo.offset,
@@ -2462,6 +2712,37 @@ class Vk_Ctx : public rd::Imm_Ctx {
     vkCmdEndRenderPass(cmd);
   }
 
+  void flush_compute_pass() {
+    Deferred_Push_Constants pc;
+    bool                    pc_dirty = false;
+    while (cpu_cmd.has_data()) {
+      Cmd_t type = cpu_cmd.read_cmd_type();
+      if (type == Cmd_t::PUSH_CONSTANTS) {
+        cpu_cmd.read(&pc);
+        pc_dirty = true;
+      } else if (type == Cmd_t::DISPATCH) {
+        Deferred_Dispatch dd;
+        cpu_cmd.read(&dd);
+        Compute_Pipeline_Wrapper &gw = wnd->compute_pipelines[dd.pso];
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gw.pipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                gw.pipeline_layout, 0, dd.sets.size,
+                                &dd.sets[0], 0, NULL);
+
+        if (pc_dirty) {
+          vkCmdPushConstants(cmd, gw.pipeline_layout,
+                             VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                             gw.push_constants_size, pc.push_constants);
+          pc_dirty = false;
+        }
+        vkCmdDispatch(cmd, dd.dispatch.x, dd.dispatch.y, dd.dispatch.z);
+      } else {
+        UNIMPLEMENTED;
+      }
+    }
+    cpu_cmd.reset();
+  }
+
   Graphics_Pipeline_Wrapper &get_or_bake_graphics_pipeline() {
     if (!wnd->pipeline_cache.contains(graphics_state)) {
       Graphics_Pipeline_Wrapper gw;
@@ -2480,13 +2761,27 @@ class Vk_Ctx : public rd::Imm_Ctx {
     return wnd->pipelines[pipe_id];
   }
 
+  Compute_Pipeline_Wrapper &get_or_bake_compute_pipeline() {
+    if (!wnd->compute_pipeline_cache.contains(cs)) {
+      Compute_Pipeline_Wrapper gw;
+      ASSERT_DEBUG(!cs.is_null());
+      Shader_Info &cs_info = wnd->shaders[cs];
+      gw.init(wnd->device, cs_info);
+      ID pipe_id = wnd->compute_pipelines.push(gw);
+      wnd->compute_pipeline_cache.insert(cs, pipe_id);
+    }
+    ID pipe_id = wnd->compute_pipeline_cache.get(cs);
+    ASSERT_DEBUG(!pipe_id.is_null());
+    return wnd->compute_pipelines[pipe_id];
+  }
+
   void update_descriptor_set(u32 index, VkDescriptorSet set) {
     deferred_bindings.iter_pairs([&](Resource_Path const &   path,
                                      Resource_Binding const &rb) {
       if (rb.set != index) return;
       if (rb.type == Binding_t::UNIFORM_BUFFER) {
         Buffer &buffer = wnd->buffers[rb.uniform_buffer.buf_id];
-        buffer.barrier(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        buffer.barrier(cmd, VK_ACCESS_SHADER_READ_BIT);
         VkDescriptorBufferInfo binfo;
         MEMZERO(binfo);
         binfo.buffer = buffer.buffer;
@@ -2497,6 +2792,25 @@ class Vk_Ctx : public rd::Imm_Ctx {
         wset.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         wset.descriptorCount = 1;
         wset.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        wset.dstArrayElement = rb.element;
+        wset.dstBinding      = rb.binding;
+        wset.dstSet          = set;
+        wset.pBufferInfo     = &binfo;
+        vkUpdateDescriptorSets(wnd->device, 1, &wset, 0, NULL);
+      } else if (rb.type == Binding_t::STORAGE_BUFFER) {
+        Buffer &buffer = wnd->buffers[rb.uniform_buffer.buf_id];
+        buffer.barrier(cmd,
+                       VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+        VkDescriptorBufferInfo binfo;
+        MEMZERO(binfo);
+        binfo.buffer = buffer.buffer;
+        binfo.offset = rb.storage_buffer.offset;
+        binfo.range  = rb.storage_buffer.size;
+        VkWriteDescriptorSet wset;
+        MEMZERO(wset);
+        wset.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wset.descriptorCount = 1;
+        wset.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         wset.dstArrayElement = rb.element;
         wset.dstBinding      = rb.binding;
         wset.dstSet          = set;
@@ -2521,6 +2835,30 @@ class Vk_Ctx : public rd::Imm_Ctx {
         wset.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         wset.descriptorCount = 1;
         wset.descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        wset.dstArrayElement = rb.element;
+        wset.dstBinding      = rb.binding;
+        wset.dstSet          = set;
+        wset.pImageInfo      = &binfo;
+        vkUpdateDescriptorSets(wnd->device, 1, &wset, 0, NULL);
+      } else if (rb.type == Binding_t::STORAGE_IMAGE) {
+        VkDescriptorImageInfo binfo;
+        MEMZERO(binfo);
+        Image &img = wnd->images[rb.image.image_id];
+        img.barrier(cmd, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL);
+        ID view_id =
+            wnd->create_image_view(img.id, rb.image.level, rb.image.num_levels,
+                                   rb.image.layer, rb.image.num_layers)
+                .id;
+        ImageView &view   = wnd->image_views[view_id];
+        binfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        binfo.imageView   = view.view;
+        binfo.sampler     = VK_NULL_HANDLE;
+        VkWriteDescriptorSet wset;
+        MEMZERO(wset);
+        wset.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wset.descriptorCount = 1;
+        wset.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         wset.dstArrayElement = rb.element;
         wset.dstBinding      = rb.binding;
         wset.dstSet          = set;
@@ -2552,14 +2890,12 @@ class Vk_Ctx : public rd::Imm_Ctx {
   public:
   void reset() {
     vkResetCommandBuffer(cmd, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
-    vkResetFences(wnd->device, 1, &finish_fence);
     this->cur_pass = {0};
     clear_state();
   }
   VkSemaphore get_on_finish() { return finish_sem; }
   void        begin(ID pass_id) {
-    this->cur_pass                = pass_id;
-    Render_Pass &            pass = wnd->render_passes[pass_id];
+    this->cur_pass = pass_id;
     VkCommandBufferBeginInfo begin_info;
     MEMZERO(begin_info);
     begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -2568,7 +2904,8 @@ class Vk_Ctx : public rd::Imm_Ctx {
         cmd, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT));
     VK_ASSERT_OK(vkBeginCommandBuffer(cmd, &begin_info));
   }
-  void init(Window *wnd) {
+  void init(rd::Pass_t type, Window *wnd) {
+    this->type      = type;
     set_dirty_flags = 0;
     memset(set_cache, 0, sizeof(set_cache));
     deferred_bindings.init();
@@ -2585,13 +2922,6 @@ class Vk_Ctx : public rd::Imm_Ctx {
 
     vkAllocateCommandBuffers(wnd->device, &info, &cmd);
     {
-      VkFenceCreateInfo info;
-      MEMZERO(info);
-      info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-      info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-      VK_ASSERT_OK(vkCreateFence(wnd->device, &info, NULL, &finish_fence));
-    }
-    {
       VkSemaphoreCreateInfo info;
       MEMZERO(info);
       info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
@@ -2600,15 +2930,15 @@ class Vk_Ctx : public rd::Imm_Ctx {
       VK_ASSERT_OK(vkCreateSemaphore(wnd->device, &info, 0, &finish_sem));
     }
   }
-  bool is_fininshed() {
-    VkResult wait_res =
-        vkWaitForFences(wnd->device, 1, &finish_fence, VK_TRUE, 0);
-    ASSERT_DEBUG(wait_res == VK_SUCCESS || wait_res == VK_TIMEOUT);
-    return wait_res == VK_SUCCESS;
-  }
-  void submit(VkSemaphore *wait_sem) {
-    flush_draws();
-    vkResetFences(wnd->device, 1, &finish_fence);
+
+  void submit(VkFence finish_fence, VkSemaphore *wait_sem) {
+    if (type == rd::Pass_t::COMPUTE)
+      flush_compute_pass();
+    else if (type == rd::Pass_t::RENDER)
+      flush_render_pass();
+    else {
+      UNIMPLEMENTED;
+    }
     vkEndCommandBuffer(cmd);
     VkPipelineStageFlags stage_flags[]{VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                                        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT};
@@ -2629,13 +2959,13 @@ class Vk_Ctx : public rd::Imm_Ctx {
   void release() {
     deferred_bindings.release();
     stack.release();
-    vkDestroyFence(wnd->device, finish_fence, NULL);
     vkDestroySemaphore(wnd->device, finish_sem, NULL);
     vkFreeCommandBuffers(wnd->device, wnd->cmd_pool, 1, &cmd);
   }
   // CTX
   void set_viewport(float x, float y, float width, float height, float mindepth,
                     float maxdepth) override {
+    ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
     VkViewport viewports[1];
     viewports[0].x        = x;
     viewports[0].y        = y;
@@ -2646,6 +2976,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
     vkCmdSetViewport(cmd, 0, 1, viewports);
   }
   void set_scissor(u32 x, u32 y, u32 width, u32 height) override {
+    ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
     VkRect2D scissors[1];
     scissors[0].offset.x      = x;
     scissors[0].offset.y      = y;
@@ -2660,15 +2991,26 @@ class Vk_Ctx : public rd::Imm_Ctx {
     deferred_bindings.reset();
     cpu_cmd.reset();
     current_draw.release();
+    current_dispatch.release();
     current_draw.init();
+    current_dispatch.init();
   }
   void push_state() override { stack.push(graphics_state); }
   void pop_state() override { graphics_state = stack.pop(); }
+  bool get_fence_state(Resource_ID fence_id) override {
+    Fence &  fence = wnd->fences[fence_id.id];
+    VkResult wait_res =
+        vkWaitForFences(wnd->device, 1, &fence.fence, VK_TRUE, 0);
+    ASSERT_DEBUG(wait_res == VK_SUCCESS || wait_res == VK_TIMEOUT);
+    return wait_res == VK_SUCCESS;
+  }
   void IA_set_topology(rd::Primitive topology) override {
+    ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
     graphics_state.topology = to_vk(topology);
   }
   void IA_set_index_buffer(Resource_ID res_id, u32 offset,
                            rd::Index_t format) override {
+    ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
     if (res_id.is_null()) {
       UNIMPLEMENTED;
     }
@@ -2686,6 +3028,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
   }
   void IA_set_vertex_buffer(u32 index, Resource_ID res_id, size_t offset,
                             size_t stride, rd::Input_Rate rate) override {
+    ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
     if (res_id.is_null()) {
       UNIMPLEMENTED;
     }
@@ -2705,6 +3048,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
     graphics_state.bindings[index].stride = stride;
   }
   void IA_set_attribute(rd::Attribute_Info const &info) override {
+    ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
     graphics_state.num_attributes =
         MAX(graphics_state.num_attributes, info.location + 1);
     graphics_state.attributes[info.location].binding  = info.binding;
@@ -2712,19 +3056,41 @@ class Vk_Ctx : public rd::Imm_Ctx {
     graphics_state.attributes[info.location].location = info.location;
     graphics_state.attributes[info.location].offset   = info.offset;
   }
-  void VS_set_shader(Resource_ID id) override { graphics_state.vs = id.id; }
-  void PS_set_shader(Resource_ID id) override { graphics_state.ps = id.id; }
-  void CS_set_shader(Resource_ID id) override { UNIMPLEMENTED; }
+  void VS_set_shader(Resource_ID id) override {
+    ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
+    if (graphics_state.vs != id.id) {
+      memset(set_cache, 0, sizeof(set_cache));
+    }
+    graphics_state.vs = id.id;
+  }
+  void PS_set_shader(Resource_ID id) override {
+    ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
+    if (graphics_state.ps != id.id) {
+      memset(set_cache, 0, sizeof(set_cache));
+    }
+    graphics_state.ps = id.id;
+  }
+  void CS_set_shader(Resource_ID id) override {
+    ASSERT_ALWAYS(type == rd::Pass_t::COMPUTE);
+    if (cs != id.id) {
+      memset(set_cache, 0, sizeof(set_cache));
+    }
+    cs = id.id;
+  }
   void RS_set_state(rd::RS_State const &rs_state) override {
+    ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
     graphics_state.rs_state = rs_state;
   }
   void DS_set_state(rd::DS_State const &ds_state) override {
+    ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
     graphics_state.ds_state = ds_state;
   }
   void MS_set_state(rd::MS_State const &ms_state) override {
+    ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
     graphics_state.ms_state = ms_state;
   }
   void OM_set_blend_state(u32 rt_index, rd::Blend_State const &bl) override {
+    ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
     graphics_state.num_rts = MAX(graphics_state.num_rts, rt_index + 1);
     VkPipelineColorBlendAttachmentState bs;
     MEMZERO(bs);
@@ -2751,19 +3117,6 @@ class Vk_Ctx : public rd::Imm_Ctx {
   void insert_binding(Resource_Binding rb) {
     set_dirty_flags |= (1 << rb.set);
     deferred_bindings.insert({rb.set, rb.binding, rb.element}, rb);
-    /*if (deferred_bindings.contains(set)) {
-      Table<u32, Resource_Binding> &bindings = deferred_bindings.get_ref(set);
-      if (bindings.contains(binding)) {
-        bindings.insert(binding, rb);
-      } else {
-        bindings.insert(binding, rb);
-      }
-    } else {
-      Table<u32, Resource_Binding> bindings;
-      bindings.init();
-      bindings.insert(binding, rb);
-      deferred_bindings.insert(set, bindings);
-    }*/
   }
 
   void bind_uniform_buffer(u32 set, u32 binding, Resource_ID buf_id,
@@ -2780,8 +3133,17 @@ class Vk_Ctx : public rd::Imm_Ctx {
     insert_binding(rb);
   }
   void bind_storage_buffer(u32 set, u32 binding, Resource_ID buf_id,
-                           size_t offset) override {
-    UNIMPLEMENTED;
+                           size_t offset, size_t size) override {
+    Resource_Binding rb;
+    MEMZERO(rb);
+    rb.type                  = Binding_t::STORAGE_BUFFER;
+    rb.set                   = set;
+    rb.binding               = binding;
+    rb.element               = 0;
+    rb.storage_buffer.buf_id = buf_id.id;
+    rb.storage_buffer.offset = offset;
+    rb.storage_buffer.size   = size;
+    insert_binding(rb);
   }
   void bind_image(u32 set, u32 binding, u32 index, Resource_ID image_id,
                   u32 layer, u32 num_layers, u32 level,
@@ -2812,7 +3174,18 @@ class Vk_Ctx : public rd::Imm_Ctx {
   void bind_rw_image(u32 set, u32 binding, u32 index, Resource_ID image_id,
                      u32 layer, u32 num_layers, u32 level,
                      u32 num_levels) override {
-    UNIMPLEMENTED;
+    Resource_Binding rb;
+    MEMZERO(rb);
+    rb.type             = Binding_t::STORAGE_IMAGE;
+    rb.set              = set;
+    rb.binding          = binding;
+    rb.element          = index;
+    rb.image.image_id   = image_id.id;
+    rb.image.layer      = layer;
+    rb.image.level      = level;
+    rb.image.num_layers = num_layers;
+    rb.image.num_levels = num_levels;
+    insert_binding(rb);
   }
   void *map_buffer(Resource_ID res_id) override {
     return wnd->map_buffer(res_id);
@@ -2824,19 +3197,33 @@ class Vk_Ctx : public rd::Imm_Ctx {
     cpu_cmd.write(Cmd_t::PUSH_CONSTANTS, &pc);
   }
   void bake_descriptor_sets() {
-    Graphics_Pipeline_Wrapper &gw = get_or_bake_graphics_pipeline();
-    current_draw.sets.resize(gw.set_layouts.size);
-    ito(gw.set_layouts.size) {
-      if (gw.set_layouts[i] == VK_NULL_HANDLE) continue;
+    VkDescriptorSet *      set_dst     = NULL;
+    VkDescriptorSetLayout *set_layouts = NULL;
+    u32                    num_sets    = 0;
+    if (type == rd::Pass_t::RENDER) {
+      Graphics_Pipeline_Wrapper &gw = get_or_bake_graphics_pipeline();
+      current_draw.sets.resize(gw.set_layouts.size);
+      num_sets    = gw.set_layouts.size;
+      set_layouts = &gw.set_layouts[0];
+      set_dst     = &current_draw.sets[0];
+    } else {
+      Compute_Pipeline_Wrapper &gw = get_or_bake_compute_pipeline();
+      current_dispatch.sets.resize(gw.set_layouts.size);
+      num_sets    = gw.set_layouts.size;
+      set_layouts = &gw.set_layouts[0];
+      set_dst     = &current_dispatch.sets[0];
+    }
+    ito(num_sets) {
+      if (set_layouts[i] == VK_NULL_HANDLE) continue;
       if ((set_dirty_flags & (1 << i)) == 0 && set_cache[i] != VK_NULL_HANDLE) {
-        current_draw.sets[i] = set_cache[i];
+        set_dst[i] = set_cache[i];
       } else {
         VkDescriptorSet set =
-            wnd->get_descriptor_pool().allocate(gw.set_layouts[i]);
+            wnd->get_descriptor_pool().allocate(set_layouts[i]);
         update_descriptor_set(i, set);
         set_dirty_flags &= ~(1 << i);
         set_cache[i] = set;
-        current_draw.sets[i] = set;
+        set_dst[i]   = set;
       }
     }
   }
@@ -2870,6 +3257,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
   }
   void draw_indexed(u32 index_count, u32 instance_count, u32 first_index,
                     u32 first_instance, i32 vertex_offset) override {
+    ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
     bake_descriptor_sets();
     current_draw.pso                      = get_or_bake_graphics_pipeline().id;
     current_draw.indexed                  = true;
@@ -2882,6 +3270,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
   }
   void draw(u32 vertex_count, u32 instance_count, u32 first_vertex,
             u32 first_instance) override {
+    ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
     bake_descriptor_sets();
     current_draw.pso                 = get_or_bake_graphics_pipeline().id;
     current_draw.indexed             = false;
@@ -2892,12 +3281,18 @@ class Vk_Ctx : public rd::Imm_Ctx {
     cpu_cmd.write(Cmd_t::DRAW, &current_draw);
   }
   void dispatch(u32 dim_x, u32 dim_y, u32 dim_z) override {
-    UNIMPLEMENTED; /*
-      vkCmdDispatch(cmd, dim_x, dim_y, dim_z);*/
+    ASSERT_ALWAYS(type == rd::Pass_t::COMPUTE);
+    bake_descriptor_sets();
+    current_dispatch.pso        = get_or_bake_compute_pipeline().id;
+    current_dispatch.dispatch.x = dim_x;
+    current_dispatch.dispatch.y = dim_y;
+    current_dispatch.dispatch.z = dim_z;
+    cpu_cmd.write(Cmd_t::DISPATCH, &current_dispatch);
   }
 };
 
 class VkResource_Manager : public rd::IResource_Manager {
+  rd::Pass_t type;
   Window *   wnd;
   ID         cached_pass;
   rd::IPass *pPass;
@@ -2940,18 +3335,23 @@ class VkResource_Manager : public rd::IResource_Manager {
   InlineArray<Get_Or_Create_RT, 0x10> cached_rts;
   Get_Or_Create_RT                    cached_depth_target;
 
+  Resource_ID on_finish_fence;
+
   public:
-  void init(Window *wnd, rd::IPass *pPass) {
+  void init(rd::Pass_t type, Window *wnd, rd::IPass *pPass) {
+    this->type  = type;
     string_pool = Pool<char>::create(1 << 10);
     this->wnd   = wnd;
     cached_pass = {0};
     rts.init();
+    on_finish_fence = wnd->create_fence(true);
     cached_rts.init();
     depth_target.reset();
     cached_depth_target.reset();
     this->pPass = pPass;
   }
   void release() {
+    wnd->release_resource(on_finish_fence);
     string_pool.release();
     if (cached_pass.is_null() == false)
       wnd->render_passes.remove(cached_pass, 3);
@@ -2961,9 +3361,25 @@ class VkResource_Manager : public rd::IResource_Manager {
     rts.init();
     depth_target.reset();
     string_pool.reset();
+    {
+      Fence &fence = wnd->fences[on_finish_fence.id];
+      vkResetFences(wnd->device, 1, &fence.fence);
+    }
   }
-  void on_pass_end() {}
-  ID   get_pass() {
+  void    on_pass_end() {}
+  VkFence get_on_finish_fence() {
+    Fence &fence = wnd->fences[on_finish_fence.id];
+    return fence.fence;
+  }
+  bool is_fininshed() {
+    Fence &  fence = wnd->fences[on_finish_fence.id];
+    VkResult wait_res =
+        vkWaitForFences(wnd->device, 1, &fence.fence, VK_TRUE, 0);
+    ASSERT_DEBUG(wait_res == VK_SUCCESS || wait_res == VK_TIMEOUT);
+    return wait_res == VK_SUCCESS;
+  }
+  ID get_pass() {
+    if (type != rd::Pass_t::RENDER) return {0};
     bool invalidate = cached_pass.is_null();
     invalidate      = invalidate || depth_target != cached_depth_target;
     invalidate      = invalidate || rts.size != cached_rts.size;
@@ -3084,7 +3500,7 @@ class VkResource_Manager : public rd::IResource_Manager {
         VkAttachmentReference color_attachment;
         MEMZERO(color_attachment);
         color_attachment.attachment = i;
-        color_attachment.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        color_attachment.layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         refs.push(color_attachment);
 
         attachments.push(attachment);
@@ -3143,10 +3559,10 @@ class VkResource_Manager : public rd::IResource_Manager {
 
       VkSubpassDependency dependency;
       MEMZERO(dependency);
-      dependency.srcSubpass   = VK_SUBPASS_EXTERNAL;
-      dependency.dstSubpass   = 0;
-      dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-      dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+      dependency.srcSubpass    = VK_SUBPASS_EXTERNAL;
+      dependency.dstSubpass    = 0;
+      dependency.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+      dependency.dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
       dependency.srcAccessMask = 0;
       dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 
@@ -3238,6 +3654,13 @@ class VkResource_Manager : public rd::IResource_Manager {
     wnd->shader_cache.insert(shader_hash, shid);
     return {shid, (u32)Resource_Type::SHADER};
   }
+  Resource_ID get_fence(rd::Fence_Position position) override {
+    if (position == rd::Fence_Position::PASS_FINISED) {
+      return on_finish_fence;
+    } else {
+      UNIMPLEMENTED;
+    }
+  }
   Resource_ID create_sampler(rd::Sampler_Create_Info const &info) override {
     Sampler sm;
     sm.create_info = info;
@@ -3268,6 +3691,7 @@ class VkResource_Manager : public rd::IResource_Manager {
   void add_render_target(string_ref name, rd::Image_Create_Info const &info,
                          u32 layer, u32 level,
                          rd::Clear_Color const &cl) override {
+    ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
     Get_Or_Create_RT gorc;
     gorc.reset();
     gorc.is_set      = true;
@@ -3281,6 +3705,7 @@ class VkResource_Manager : public rd::IResource_Manager {
   }
   void add_render_target(Resource_ID id, u32 layer, u32 level,
                          rd::Clear_Color const &cl) override {
+    ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
     Get_Or_Create_RT gorc;
     ASSERT_DEBUG(id.type == (u32)Resource_Type::IMAGE);
     gorc.reset();
@@ -3295,6 +3720,7 @@ class VkResource_Manager : public rd::IResource_Manager {
   void add_depth_target(string_ref name, rd::Image_Create_Info const &info,
                         u32 layer, u32 level,
                         rd::Clear_Depth const &cl) override {
+    ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
     Get_Or_Create_RT gorc;
     gorc.reset();
     gorc.is_set      = true;
@@ -3308,6 +3734,7 @@ class VkResource_Manager : public rd::IResource_Manager {
   }
   void add_depth_target(Resource_ID id, u32 layer, u32 level,
                         rd::Clear_Depth const &cl) override {
+    ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
     Get_Or_Create_RT gorc;
     ASSERT_DEBUG(id.type == (u32)Resource_Type::IMAGE);
     gorc.reset();
@@ -3326,7 +3753,7 @@ class VkResource_Manager : public rd::IResource_Manager {
     return Resource_ID{0, 0};
   }
   void assign_name(Resource_ID res_id, string_ref name) override {
-    UNIMPLEMENTED;
+    wnd->assign_name(res_id, name);
   }
   Resource_ID get_swapchain_image() override {
     return {wnd->sc_images[wnd->image_index], (u32)Resource_Type::IMAGE};
@@ -3342,11 +3769,24 @@ class VkResource_Manager : public rd::IResource_Manager {
     info.levels = img.info.mipLevels;
     return info;
   }
+  rd::Image_Info get_image_info(Resource_ID res_id) override {
+    rd::Image_Info info;
+    MEMZERO(info);
+    Image &img  = wnd->images[res_id.id];
+    info.format = from_vk(img.info.format);
+    info.height = img.info.extent.height;
+    info.depth  = img.info.extent.depth;
+    info.width  = img.info.extent.width;
+    info.layers = img.info.arrayLayers;
+    info.levels = img.info.mipLevels;
+    return info;
+  }
 };
 
 class VkPass_Mng : public rd::Pass_Mng {
   Window *wnd;
   struct Pass_Wrapper {
+    rd::Pass_t          type;
     rd::IPass *         pass;
     VkResource_Manager *rsmng[3];
     u32                 cur_ctx;
@@ -3358,13 +3798,15 @@ class VkPass_Mng : public rd::Pass_Mng {
       ito(3) rsmng[i]->release();
     }
   };
-  Array<Pass_Wrapper> passes;
+  Array<Pass_Wrapper>  passes;
+  rd::IEvent_Consumer *consumer;
 
   public:
   VkPass_Mng() {
     wnd = new Window();
     wnd->init();
     passes.init();
+    consumer = NULL;
   }
   void release() override {
     wnd->release();
@@ -3379,6 +3821,9 @@ class VkPass_Mng : public rd::Pass_Mng {
     while (true) {
       SDL_Event event;
       while (SDL_PollEvent(&event)) {
+        if (consumer != NULL) {
+          consumer->consume(&event);
+        }
         if (event.type == SDL_QUIT) {
           exit(0);
         }
@@ -3394,7 +3839,7 @@ class VkPass_Mng : public rd::Pass_Mng {
       ito(passes.size) {
         passes[i].cur_ctx = (passes[i].cur_ctx + 1) % 3;
         while (true) {
-          if (passes[i].ctx[passes[i].cur_ctx]->is_fininshed() == false) {
+          if (passes[i].rsmng[passes[i].cur_ctx]->is_fininshed() == false) {
             passes[i].cur_ctx = (passes[i].cur_ctx + 1) % 3;
             continue;
           }
@@ -3408,9 +3853,11 @@ class VkPass_Mng : public rd::Pass_Mng {
         passes[i].pass->exec(passes[i].ctx[cur_ctx]);
         if (last_ctx != NULL) {
           VkSemaphore sem = last_ctx->get_on_finish();
-          passes[i].ctx[cur_ctx]->submit(&sem);
+          passes[i].ctx[cur_ctx]->submit(
+              passes[i].rsmng[cur_ctx]->get_on_finish_fence(), &sem);
         } else
-          passes[i].ctx[cur_ctx]->submit(NULL);
+          passes[i].ctx[cur_ctx]->submit(
+              passes[i].rsmng[cur_ctx]->get_on_finish_fence(), NULL);
         last_ctx = passes[i].ctx[cur_ctx];
         passes[i].pass->on_end(passes[i].rsmng[cur_ctx]);
         passes[i].rsmng[cur_ctx]->on_pass_end();
@@ -3422,19 +3869,23 @@ class VkPass_Mng : public rd::Pass_Mng {
         wnd->end_frame(NULL);
     }
   }
-  void add_render_pass(rd::IPass *pass) override {
+  void add_pass(rd::Pass_t type, rd::IPass *pass) override {
     Pass_Wrapper pw;
+    pw.type    = type;
     pw.pass    = pass;
     pw.cur_ctx = 0;
     ito(3) {
       pw.ctx[i] = new Vk_Ctx();
-      pw.ctx[i]->init(wnd);
+      pw.ctx[i]->init(type, wnd);
     }
     ito(3) {
       pw.rsmng[i] = new VkResource_Manager();
-      pw.rsmng[i]->init(wnd, pass);
+      pw.rsmng[i]->init(type, wnd, pass);
     }
     passes.push(pw);
+  }
+  void set_event_consumer(rd::IEvent_Consumer *consumer) override {
+    this->consumer = consumer;
   }
 };
 

@@ -23,6 +23,12 @@ struct Resource_ID {
 
 static_assert(sizeof(Resource_ID) == 8, "blimey!");
 
+static inline u64 hash_of(ID id) { return hash_of(id._id); }
+
+static inline u64 hash_of(Resource_ID res) {
+  return hash_of(res.id._id) ^ hash_of(res.type);
+}
+
 namespace rd {
 enum class Impl_t { VULKAN, Null };
 enum class Cmp { LT, LE, GT, GE, EQ };
@@ -95,6 +101,11 @@ struct Binding {
 struct Image2D_Info {
   Format format;
   u32    width, height, levels, layers;
+};
+
+struct Image_Info {
+  Format format;
+  u32    width, height, depth, levels, layers;
 };
 
 enum class Filter {
@@ -224,6 +235,7 @@ class Imm_Ctx {
   virtual void clear_state()                                           = 0;
   virtual void push_state()                                            = 0;
   virtual void pop_state()                                             = 0;
+  virtual bool get_fence_state(Resource_ID fence_id)                   = 0;
   virtual void IA_set_topology(Primitive topology)                     = 0;
   virtual void IA_set_index_buffer(Resource_ID id, u32 offset,
                                    Index_t format)                     = 0;
@@ -243,7 +255,7 @@ class Imm_Ctx {
                                    size_t offset, size_t size)            = 0;
   virtual void bind_sampler(u32 set, u32 binding, Resource_ID sampler_id) = 0;
   virtual void bind_storage_buffer(u32 set, u32 binding, Resource_ID buf_id,
-                                   size_t offset)                         = 0;
+                                   size_t offset, size_t size)            = 0;
   virtual void bind_image(u32 set, u32 binding, u32 index, Resource_ID image_id,
                           u32 layer, u32 num_layers, u32 level,
                           u32 num_levels)                                 = 0;
@@ -276,6 +288,8 @@ struct Clear_Depth {
   bool  clear;
 };
 
+enum class Fence_Position { PASS_FINISED };
+
 class IResource_Manager {
   public:
   virtual Resource_ID create_image(Image_Create_Info info)              = 0;
@@ -298,8 +312,12 @@ class IResource_Manager {
   virtual Resource_ID  get_resource(string_ref res_name)                = 0;
   virtual void         assign_name(Resource_ID res_id, string_ref name) = 0;
   virtual Resource_ID  get_swapchain_image()                            = 0;
+  virtual Resource_ID  get_fence(Fence_Position position)               = 0;
   virtual Image2D_Info get_swapchain_image_info()                       = 0;
+  virtual Image_Info   get_image_info(Resource_ID res_id)               = 0;
 };
+
+enum class Pass_t { COMPUTE, RENDER };
 
 class IPass {
   public:
@@ -310,11 +328,17 @@ class IPass {
   virtual string_ref get_name()                      = 0;
 };
 
+class IEvent_Consumer {
+  public:
+  virtual void consume(void *event) = 0;
+};
+
 struct Pass_Mng {
   static Pass_Mng *create(Impl_t type);
-  virtual void     loop()                = 0;
-  virtual void     add_render_pass(IPass *pass) = 0;
-  virtual void     release()             = 0;
+  virtual void     loop()                                        = 0;
+  virtual void     add_pass(Pass_t type, IPass *pass)            = 0;
+  virtual void     set_event_consumer(IEvent_Consumer *consumer) = 0;
+  virtual void     release()                                     = 0;
 };
 
 } // namespace rd

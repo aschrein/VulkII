@@ -862,6 +862,7 @@ template <typename T, unsigned int N> struct InlineArray {
     ASSERT_DEBUG(size > 0);
     return elems[--size];
   }
+  void reset() { release(); }
   void resize(size_t new_size) {
     ASSERT_DEBUG(new_size <= N);
     size = new_size;
@@ -1216,9 +1217,7 @@ struct Hash_Table {
     return &set.arr[id].key.value;
   }
 
-  void reset() {
-    set.reset();
-  }
+  void reset() { set.reset(); }
 
   void remove(K key) { return set.remove(Map_Pair<K, V>{key, {}}); }
 
