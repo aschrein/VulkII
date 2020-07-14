@@ -260,12 +260,19 @@ static inline void map_pages(void *ptr, size_t num_pages) {}
 #endif
 
 template <typename T, typename V> struct Pair {
-  T first;
-  V second;
+  T    first;
+  V    second;
+  bool operator==(Pair const &that) const {
+    return first == that.first && second == that.second;
+  }
 };
 
 template <typename T, typename V> Pair<T, V> make_pair(T t, V v) {
   return {t, v};
+}
+
+template <typename T, typename V> u64 hash_of(Pair<T, V> const &p) {
+  return hash_of(hash_of(p.first)) ^ hash_of(p.second);
 }
 
 template <typename T = uint8_t> struct Pool {
@@ -472,6 +479,8 @@ static inline uint64_t hash_of(uint64_t u) {
   v ^= v << 5;
   return v;
 }
+
+static inline uint64_t hash_of(uint32_t u) { return hash_of((uint64_t)u); }
 
 template <typename T> static uint64_t hash_of(T *ptr) {
   return hash_of((size_t)ptr);
@@ -857,6 +866,7 @@ template <typename T, unsigned int N> struct InlineArray {
     ASSERT_DEBUG(size <= N);
   }
   void init() { size = 0; }
+  void memzero() { memset(elems, 0, sizeof(elems)); }
   void release() { size = 0; }
   T    pop() {
     ASSERT_DEBUG(size > 0);
@@ -987,7 +997,7 @@ struct Array {
   T *at(size_t i) { return ptr + i; }
 };
 
-template <typename T, size_t grow_k = 0x100,
+template <typename T, size_t grow_k = 0x10,
           typename Allcator_t = Default_Allocator> //
 struct AutoArray : public Array<T, grow_k, Allcator_t> {
   AutoArray() { init(); }
@@ -1030,7 +1040,7 @@ struct SmallArray {
 };
 
 template <typename K, typename Allcator_t = Default_Allocator,
-          size_t grow_k = 0x100, size_t MAX_ATTEMPTS = 0x100>
+          size_t grow_k = 0x10, size_t MAX_ATTEMPTS = 0x10>
 struct Hash_Set {
   struct Hash_Pair {
     K        key;
@@ -1189,7 +1199,7 @@ template <typename K, typename V> u64 hash_of(Map_Pair<K, V> const &item) {
 }
 
 template <typename K, typename V, typename Allcator_t = Default_Allocator,
-          size_t grow_k = 0x100, size_t MAX_ATTEMPTS = 0x20>
+          size_t grow_k = 0x10, size_t MAX_ATTEMPTS = 0x20>
 struct Hash_Table {
   using Pair_t = Map_Pair<K, V>;
   Hash_Set<Map_Pair<K, V>, Allcator_t, grow_k, MAX_ATTEMPTS> set;

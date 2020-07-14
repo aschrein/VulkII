@@ -451,6 +451,10 @@ struct Raw_Mesh_Opaque {
     TRAP;
   }
 
+  u32 get_attribute_size(u32 index) const {
+    return attributes[index].stride * num_vertices;
+  }
+
   float3 fetch_position(u32 index) {
     ito(attributes.size) {
       switch (attributes[i].type) {
@@ -548,7 +552,15 @@ struct Raw_Mesh_Opaque {
     }
     return o;
   }
-
+  u32 get_bytes_per_index() const {
+    if (index_type == rd::Index_t::UINT16) {
+      return 2;
+    } else if (index_type == rd::Index_t::UINT32) {
+      return 4;
+    } else {
+      TRAP;
+    }
+  }
   Triangle_Full fetch_triangle(u32 id) {
     Tri_Index   tind = get_tri_index(id);
     Vertex_Full v0   = fetch_vertex(tind.i0);

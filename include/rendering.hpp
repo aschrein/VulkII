@@ -4,7 +4,7 @@
 #include "utils.hpp"
 
 struct ID {
-  u32  _id = 0;
+  u32  _id;
   u32  index() { return _id - 1; }
   bool is_null() { return _id == 0; }
   bool operator==(ID const &that) const { return _id == that._id; }
@@ -56,12 +56,13 @@ enum class Format {
 };
 
 enum class Buffer_Usage_Bits : uint32_t {
-  USAGE_VERTEX_BUFFER  = 1,
-  USAGE_UNIFORM_BUFFER = 2,
-  USAGE_INDEX_BUFFER   = 4,
-  USAGE_UAV            = 8,
-  USAGE_TRANSFER_DST   = 16,
-  USAGE_TRANSFER_SRC   = 32,
+  USAGE_VERTEX_BUFFER      = 1,
+  USAGE_UNIFORM_BUFFER     = 2,
+  USAGE_INDEX_BUFFER       = 4,
+  USAGE_UAV                = 8,
+  USAGE_TRANSFER_DST       = 16,
+  USAGE_TRANSFER_SRC       = 32,
+  USAGE_INDIRECT_ARGUMENTS = 64,
 };
 
 enum class Image_Usage_Bits : uint32_t {
@@ -233,6 +234,7 @@ class Imm_Ctx {
   // Immediate mode context //
   ////////////////////////////
   virtual void clear_state()                                           = 0;
+  virtual void clear_bindings()                                        = 0;
   virtual void push_state()                                            = 0;
   virtual void pop_state()                                             = 0;
   virtual bool get_fence_state(Resource_ID fence_id)                   = 0;
@@ -269,6 +271,11 @@ class Imm_Ctx {
                              u32 first_instance, i32 vertex_offset)       = 0;
   virtual void  draw(u32 vertices, u32 instances, u32 first_vertex,
                      u32 first_instance)                                  = 0;
+  virtual void  multi_draw_indexed_indirect(Resource_ID arg_buf_id,
+                                            u32         arg_buf_offset,
+                                            Resource_ID cnt_buf_id,
+                                            u32 cnt_buf_offset, u32 max_count,
+                                            u32 stride)                   = 0;
   virtual void  dispatch(u32 dim_x, u32 dim_y, u32 dim_z)                 = 0;
   virtual void  set_viewport(float x, float y, float width, float height,
                              float mindepth, float maxdepth)              = 0;
@@ -290,8 +297,18 @@ struct Clear_Depth {
 
 enum class Fence_Position { PASS_FINISED };
 
+class IPass;
+
 class IResource_Manager {
   public:
+  static constexpr u32 BUFFER_ALIGNMENT = 0x100;
+  static size_t        align_up(size_t size) {
+    return (size + BUFFER_ALIGNMENT - 1) & ~(BUFFER_ALIGNMENT - 1);
+  }
+  static size_t align_down(size_t size) {
+    return (size) & ~(BUFFER_ALIGNMENT - 1);
+  }
+  virtual IPass *     get_pass(string_ref name)                         = 0;
   virtual Resource_ID create_image(Image_Create_Info info)              = 0;
   virtual Resource_ID create_buffer(Buffer_Create_Info info)            = 0;
   virtual Resource_ID create_shader_raw(Stage_t type, string_ref text,
