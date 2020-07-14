@@ -1602,7 +1602,7 @@ struct Resource_Array {
 
 struct Window {
   static constexpr u32 MAX_SC_IMAGES = 0x10;
-  SDL_Window *         window        = 0;
+  SDL_Window *         window;
 
   VkSurfaceKHR surface       = VK_NULL_HANDLE;
   i32          window_width  = 1280;
@@ -2261,9 +2261,9 @@ struct Window {
   void init() {
     init_ds();
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS);
-    SDL_Window *window = SDL_CreateWindow(
-        "VulkII", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 512, 512,
-        SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+    window = SDL_CreateWindow("VulkII", SDL_WINDOWPOS_CENTERED,
+                              SDL_WINDOWPOS_CENTERED, 512, 512,
+                              SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
     TMP_STORAGE_SCOPE;
 
     u32 num_instance_extensions;
@@ -2632,10 +2632,25 @@ class Vk_Ctx : public rd::Imm_Ctx {
     VkIndexType  indexType;
   };
 
-  enum class Cmd_t : u8 { DRAW = 0, PUSH_CONSTANTS, DISPATCH, BARRIER };
+  enum class Cmd_t : u8 {
+    DRAW = 0,
+    PUSH_CONSTANTS,
+    DISPATCH,
+    BARRIER,
+    RENDER_RECT
+  };
 
   struct Deferred_Push_Constants {
-    u8 push_constants[128];
+    u32 offset;
+    u32 size;
+  };
+
+  struct Deferred_Rect {
+    bool is_viewport;
+    union {
+      VkViewport viewport;
+      VkRect2D   scissor;
+    };
   };
 
   struct Deferred_Draw {
@@ -2723,6 +2738,17 @@ class Vk_Ctx : public rd::Imm_Ctx {
       cursor += sizeof(T);
       ASSERT_ALWAYS(cursor <= data.size);
     }
+    void write(void const *src, size_t size) {
+      size_t dst_pos = data.size;
+      data.resize(data.size + size);
+      memcpy(data.ptr + dst_pos, src, size);
+    }
+    void *read(size_t size) {
+      void *out = data.ptr + cursor;
+      cursor += size;
+      ASSERT_ALWAYS(cursor <= data.size);
+      return out;
+    }
     bool has_data() { return cursor < data.size; }
   };
   CPU_Command_Buffer cpu_cmd;
@@ -2771,13 +2797,23 @@ class Vk_Ctx : public rd::Imm_Ctx {
     binfo.pClearValues    = &pass.clear_values[0];
     binfo.clearValueCount = pass.clear_values.size;
     vkCmdBeginRenderPass(cmd, &binfo, VK_SUBPASS_CONTENTS_INLINE);
-    Deferred_Push_Constants pc;
-    bool                    pc_dirty = false;
+    u8  pcs[128];
+    u32 pc_dirty_range = 0;
     while (cpu_cmd.has_data()) {
       Cmd_t type = cpu_cmd.read_cmd_type();
       if (type == Cmd_t::PUSH_CONSTANTS) {
-        cpu_cmd.read(&pc);
-        pc_dirty = true;
+        Deferred_Push_Constants dpc;
+        cpu_cmd.read(&dpc);
+        memcpy(pcs + dpc.offset, cpu_cmd.read(dpc.size), dpc.size);
+        pc_dirty_range = dpc.offset + dpc.size;
+      } else if (type == Cmd_t::RENDER_RECT) {
+        Deferred_Rect dr;
+        cpu_cmd.read(&dr);
+        if (dr.is_viewport) {
+          vkCmdSetViewport(cmd, 0, 1, &dr.viewport);
+        } else {
+          vkCmdSetScissor(cmd, 0, 1, &dr.scissor);
+        }
       } else if (type == Cmd_t::DRAW) {
         Deferred_Draw dd;
         cpu_cmd.read(&dd);
@@ -2790,11 +2826,11 @@ class Vk_Ctx : public rd::Imm_Ctx {
           vkCmdBindVertexBuffers(cmd, j, 1, &dd.vbos[j].buffer,
                                  &dd.vbos[j].offset);
         }
-        if (pc_dirty) {
+        if (pc_dirty_range != 0) {
           vkCmdPushConstants(cmd, gw.pipeline_layout,
-                             VK_SHADER_STAGE_ALL_GRAPHICS, 0,
-                             gw.push_constants_size, pc.push_constants);
-          pc_dirty = false;
+                             VK_SHADER_STAGE_ALL_GRAPHICS, 0, pc_dirty_range,
+                             pcs);
+          pc_dirty_range = 0;
         }
         switch (dd.type) {
         case Deferred_Draw::Type::DRAW: {
@@ -2839,13 +2875,15 @@ class Vk_Ctx : public rd::Imm_Ctx {
   }
 
   void flush_compute_pass() {
-    Deferred_Push_Constants pc;
-    bool                    pc_dirty = false;
+    u8  pcs[128];
+    u32 pc_dirty_range = 0;
     while (cpu_cmd.has_data()) {
       Cmd_t type = cpu_cmd.read_cmd_type();
       if (type == Cmd_t::PUSH_CONSTANTS) {
-        cpu_cmd.read(&pc);
-        pc_dirty = true;
+        Deferred_Push_Constants dpc;
+        cpu_cmd.read(&dpc);
+        memcpy(pcs + dpc.offset, cpu_cmd.read(dpc.size), dpc.size);
+        pc_dirty_range = dpc.offset + dpc.size;
       } else if (type == Cmd_t::DISPATCH) {
         Deferred_Dispatch dd;
         cpu_cmd.read(&dd);
@@ -2855,11 +2893,11 @@ class Vk_Ctx : public rd::Imm_Ctx {
                                 gw.pipeline_layout, 0, dd.sets.size,
                                 &dd.sets[0], 0, NULL);
 
-        if (pc_dirty) {
+        if (pc_dirty_range != 0) {
           vkCmdPushConstants(cmd, gw.pipeline_layout,
-                             VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                             gw.push_constants_size, pc.push_constants);
-          pc_dirty = false;
+                             VK_SHADER_STAGE_COMPUTE_BIT, 0, pc_dirty_range,
+                             pcs);
+          pc_dirty_range = 0;
         }
         vkCmdDispatch(cmd, dd.dispatch.x, dd.dispatch.y, dd.dispatch.z);
       } else if (type == Cmd_t::BARRIER) {
@@ -3161,7 +3199,11 @@ class Vk_Ctx : public rd::Imm_Ctx {
     viewports[0].height   = height;
     viewports[0].minDepth = mindepth;
     viewports[0].maxDepth = maxdepth;
-    vkCmdSetViewport(cmd, 0, 1, viewports);
+    Deferred_Rect dr;
+    MEMZERO(dr);
+    dr.is_viewport = true;
+    dr.viewport    = viewports[0];
+    cpu_cmd.write(Cmd_t::RENDER_RECT, &dr);
   }
   void set_scissor(u32 x, u32 y, u32 width, u32 height) override {
     ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
@@ -3170,7 +3212,11 @@ class Vk_Ctx : public rd::Imm_Ctx {
     scissors[0].offset.y      = y;
     scissors[0].extent.width  = width;
     scissors[0].extent.height = height;
-    vkCmdSetScissor(cmd, 0, 1, scissors);
+    Deferred_Rect dr;
+    MEMZERO(dr);
+    dr.is_viewport = false;
+    dr.scissor     = scissors[0];
+    cpu_cmd.write(Cmd_t::RENDER_RECT, &dr);
   }
 
   void clear_state() override {
@@ -3380,10 +3426,12 @@ class Vk_Ctx : public rd::Imm_Ctx {
     return wnd->map_buffer(res_id);
   }
   void unmap_buffer(Resource_ID res_id) override { wnd->unmap_buffer(res_id); }
-  void push_constants(void const *data, size_t size) override {
+  void push_constants(void const *data, size_t offset, size_t size) override {
     Deferred_Push_Constants pc;
-    memcpy(pc.push_constants, data, size);
+    pc.offset = offset;
+    pc.size   = size;
     cpu_cmd.write(Cmd_t::PUSH_CONSTANTS, &pc);
+    cpu_cmd.write(data, size);
   }
   void bake_descriptor_sets() {
     VkDescriptorSet *         set_dst     = NULL;
@@ -3626,8 +3674,8 @@ class VkResource_Manager : public rd::IResource_Manager {
             wnd->release_resource(
                 {cached_rts[i].id, (u32)Resource_Type::IMAGE});
           } else {
-            wnd->release_resource(
-                {cached_rts[i].view_id, (u32)Resource_Type::IMAGE_VIEW});
+            /* wnd->release_resource(
+                 {cached_rts[i].view_id, (u32)Resource_Type::IMAGE_VIEW});*/
           }
         }
         if (cached_depth_target.is_set) {
@@ -3635,8 +3683,9 @@ class VkResource_Manager : public rd::IResource_Manager {
             wnd->release_resource(
                 {cached_depth_target.id, (u32)Resource_Type::IMAGE});
           } else {
-            wnd->release_resource(
-                {cached_depth_target.view_id, (u32)Resource_Type::IMAGE_VIEW});
+            /*wnd->release_resource(
+                {cached_depth_target.view_id,
+               (u32)Resource_Type::IMAGE_VIEW});*/
           }
         }
       }
@@ -3882,6 +3931,7 @@ class VkResource_Manager : public rd::IResource_Manager {
     wnd->shader_cache.insert(shader_hash, shid);
     return {shid, (u32)Resource_Type::SHADER};
   }
+  void *      get_window_handle() override { return (void *)wnd->window; }
   Resource_ID get_fence(rd::Fence_Position position) override {
     if (position == rd::Fence_Position::PASS_FINISED) {
       return on_finish_fence;

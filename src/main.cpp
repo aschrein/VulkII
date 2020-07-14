@@ -9,6 +9,9 @@
 #include <SDL.h>
 #endif
 
+#include <imgui.h>
+#include <imgui/examples/imgui_impl_sdl.h>
+
 struct Camera {
   float  phi;
   float  theta;
@@ -1211,14 +1214,36 @@ class Merge_Pass : public rd::IPass {
   }
 };
 
-class Event_Consumer : public rd::IEvent_Consumer {
-  i32 last_m_x = -1;
-  i32 last_m_y = -1;
+class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
+  Resource_ID vs;
+  Resource_ID ps;
+  u32         width, height;
+  Resource_ID sampler;
+  Resource_ID vertex_buffer;
+  Resource_ID index_buffer;
+
+  Resource_ID    font_texture;
+  Resource_ID    staging_buffer;
+  unsigned char *font_pixels;
+  int            font_width, font_height;
+
+  Timer timer;
+
+  struct Uniform {
+    float2x2 rot;
+    float4   color;
+  } uniform_data;
+
+  i32         last_m_x;
+  i32         last_m_y;
+  ImDrawData *draw_data;
+
+  bool imgui_initialized;
 
   public:
   void consume(void *_event) override {
-
     SDL_Event *event = (SDL_Event *)_event;
+    if (imgui_initialized) ImGui_ImplSDL2_ProcessEvent(event);
     if (event->type == SDL_MOUSEMOTION) {
       SDL_MouseMotionEvent *m       = (SDL_MouseMotionEvent *)event;
       i32                   cur_m_x = m->x;
@@ -1233,20 +1258,308 @@ class Event_Consumer : public rd::IEvent_Consumer {
       last_m_y = cur_m_y;
     }
   }
+  GUI_Pass() {
+    imgui_initialized = false;
+    draw_data         = NULL;
+    last_m_x          = -1;
+    last_m_y          = -1;
+    font_texture.reset();
+    staging_buffer.reset();
+    vs.reset();
+    ps.reset();
+    vertex_buffer.reset();
+    index_buffer.reset();
+    sampler.reset();
+    timer.init();
+  }
+  void on_end(rd::IResource_Manager *rm) override {
+    rm->release_resource(vertex_buffer);
+    rm->release_resource(index_buffer);
+    if (staging_buffer.is_null() == false) {
+      rm->release_resource(staging_buffer);
+    }
+    vertex_buffer.reset();
+    index_buffer.reset();
+    staging_buffer.reset();
+  }
+  void on_begin(rd::IResource_Manager *pc) override {
+    rd::Image2D_Info info = pc->get_swapchain_image_info();
+    width                 = info.width;
+    height                = info.height;
+
+    rd::Clear_Color cl;
+    cl.clear = false;
+
+    pc->add_render_target(pc->get_swapchain_image(), 0, 0, cl);
+    static string_ref            shader    = stref_s(R"(
+@(DECLARE_PUSH_CONSTANTS
+  (add_field (type float2)   (name uScale))
+  (add_field (type float2)   (name uTranslate))
+)
+@(DECLARE_IMAGE
+  (type SAMPLED)
+  (dim 2D)
+  (set 0)
+  (binding 0)
+  (format RGBA32_FLOAT)
+  (name sTexture)
+)
+@(DECLARE_SAMPLER
+  (set 0)
+  (binding 1)
+  (name sSampler)
+)
+#ifdef VERTEX
+
+@(DECLARE_INPUT (location 0) (type float2) (name aPos))
+@(DECLARE_INPUT (location 1) (type float2) (name aUV))
+@(DECLARE_INPUT (location 2) (type float4) (name aColor))
+
+@(DECLARE_OUTPUT (location 0) (type float4) (name Color))
+@(DECLARE_OUTPUT (location 1) (type float2) (name UV))
+
+@(ENTRY)
+  Color = aColor;
+  UV = aUV;
+  @(EXPORT_POSITION
+      float4(aPos * uScale + uTranslate, 0, 1)
+  );
+@(END)
+#endif
+#ifdef PIXEL
+
+@(DECLARE_INPUT (location 0) (type float4) (name Color))
+@(DECLARE_INPUT (location 1) (type float2) (name UV))
+
+@(DECLARE_RENDER_TARGET
+  (location 0)
+)
+@(ENTRY)
+  @(EXPORT_COLOR 0
+    Color * texture(sampler2D(sTexture, sSampler), UV)
+  );
+@(END)
+#endif
+)");
+    Pair<string_ref, string_ref> defines[] = {
+        {stref_s("VERTEX"), {}},
+        {stref_s("PIXEL"), {}},
+    };
+    if (vs.is_null())
+      vs = pc->create_shader_raw(rd::Stage_t::VERTEX, shader, &defines[0], 1);
+    if (ps.is_null())
+      ps = pc->create_shader_raw(rd::Stage_t::PIXEL, shader, &defines[1], 1);
+
+    if (sampler.is_null()) {
+      rd::Sampler_Create_Info info;
+      MEMZERO(info);
+      info.address_mode_u = rd::Address_Mode::CLAMP_TO_EDGE;
+      info.address_mode_v = rd::Address_Mode::CLAMP_TO_EDGE;
+      info.address_mode_w = rd::Address_Mode::CLAMP_TO_EDGE;
+      info.mag_filter     = rd::Filter::LINEAR;
+      info.min_filter     = rd::Filter::LINEAR;
+      info.mip_mode       = rd::Filter::NEAREST;
+      info.anisotropy     = true;
+      info.max_anisotropy = 16.0f;
+      sampler             = pc->create_sampler(info);
+    }
+
+    if (!imgui_initialized) {
+      imgui_initialized = true;
+      IMGUI_CHECKVERSION();
+      ImGui::CreateContext();
+      ImGuiIO &io = ImGui::GetIO();
+      io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+      ImGui::StyleColorsDark();
+      ImGui_ImplSDL2_InitForVulkan((SDL_Window *)pc->get_window_handle());
+
+      io.Fonts->GetTexDataAsRGBA32(&font_pixels, &font_width, &font_height);
+
+      rd::Image_Create_Info info;
+      MEMZERO(info);
+      info.format     = rd::Format::RGBA8_UNORM;
+      info.width      = font_width;
+      info.height     = font_height;
+      info.depth      = 1;
+      info.layers     = 1;
+      info.levels     = 1;
+      info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
+      info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_SAMPLED |
+                        (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST;
+      font_texture    = pc->create_image(info);
+      io.Fonts->TexID = (ImTextureID)(intptr_t)font_texture.id._id;
+
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
+      buf_info.size       = font_width * font_height * 4;
+      staging_buffer      = pc->create_buffer(buf_info);
+    }
+
+    ImGui_ImplSDL2_NewFrame((SDL_Window *)pc->get_window_handle());
+    ImGui::NewFrame();
+    ImGuiIO &   io               = ImGui::GetIO();
+    static bool show_demo_window = true;
+    ImGui::ShowDemoWindow(&show_demo_window);
+    ImGui::Render();
+
+    draw_data = ImGui::GetDrawData();
+    {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
+      buf_info.size       = (draw_data->TotalVtxCount + 1) * sizeof(ImDrawVert);
+      vertex_buffer       = pc->create_buffer(buf_info);
+    }
+    {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER;
+      buf_info.size       = (draw_data->TotalIdxCount + 1) * sizeof(ImDrawIdx);
+      index_buffer        = pc->create_buffer(buf_info);
+    }
+  }
+  void exec(rd::Imm_Ctx *ctx) override {
+    {
+      ImDrawVert *vtx_dst = (ImDrawVert *)ctx->map_buffer(vertex_buffer);
+      ImDrawIdx * idx_dst = (ImDrawIdx *)ctx->map_buffer(index_buffer);
+      ito(draw_data->CmdListsCount) {
+
+        const ImDrawList *cmd_list = draw_data->CmdLists[i];
+        memcpy(vtx_dst, cmd_list->VtxBuffer.Data,
+               cmd_list->VtxBuffer.Size * sizeof(ImDrawVert));
+        memcpy(idx_dst, cmd_list->IdxBuffer.Data,
+               cmd_list->IdxBuffer.Size * sizeof(ImDrawIdx));
+        vtx_dst += cmd_list->VtxBuffer.Size;
+        idx_dst += cmd_list->IdxBuffer.Size;
+      }
+      ctx->unmap_buffer(vertex_buffer);
+      ctx->unmap_buffer(index_buffer);
+    }
+    if (font_pixels != NULL) {
+      void *dst = ctx->map_buffer(staging_buffer);
+      memcpy(dst, font_pixels, font_width * font_height * 4);
+      ctx->unmap_buffer(staging_buffer);
+      ctx->copy_buffer_to_image(staging_buffer, 0, font_texture, 0, 0);
+      font_pixels = NULL;
+    }
+    timer.update();
+    setup_default_state(ctx);
+    rd::Blend_State bs;
+    MEMZERO(bs);
+    bs.enabled          = true;
+    bs.alpha_blend_op   = rd::Blend_OP::ADD;
+    bs.color_blend_op   = rd::Blend_OP::ADD;
+    bs.dst_alpha        = rd::Blend_Factor::ONE_MINUS_SRC_ALPHA;
+    bs.src_alpha        = rd::Blend_Factor::SRC_ALPHA;
+    bs.dst_color        = rd::Blend_Factor::ONE_MINUS_SRC_ALPHA;
+    bs.src_color        = rd::Blend_Factor::SRC_ALPHA;
+    bs.color_write_mask = (u32)rd::Color_Component_Bit::R_BIT |
+                          (u32)rd::Color_Component_Bit::G_BIT |
+                          (u32)rd::Color_Component_Bit::B_BIT |
+                          (u32)rd::Color_Component_Bit::A_BIT;
+    ctx->OM_set_blend_state(0, bs);
+    ctx->VS_set_shader(vs);
+    ctx->PS_set_shader(ps);
+    ctx->set_viewport(0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f);
+
+    ctx->bind_image(0, 0, 0, font_texture, 0, 1, 0, 1);
+    ctx->bind_sampler(0, 1, sampler);
+    ImVec2 clip_off          = draw_data->DisplayPos;
+    ImVec2 clip_scale        = draw_data->FramebufferScale;
+    int    global_vtx_offset = 0;
+    int    global_idx_offset = 0;
+    {
+      rd::Attribute_Info info;
+      MEMZERO(info);
+      info.binding  = 0;
+      info.format   = rd::Format::RG32_FLOAT;
+      info.location = 0;
+      info.offset   = 0;
+      info.type     = rd::Attriute_t::POSITION;
+      ctx->IA_set_attribute(info);
+    }
+    {
+      rd::Attribute_Info info;
+      MEMZERO(info);
+      info.binding  = 0;
+      info.format   = rd::Format::RG32_FLOAT;
+      info.location = 1;
+      info.offset   = 8;
+      info.type     = rd::Attriute_t::TEXCOORD0;
+      ctx->IA_set_attribute(info);
+    }
+    {
+      rd::Attribute_Info info;
+      MEMZERO(info);
+      info.binding  = 0;
+      info.format   = rd::Format::RGBA8_UNORM;
+      info.location = 2;
+      info.offset   = 16;
+      info.type     = rd::Attriute_t::TEXCOORD1;
+      ctx->IA_set_attribute(info);
+    }
+    {
+      float scale[2];
+      scale[0] = 2.0f / draw_data->DisplaySize.x;
+      scale[1] = 2.0f / draw_data->DisplaySize.y;
+      float translate[2];
+      translate[0] = -1.0f - draw_data->DisplayPos.x * scale[0];
+      translate[1] = -1.0f - draw_data->DisplayPos.y * scale[1];
+      ctx->push_constants(scale, 0, 8);
+      ctx->push_constants(translate, 8, 8);
+    }
+    ctx->IA_set_index_buffer(index_buffer, 0, rd::Index_t::UINT16);
+    ctx->IA_set_vertex_buffer(0, vertex_buffer, 0, sizeof(ImDrawVert),
+                              rd::Input_Rate::VERTEX);
+    for (int n = 0; n < draw_data->CmdListsCount; n++) {
+      const ImDrawList *cmd_list = draw_data->CmdLists[n];
+      for (int cmd_i = 0; cmd_i < cmd_list->CmdBuffer.Size; cmd_i++) {
+        const ImDrawCmd *pcmd = &cmd_list->CmdBuffer[cmd_i];
+        ImVec4           clip_rect;
+        clip_rect.x = (pcmd->ClipRect.x - clip_off.x) * clip_scale.x;
+        clip_rect.y = (pcmd->ClipRect.y - clip_off.y) * clip_scale.y;
+        clip_rect.z = (pcmd->ClipRect.z - clip_off.x) * clip_scale.x;
+        clip_rect.w = (pcmd->ClipRect.w - clip_off.y) * clip_scale.y;
+        ctx->set_scissor(clip_rect.x, clip_rect.y, clip_rect.z - clip_rect.x,
+                         clip_rect.w - clip_rect.y);
+        ctx->draw_indexed(pcmd->ElemCount, 1,
+                          pcmd->IdxOffset + global_idx_offset, 0,
+                          pcmd->VtxOffset + global_vtx_offset);
+      }
+      global_idx_offset += cmd_list->IdxBuffer.Size;
+      global_vtx_offset += cmd_list->VtxBuffer.Size;
+    }
+
+    ImGuiIO &io = ImGui::GetIO();
+  }
+  string_ref get_name() override { return stref_s("simple_pass"); }
+  void       release(rd::IResource_Manager *rm) override {
+    ImGui_ImplSDL2_Shutdown();
+    ImGui::DestroyContext();
+    rm->release_resource(vs);
+    rm->release_resource(ps);
+    timer.release();
+    delete this;
+  }
 };
 
 int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
   g_scene.init();
-  Event_Consumer event_consumer;
-  rd::Pass_Mng * pmng = rd::Pass_Mng::create(rd::Impl_t::VULKAN);
-  pmng->set_event_consumer(&event_consumer);
+  GUI_Pass *    gui  = new GUI_Pass;
+  rd::Pass_Mng *pmng = rd::Pass_Mng::create(rd::Impl_t::VULKAN);
+  pmng->set_event_consumer(gui);
   pmng->add_pass(rd::Pass_t::RENDER, new Mesh_Prepare_Pass);
   pmng->add_pass(rd::Pass_t::COMPUTE, new Culling_Pass);
   pmng->add_pass(rd::Pass_t::RENDER, new Opaque_Pass);
   pmng->add_pass(rd::Pass_t::COMPUTE, new Postprocess_Pass);
   pmng->add_pass(rd::Pass_t::RENDER, new Merge_Pass);
+  pmng->add_pass(rd::Pass_t::RENDER, gui);
   pmng->loop();
   return 0;
 }

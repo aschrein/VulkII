@@ -18,6 +18,11 @@ add_executable(vulkii
 src/main.cpp
 src/vk_backend.cpp
 src/files.cpp
+3rdparty/imgui/imgui.cpp
+3rdparty/imgui/imgui_widgets.cpp
+3rdparty/imgui/imgui_draw.cpp
+3rdparty/imgui/imgui_demo.cpp
+3rdparty/imgui/examples/imgui_impl_sdl.cpp
 )
 IF (WIN32)
   set(SDL2_PATH ${CMAKE_SOURCE_DIR}/bin/SDL2)
@@ -66,6 +71,7 @@ ENDIF()
 target_include_directories(vulkii
   PRIVATE
   3rdparty
+  3rdparty/imgui
   include
   ${INCLUDES}
   "$ENV{VULKAN_SDK}/include"

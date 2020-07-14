@@ -254,35 +254,35 @@ class Imm_Ctx {
   virtual void OM_set_blend_state(u32 rt_index, Blend_State const &bl) = 0;
 
   virtual void bind_uniform_buffer(u32 set, u32 binding, Resource_ID buf_id,
-                                   size_t offset, size_t size)            = 0;
-  virtual void bind_sampler(u32 set, u32 binding, Resource_ID sampler_id) = 0;
+                                   size_t offset, size_t size)              = 0;
+  virtual void bind_sampler(u32 set, u32 binding, Resource_ID sampler_id)   = 0;
   virtual void bind_storage_buffer(u32 set, u32 binding, Resource_ID buf_id,
-                                   size_t offset, size_t size)            = 0;
+                                   size_t offset, size_t size)              = 0;
   virtual void bind_image(u32 set, u32 binding, u32 index, Resource_ID image_id,
                           u32 layer, u32 num_layers, u32 level,
-                          u32 num_levels)                                 = 0;
+                          u32 num_levels)                                   = 0;
   virtual void bind_rw_image(u32 set, u32 binding, u32 index,
                              Resource_ID image_id, u32 layer, u32 num_layers,
-                             u32 level, u32 num_levels)                   = 0;
-  virtual void *map_buffer(Resource_ID id)                                = 0;
-  virtual void  unmap_buffer(Resource_ID id)                              = 0;
-  virtual void  push_constants(void const *data, size_t size)             = 0;
-  virtual void  draw_indexed(u32 indices, u32 instances, u32 first_index,
-                             u32 first_instance, i32 vertex_offset)       = 0;
-  virtual void  draw(u32 vertices, u32 instances, u32 first_vertex,
-                     u32 first_instance)                                  = 0;
-  virtual void  multi_draw_indexed_indirect(Resource_ID arg_buf_id,
-                                            u32         arg_buf_offset,
-                                            Resource_ID cnt_buf_id,
-                                            u32 cnt_buf_offset, u32 max_count,
-                                            u32 stride)                   = 0;
-  virtual void  dispatch(u32 dim_x, u32 dim_y, u32 dim_z)                 = 0;
-  virtual void  set_viewport(float x, float y, float width, float height,
-                             float mindepth, float maxdepth)              = 0;
-  virtual void  set_scissor(u32 x, u32 y, u32 width, u32 height)          = 0;
-  virtual void  copy_buffer_to_image(Resource_ID buf_id, size_t offset,
-                                     Resource_ID img_id, u32 dst_layer,
-                                     u32 dst_level)                       = 0;
+                             u32 level, u32 num_levels)                     = 0;
+  virtual void *map_buffer(Resource_ID id)                                  = 0;
+  virtual void  unmap_buffer(Resource_ID id)                                = 0;
+  virtual void push_constants(void const *data, size_t offset, size_t size) = 0;
+  virtual void draw_indexed(u32 indices, u32 instances, u32 first_index,
+                            u32 first_instance, i32 vertex_offset)          = 0;
+  virtual void draw(u32 vertices, u32 instances, u32 first_vertex,
+                    u32 first_instance)                                     = 0;
+  virtual void multi_draw_indexed_indirect(Resource_ID arg_buf_id,
+                                           u32         arg_buf_offset,
+                                           Resource_ID cnt_buf_id,
+                                           u32 cnt_buf_offset, u32 max_count,
+                                           u32 stride)                      = 0;
+  virtual void dispatch(u32 dim_x, u32 dim_y, u32 dim_z)                    = 0;
+  virtual void set_viewport(float x, float y, float width, float height,
+                            float mindepth, float maxdepth)                 = 0;
+  virtual void set_scissor(u32 x, u32 y, u32 width, u32 height)             = 0;
+  virtual void copy_buffer_to_image(Resource_ID buf_id, size_t offset,
+                                    Resource_ID img_id, u32 dst_layer,
+                                    u32 dst_level)                          = 0;
 };
 
 struct Clear_Color {
@@ -332,6 +332,7 @@ class IResource_Manager {
   virtual Resource_ID  get_fence(Fence_Position position)               = 0;
   virtual Image2D_Info get_swapchain_image_info()                       = 0;
   virtual Image_Info   get_image_info(Resource_ID res_id)               = 0;
+  virtual void *       get_window_handle()                              = 0;
 };
 
 enum class Pass_t { COMPUTE, RENDER };
