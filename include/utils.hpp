@@ -594,6 +594,23 @@ static inline string_ref get_dir(string_ref path) {
   return path.substr(0, sep);
 }
 
+template <int N> struct inline_string {
+  char buf[N];
+  void init(string_ref str) {
+    size_t len = MIN(str.len, N);
+    memcpy(buf, str.ptr, len);
+    if (len < N)
+      buf[len] = '\0';
+  }
+  string_ref ref() const { return string_ref{&buf[0], len()}; }
+  u32        len() const {
+    ito(N) {
+      if (buf[i] == '\0') return i;
+    }
+    return N;
+  }
+};
+
 struct string {
   char * ptr;
   size_t len;
@@ -609,7 +626,7 @@ struct string {
     if (ptr != NULL) tl_free(ptr);
     memset(this, 0, sizeof(string));
   }
-  string_ref ref() { return string_ref{ptr, len}; }
+  string_ref ref() const { return string_ref{ptr, len}; }
 };
 
 static inline bool operator==(string a, string b) {
@@ -990,6 +1007,11 @@ struct Array {
     return elem;
   }
   T &operator[](size_t i) {
+    ASSERT_DEBUG(i < size);
+    ASSERT_DEBUG(ptr != NULL);
+    return ptr[i];
+  }
+  T const &operator[](size_t i) const {
     ASSERT_DEBUG(i < size);
     ASSERT_DEBUG(ptr != NULL);
     return ptr[i];

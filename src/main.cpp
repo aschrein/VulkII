@@ -67,7 +67,292 @@ struct Camera {
     view = glm::lookAt(pos, look_at, float3(0.0f, 1.0f, 0.0f));
   }
   float4x4 viewproj() { return proj * view; }
+} g_camera;
+
+class GfxMeshNode : public MeshNode {
+  protected:
+  InlineArray<size_t, 16>    attribute_offsets;
+  InlineArray<size_t, 16>    attribute_sizes;
+  InlineArray<Attribute, 16> attributes;
+  size_t                     total_memory_needed;
+  u32                        total_indices;
+  size_t                     index_offset;
+  void                       init(string_ref name) {
+    MeshNode::init(name);
+    total_memory_needed = 0;
+    total_indices       = 0;
+    index_offset        = 0;
+    attribute_offsets.init();
+    attribute_sizes.init();
+    attributes.init();
+  }
+
+  public:
+  static GfxMeshNode *create(string_ref name) {
+    GfxMeshNode *out = new GfxMeshNode;
+    out->init(name);
+    return out;
+  }
+  static u64 ID() {
+    static char p;
+    return (u64)(intptr_t)&p;
+  }
+  u64  get_type_id() const override { return ID(); }
+  void release() override { MeshNode::release(); }
+  u32  get_num_indices() {
+    if (total_indices == 0) {
+      ito(primitives.size) total_indices += primitives[i].mesh.num_indices;
+    }
+    return total_indices;
+  }
+  size_t get_needed_memory() {
+    if (total_memory_needed == 0) {
+      if (primitives.size == 0) return 0;
+      ito(primitives[0].mesh.attributes.size) {
+        attributes.push(primitives[0].mesh.attributes[i]);
+        attribute_offsets.push(0);
+        attribute_sizes.push(0);
+      }
+      ito(primitives.size) {
+        jto(primitives[i].mesh.attributes.size) {
+          attribute_sizes[j] += primitives[i].mesh.get_attribute_size(j);
+        }
+      }
+      ito(attributes.size) {
+        jto(i) { attribute_offsets[i] += attribute_sizes[j]; }
+        attribute_offsets[i] =
+            rd::IResource_Manager::align_up(attribute_offsets[i]);
+        total_memory_needed = attribute_offsets[i] + attribute_sizes[i];
+      }
+      total_memory_needed =
+          rd::IResource_Manager::align_up(total_memory_needed);
+      index_offset = total_memory_needed;
+      ito(primitives.size) {
+        total_memory_needed += primitives[i].mesh.get_bytes_per_index() *
+                               primitives[i].mesh.num_indices;
+      }
+    }
+    return total_memory_needed;
+  }
+  void put_data(void *ptr) {
+    InlineArray<size_t, 16> attribute_cursors;
+    MEMZERO(attribute_cursors);
+    size_t indices_offset = 0;
+    ito(primitives.size) {
+      jto(primitives[i].mesh.attributes.size) {
+        Attribute attribute      = primitives[i].mesh.attributes[j];
+        size_t    attribute_size = primitives[i].mesh.get_attribute_size(j);
+        memcpy((u8 *)ptr + attribute_offsets[j] + attribute_cursors[j],
+               &primitives[i].mesh.attribute_data[0] + attribute.offset,
+               attribute_size);
+        attribute_cursors[j] += attribute_size;
+      }
+      size_t index_size = primitives[i].mesh.get_bytes_per_index() *
+                          primitives[i].mesh.num_indices;
+      memcpy((u8 *)ptr + index_offset + indices_offset,
+             &primitives[i].mesh.index_data[0], index_size);
+      indices_offset += index_size;
+    }
+  }
+  void draw(rd::Imm_Ctx *ctx, Resource_ID vertex_buffer, size_t offset) {
+    ito(attributes.size) {
+      Attribute attr = attributes[i];
+      ctx->IA_set_vertex_buffer(i, vertex_buffer, offset + attribute_offsets[i],
+                                attr.stride, rd::Input_Rate::VERTEX);
+      static u32 attribute_to_location[] = {
+          0xffffffffu, 0, 1, 2, 3, 4, 5, 6, 7, 8,
+      };
+      rd::Attribute_Info info;
+      MEMZERO(info);
+      info.binding  = i;
+      info.format   = attr.format;
+      info.location = attribute_to_location[(u32)attr.type];
+      info.offset   = 0;
+      info.type     = attr.type;
+      ctx->IA_set_attribute(info);
+    }
+    ctx->IA_set_index_buffer(vertex_buffer, offset + index_offset,
+                             rd::Index_t::UINT32);
+    // ctx->bind_storage_buffer(0, 1, instance_buffer, 0,
+    //                         cpu_instance_info.size * sizeof(Instance_Info));
+    u32 vertex_cursor = 0;
+    u32 index_cursor  = 0;
+    ito(primitives.size) {
+      ctx->draw_indexed(primitives[i].mesh.num_indices, 1, index_cursor, 0,
+                        vertex_cursor);
+      index_cursor += primitives[i].mesh.num_indices;
+      vertex_cursor += primitives[i].mesh.num_vertices;
+    }
+  }
 };
+
+class Scene {
+  Node *             root;
+  Array<Image2D_Raw> images;
+
+  // GFX state cache
+  Array<Resource_ID>   gfx_images;
+  Array<GfxMeshNode *> meshes;
+  Array<size_t>        mesh_offsets;
+  bool                 gfx_buffers_initialized;
+  u32                  texture_streaming_id;
+  Resource_ID          vertex_buffer;
+  Resource_ID          staging_buffer;
+  Resource_ID          dummy_texture;
+  bool                 dummy_initialized;
+
+  friend class SceneFactory;
+  class SceneFactory : public IFactory {
+    Scene *scene;
+
+public:
+    SceneFactory(Scene *scene) : scene(scene) {}
+    Node *    add_node(string_ref name) override { return Node::create(name); }
+    MeshNode *add_mesh(string_ref name) override {
+      GfxMeshNode *model = GfxMeshNode::create(name);
+      return model;
+    }
+    u32 add_image(Image2D_Raw img) override {
+      scene->images.push(img);
+      return scene->images.size - 1;
+    }
+  };
+  template <typename F> void traverse(F fn, Node *node) {
+    fn(node);
+    ito(node->get_children().size) { traverse(fn, node->get_children()[i]); }
+  }
+
+  public:
+  void init() {
+    dummy_initialized       = false;
+    gfx_buffers_initialized = false;
+    texture_streaming_id    = 0;
+    meshes.init();
+    vertex_buffer.reset();
+    dummy_texture.reset();
+    staging_buffer.reset();
+    gfx_images.init();
+    images.init();
+    SceneFactory sf(this);
+    root = load_gltf_pbr(&sf, stref_s("models/mermaid/scene.gltf"));
+  }
+  void on_pass_begin(rd::IResource_Manager *rm) {
+    if (dummy_texture.is_null()) {
+      rd::Image_Create_Info info;
+      MEMZERO(info);
+      info.format     = rd::Format::RGBA8_UNORM;
+      info.width      = 16;
+      info.height     = 16;
+      info.depth      = 1;
+      info.layers     = 1;
+      info.levels     = 1;
+      info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
+      info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_SAMPLED |
+                        (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST;
+      dummy_texture = rm->create_image(info);
+    }
+    if (meshes.size == 0) {
+      size_t total_memory = 0;
+      traverse([&](Node *node) {
+        if (isa<GfxMeshNode>(node)) {
+          meshes.push((GfxMeshNode *)node);
+        }
+      });
+      ito(meshes.size) {
+        size_t mesh_mem = meshes[i]->get_needed_memory();
+        mesh_mem        = rd::IResource_Manager::align_up(mesh_mem);
+        mesh_offsets.push(total_memory);
+        total_memory += mesh_mem;
+      }
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER |
+                            (u32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER;
+      buf_info.size = total_memory;
+      vertex_buffer = rm->create_buffer(buf_info);
+    }
+    if (gfx_images.size == 0) {
+      if (images.size) {
+        gfx_images.resize(images.size);
+        ito(images.size) {
+          rd::Image_Create_Info info;
+          MEMZERO(info);
+          info.format     = images[i].format;
+          info.width      = images[i].width;
+          info.height     = images[i].height;
+          info.depth      = 1;
+          info.layers     = 1;
+          info.levels     = 1;
+          info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
+          info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_SAMPLED |
+                            (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST;
+          gfx_images[i] = rm->create_image(info);
+        }
+      }
+    }
+    {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
+      buf_info.size       = 1 << 14;
+      staging_buffer      = rm->create_buffer(buf_info);
+    }
+  }
+  void gfx_exec(rd::Imm_Ctx *ctx) {
+    if (dummy_initialized == false) {
+
+      {
+        u32 *ptr = (u32 *)ctx->map_buffer(staging_buffer);
+        ito(16 * 16) { ptr[i] = 0xff0000ffu; }
+        ctx->unmap_buffer(staging_buffer);
+        ctx->copy_buffer_to_image(staging_buffer, 0, dummy_texture, 0, 0);
+      }
+      {
+        u8 *ptr = (u8 *)ctx->map_buffer(vertex_buffer);
+        ito(meshes.size) { meshes[i]->put_data(ptr + mesh_offsets[i]); }
+        ctx->unmap_buffer(vertex_buffer);
+      }
+    } else if (texture_streaming_id < gfx_images.size) {
+      void *ptr = ctx->map_buffer(staging_buffer);
+      memcpy(ptr, images[texture_streaming_id].data,
+             images[texture_streaming_id].get_size_in_bytes());
+      ctx->unmap_buffer(staging_buffer);
+      ctx->copy_buffer_to_image(staging_buffer, 0,
+                                gfx_images[texture_streaming_id], 0, 0);
+      texture_streaming_id++;
+    }
+    ito(gfx_images.size) {
+      if (i < texture_streaming_id) {
+        ctx->bind_image(1, 1, i, gfx_images[i], 0, 1, 0, 1);
+      } else {
+        ctx->bind_image(1, 1, i, dummy_texture, 0, 1, 0, 1);
+      }
+    }
+    ito(meshes.size) { meshes[i]->draw(ctx, vertex_buffer, mesh_offsets[i]); }
+  }
+  void on_pass_end(rd::IResource_Manager *rm) {
+    if (staging_buffer.is_null() == false) {
+      rm->release_resource(staging_buffer);
+      staging_buffer.reset();
+    }
+  }
+  void release_gfx(rd::IResource_Manager *rm) {
+    ito(gfx_images.size) rm->release_resource(gfx_images[i]);
+    gfx_images.release();
+    rm->release_resource(vertex_buffer);
+    rm->release_resource(staging_buffer);
+  }
+  template <typename F> void traverse(F fn) { traverse(fn, root); }
+  void                       update() {}
+  void                       release() {
+    meshes.release();
+    ito(images.size) images[i].release();
+    images.release();
+    root->release();
+  }
+} g_scene;
 
 static void setup_default_state(rd::Imm_Ctx *ctx, u32 num_rts = 1) {
   rd::Blend_State bs;
@@ -100,16 +385,226 @@ static void setup_default_state(rd::Imm_Ctx *ctx, u32 num_rts = 1) {
   ctx->MS_set_state(ms_state);
 }
 
-struct Scene {
-  PBR_Model model;
-  Camera    camera;
-  void      init() {
-    camera.init();
-    model = load_gltf_pbr(stref_s("models/low_poly_ellie/scene.gltf"));
+class Opaque_Pass : public rd::IPass {
+  Resource_ID vs;
+  Resource_ID ps;
+  u32         width, height;
+  Resource_ID uniform_buffer;
+  Resource_ID texture_sampler;
+  struct Uniform {
+    afloat4x4 viewproj;
+  };
+  static_assert(sizeof(Uniform) == 64, "Uniform packing is wrong");
+
+  public:
+  Opaque_Pass() {
+    vs.reset();
+    ps.reset();
+    width  = 0;
+    height = 0;
+    uniform_buffer.reset();
+    texture_sampler.reset();
   }
-  void update() { camera.update(); }
-  void release() { model.release(); }
-} g_scene;
+  void on_end(rd::IResource_Manager *rm) override {
+    if (uniform_buffer.is_null() == false) {
+      rm->release_resource(uniform_buffer);
+      uniform_buffer.reset();
+    }
+    g_scene.on_pass_end(rm);
+  }
+  void on_begin(rd::IResource_Manager *pc) override {
+    rd::Image2D_Info info = pc->get_swapchain_image_info();
+    width                 = info.width;
+    height                = info.height;
+    {
+      rd::Clear_Color cl;
+      cl.clear = true;
+      cl.r     = 0.0f;
+      cl.g     = 0.0f;
+      cl.b     = 0.0f;
+      cl.a     = 1.0f;
+      rd::Image_Create_Info rt0_info;
+      MEMZERO(rt0_info);
+      rt0_info.format     = rd::Format::RGBA32_FLOAT;
+      rt0_info.width      = width;
+      rt0_info.height     = height;
+      rt0_info.depth      = 1;
+      rt0_info.layers     = 1;
+      rt0_info.levels     = 1;
+      rt0_info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
+      rt0_info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_RT |
+                            (u32)rd::Image_Usage_Bits::USAGE_SAMPLED |
+                            (u32)rd::Image_Usage_Bits::USAGE_UAV;
+      pc->add_render_target(stref_s("opaque_pass/rt0"), rt0_info, 0, 0, cl);
+    }
+    {
+      rd::Clear_Depth cl;
+      cl.clear = true;
+      cl.d     = 0.0f;
+      rd::Image_Create_Info info;
+      MEMZERO(info);
+      info.format     = rd::Format::D32_FLOAT;
+      info.width      = width;
+      info.height     = height;
+      info.depth      = 1;
+      info.layers     = 1;
+      info.levels     = 1;
+      info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
+      info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_DT |
+                        (u32)rd::Image_Usage_Bits::USAGE_SAMPLED;
+      pc->add_depth_target(stref_s("opaque_pass/ds"), info, 0, 0, cl);
+    }
+    static string_ref            shader    = stref_s(R"(
+@(DECLARE_UNIFORM_BUFFER
+  (set 0)
+  (binding 0)
+  (add_field (type float4x4) (name viewproj))
+)
+struct Instance_Info {
+  i32 albedo_id;
+  i32 arm_id;
+  i32 normal_id;
+  i32 pad;
+  float4x4 model;
+};
+@(DECLARE_BUFFER
+  (type READ_ONLY)
+  (set 0)
+  (binding 1)
+  (type Instance_Info)
+  (name instance_infos)
+)
+@(DECLARE_IMAGE
+  (type SAMPLED)
+  (array_size 1024)
+  (dim 2D)
+  (set 1)
+  (binding 1)
+  (name material_textures)
+)
+@(DECLARE_SAMPLER
+  (set 1)
+  (binding 0)
+  (name my_sampler)
+)
+#ifdef VERTEX
+@(DECLARE_INPUT (location 0) (type float3) (name POSITION))
+@(DECLARE_INPUT (location 1) (type float2) (name NORMAL))
+@(DECLARE_INPUT (location 2) (type float2) (name BINORMAL))
+@(DECLARE_INPUT (location 3) (type float2) (name TANGENT))
+@(DECLARE_INPUT (location 4) (type float2) (name TEXCOORD0))
+@(DECLARE_INPUT (location 5) (type float2) (name TEXCOORD1))
+@(DECLARE_INPUT (location 6) (type float2) (name TEXCOORD2))
+@(DECLARE_INPUT (location 7) (type float2) (name TEXCOORD3))
+
+@(DECLARE_OUTPUT
+  (location 0)
+  (type float2)
+  (name tex_coords)
+)
+@(DECLARE_OUTPUT
+  (location 1)
+  (type uint)
+  (name instance_index)
+)
+@(ENTRY)
+  tex_coords = TEXCOORD0;
+  instance_index = INSTANCE_INDEX;
+  float3 position = POSITION;
+  position.xyz *= 0.04;
+  position.y *= -1.0;
+  // float4x4 world_matrix = buffer_load(instance_infos, INSTANCE_INDEX).model;
+  @(EXPORT_POSITION
+      viewproj * float4(position, 1.0)
+  );
+@(END)
+#endif
+#ifdef PIXEL
+@(DECLARE_INPUT
+  (location 0)
+  (type float2)
+  (name tex_coords)
+)
+@(DECLARE_INPUT
+  (location 1)
+  (type "flat uint")
+  (name instance_index)
+)
+@(DECLARE_RENDER_TARGET
+  (location 0)
+)
+@(ENTRY)
+  float4 albedo = float4(0.0, 1.0, 1.0, 1.0);
+  /*i32 albedo_id = buffer_load(instance_infos, instance_index).albedo_id;
+  if (albedo_id >= 0) {
+    albedo = texture(sampler2D(material_textures[nonuniformEXT(albedo_id)], my_sampler), tex_coords);
+  }*/
+  @(EXPORT_COLOR 0 float4(albedo.rgb, 1.0));
+@(END)
+#endif
+)");
+    Pair<string_ref, string_ref> defines[] = {
+        {stref_s("VERTEX"), {}},
+        {stref_s("PIXEL"), {}},
+    };
+    if (vs.is_null())
+      vs = pc->create_shader_raw(rd::Stage_t::VERTEX, shader, &defines[0], 1);
+    if (ps.is_null())
+      ps = pc->create_shader_raw(rd::Stage_t::PIXEL, shader, &defines[1], 1);
+    {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER;
+      buf_info.size       = sizeof(Uniform);
+      uniform_buffer      = pc->create_buffer(buf_info);
+    }
+    if (texture_sampler.is_null()) {
+      rd::Sampler_Create_Info info;
+      MEMZERO(info);
+      info.address_mode_u = rd::Address_Mode::CLAMP_TO_EDGE;
+      info.address_mode_v = rd::Address_Mode::CLAMP_TO_EDGE;
+      info.address_mode_w = rd::Address_Mode::CLAMP_TO_EDGE;
+      info.mag_filter     = rd::Filter::NEAREST;
+      info.min_filter     = rd::Filter::NEAREST;
+      info.mip_mode       = rd::Filter::NEAREST;
+      info.anisotropy     = false;
+      info.max_anisotropy = 16.0f;
+      texture_sampler     = pc->create_sampler(info);
+    }
+    g_scene.on_pass_begin(pc);
+  }
+  void exec(rd::Imm_Ctx *ctx) override {
+    setup_default_state(ctx);
+    rd::DS_State ds_state;
+    MEMZERO(ds_state);
+    ds_state.cmp_op             = rd::Cmp::GE;
+    ds_state.enable_depth_test  = true;
+    ds_state.enable_depth_write = true;
+    ctx->DS_set_state(ds_state);
+    ctx->VS_set_shader(vs);
+    ctx->PS_set_shader(ps);
+    ctx->set_viewport(0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f);
+    ctx->set_scissor(0, 0, width, height);
+    {
+      Uniform *ptr  = (Uniform *)ctx->map_buffer(uniform_buffer);
+      ptr->viewproj = g_camera.viewproj();
+      ctx->unmap_buffer(uniform_buffer);
+    }
+    ctx->bind_uniform_buffer(0, 0, uniform_buffer, 0, sizeof(Uniform));
+    ctx->bind_sampler(1, 0, texture_sampler);
+    g_scene.gfx_exec(ctx);
+  }
+  string_ref get_name() override { return stref_s("opaque_pass"); }
+  void       release(rd::IResource_Manager *rm) override {
+    rm->release_resource(vs);
+    rm->release_resource(ps);
+  }
+};
+
+#if 0
+				
+
 
 struct Indirect_Draw_Arguments {
   u32 index_count;
@@ -615,223 +1110,7 @@ struct Indirect_Draw_Arguments {
   }
 };
 
-class Opaque_Pass : public rd::IPass {
-  Resource_ID vs;
-  Resource_ID ps;
-  u32         width, height;
-  Resource_ID uniform_buffer;
-  Resource_ID texture_sampler;
-  struct Uniform {
-    afloat4x4 viewproj;
-  };
-  Mesh_Prepare_Pass *mpass;
-  Culling_Pass *     cpass;
-  static_assert(sizeof(Uniform) == 64, "Uniform packing is wrong");
-
-  public:
-  Opaque_Pass() {
-    vs.reset();
-    ps.reset();
-    width  = 0;
-    height = 0;
-    uniform_buffer.reset();
-    texture_sampler.reset();
-  }
-  void on_end(rd::IResource_Manager *rm) override {
-    if (uniform_buffer.is_null() == false) {
-      rm->release_resource(uniform_buffer);
-      uniform_buffer.reset();
-    }
-  }
-  void on_begin(rd::IResource_Manager *pc) override {
-    mpass = (Mesh_Prepare_Pass *)pc->get_pass(stref_s("mesh_prepare_pass"));
-    cpass = (Culling_Pass *)pc->get_pass(stref_s("culling_pass"));
-    rd::Image2D_Info info = pc->get_swapchain_image_info();
-    width                 = info.width;
-    height                = info.height;
-    g_scene.camera.aspect = (float)width / height;
-    g_scene.camera.update();
-    {
-      rd::Clear_Color cl;
-      cl.clear = true;
-      cl.r     = 0.0f;
-      cl.g     = 0.0f;
-      cl.b     = 0.0f;
-      cl.a     = 1.0f;
-      rd::Image_Create_Info rt0_info;
-      MEMZERO(rt0_info);
-      rt0_info.format     = rd::Format::RGBA32_FLOAT;
-      rt0_info.width      = width;
-      rt0_info.height     = height;
-      rt0_info.depth      = 1;
-      rt0_info.layers     = 1;
-      rt0_info.levels     = 1;
-      rt0_info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
-      rt0_info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_RT |
-                            (u32)rd::Image_Usage_Bits::USAGE_SAMPLED |
-                            (u32)rd::Image_Usage_Bits::USAGE_UAV;
-      pc->add_render_target(stref_s("opaque_pass/rt0"), rt0_info, 0, 0, cl);
-    }
-    {
-      rd::Clear_Depth cl;
-      cl.clear = true;
-      cl.d     = 0.0f;
-      rd::Image_Create_Info info;
-      MEMZERO(info);
-      info.format     = rd::Format::D32_FLOAT;
-      info.width      = width;
-      info.height     = height;
-      info.depth      = 1;
-      info.layers     = 1;
-      info.levels     = 1;
-      info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
-      info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_DT |
-                        (u32)rd::Image_Usage_Bits::USAGE_SAMPLED;
-      pc->add_depth_target(stref_s("opaque_pass/ds"), info, 0, 0, cl);
-    }
-    static string_ref            shader    = stref_s(R"(
-@(DECLARE_UNIFORM_BUFFER
-  (set 0)
-  (binding 0)
-  (add_field (type float4x4) (name viewproj))
-)
-struct Instance_Info {
-  i32 albedo_id;
-  i32 arm_id;
-  i32 normal_id;
-  i32 pad;
-  float4x4 model;
-};
-@(DECLARE_BUFFER
-  (type READ_ONLY)
-  (set 0)
-  (binding 1)
-  (type Instance_Info)
-  (name instance_infos)
-)
-@(DECLARE_IMAGE
-  (type SAMPLED)
-  (array_size 1024)
-  (dim 2D)
-  (set 1)
-  (binding 1)
-  (name material_textures)
-)
-@(DECLARE_SAMPLER
-  (set 1)
-  (binding 0)
-  (name my_sampler)
-)
-#ifdef VERTEX
-@(DECLARE_INPUT (location 0) (type float3) (name POSITION))
-@(DECLARE_INPUT (location 1) (type float2) (name NORMAL))
-@(DECLARE_INPUT (location 2) (type float2) (name BINORMAL))
-@(DECLARE_INPUT (location 3) (type float2) (name TANGENT))
-@(DECLARE_INPUT (location 4) (type float2) (name TEXCOORD0))
-@(DECLARE_INPUT (location 5) (type float2) (name TEXCOORD1))
-@(DECLARE_INPUT (location 6) (type float2) (name TEXCOORD2))
-@(DECLARE_INPUT (location 7) (type float2) (name TEXCOORD3))
-
-@(DECLARE_OUTPUT
-  (location 0)
-  (type float2)
-  (name tex_coords)
-)
-@(DECLARE_OUTPUT
-  (location 1)
-  (type uint)
-  (name instance_index)
-)
-@(ENTRY)
-  tex_coords = TEXCOORD0;
-  instance_index = INSTANCE_INDEX;
-  float4x4 world_matrix = buffer_load(instance_infos, INSTANCE_INDEX).model;
-  @(EXPORT_POSITION
-      viewproj * world_matrix * float4(POSITION, 1.0)
-  );
-@(END)
-#endif
-#ifdef PIXEL
-@(DECLARE_INPUT
-  (location 0)
-  (type float2)
-  (name tex_coords)
-)
-@(DECLARE_INPUT
-  (location 1)
-  (type "flat uint")
-  (name instance_index)
-)
-@(DECLARE_RENDER_TARGET
-  (location 0)
-)
-@(ENTRY)
-  float4 albedo = float4(0.0, 1.0, 1.0, 1.0);
-  i32 albedo_id = buffer_load(instance_infos, instance_index).albedo_id;
-  if (albedo_id >= 0) {
-    albedo = texture(sampler2D(material_textures[nonuniformEXT(albedo_id)], my_sampler), tex_coords);
-  }
-  @(EXPORT_COLOR 0 float4(albedo.rgb, 1.0));
-@(END)
-#endif
-)");
-    Pair<string_ref, string_ref> defines[] = {
-        {stref_s("VERTEX"), {}},
-        {stref_s("PIXEL"), {}},
-    };
-    if (vs.is_null())
-      vs = pc->create_shader_raw(rd::Stage_t::VERTEX, shader, &defines[0], 1);
-    if (ps.is_null())
-      ps = pc->create_shader_raw(rd::Stage_t::PIXEL, shader, &defines[1], 1);
-    {
-      rd::Buffer_Create_Info buf_info;
-      MEMZERO(buf_info);
-      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
-      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER;
-      buf_info.size       = sizeof(Uniform);
-      uniform_buffer      = pc->create_buffer(buf_info);
-    }
-    if (texture_sampler.is_null()) {
-      rd::Sampler_Create_Info info;
-      MEMZERO(info);
-      info.address_mode_u = rd::Address_Mode::CLAMP_TO_EDGE;
-      info.address_mode_v = rd::Address_Mode::CLAMP_TO_EDGE;
-      info.address_mode_w = rd::Address_Mode::CLAMP_TO_EDGE;
-      info.mag_filter     = rd::Filter::NEAREST;
-      info.min_filter     = rd::Filter::NEAREST;
-      info.mip_mode       = rd::Filter::NEAREST;
-      info.anisotropy     = false;
-      info.max_anisotropy = 16.0f;
-      texture_sampler     = pc->create_sampler(info);
-    }
-  }
-  void exec(rd::Imm_Ctx *ctx) override {
-    setup_default_state(ctx);
-    rd::DS_State ds_state;
-    MEMZERO(ds_state);
-    ds_state.cmp_op             = rd::Cmp::GE;
-    ds_state.enable_depth_test  = true;
-    ds_state.enable_depth_write = true;
-    ctx->DS_set_state(ds_state);
-    ctx->VS_set_shader(vs);
-    ctx->PS_set_shader(ps);
-    ctx->set_viewport(0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f);
-    ctx->set_scissor(0, 0, width, height);
-    {
-      Uniform *ptr  = (Uniform *)ctx->map_buffer(uniform_buffer);
-      ptr->viewproj = g_scene.camera.viewproj();
-      ctx->unmap_buffer(uniform_buffer);
-    }
-    ctx->bind_uniform_buffer(0, 0, uniform_buffer, 0, sizeof(Uniform));
-    ctx->bind_sampler(1, 0, texture_sampler);
-    mpass->draw(ctx, cpass->out_arg_buf, cpass->out_cnt_buf);
-  }
-  string_ref get_name() override { return stref_s("opaque_pass"); }
-  void       release(rd::IResource_Manager *rm) override {
-    rm->release_resource(vs);
-    rm->release_resource(ps);
-  }
-};
+#endif // 0
 
 class Postprocess_Pass : public rd::IPass {
   Resource_ID cs;
@@ -1227,13 +1506,6 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
   unsigned char *font_pixels;
   int            font_width, font_height;
 
-  Timer timer;
-
-  struct Uniform {
-    float2x2 rot;
-    float4   color;
-  } uniform_data;
-
   i32         last_m_x;
   i32         last_m_y;
   ImDrawData *draw_data;
@@ -1251,8 +1523,8 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
       if ((m->state & 1) != 0 && last_m_x > 0) {
         i32 dx = cur_m_x - last_m_x;
         i32 dy = cur_m_y - last_m_y;
-        g_scene.camera.phi += (float)(dx)*g_scene.camera.aspect * 5.0e-3f;
-        g_scene.camera.theta += (float)(dy)*5.0e-3f;
+        g_camera.phi += (float)(dx)*g_camera.aspect * 5.0e-3f;
+        g_camera.theta += (float)(dy)*5.0e-3f;
       }
       last_m_x = cur_m_x;
       last_m_y = cur_m_y;
@@ -1270,7 +1542,6 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
     vertex_buffer.reset();
     index_buffer.reset();
     sampler.reset();
-    timer.init();
   }
   void on_end(rd::IResource_Manager *rm) override {
     rm->release_resource(vertex_buffer);
@@ -1283,6 +1554,8 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
     staging_buffer.reset();
   }
   void on_begin(rd::IResource_Manager *pc) override {
+    g_camera.aspect = (float)width / height;
+    g_camera.update();
     rd::Image2D_Info info = pc->get_swapchain_image_info();
     width                 = info.width;
     height                = info.height;
@@ -1446,7 +1719,6 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
       ctx->copy_buffer_to_image(staging_buffer, 0, font_texture, 0, 0);
       font_pixels = NULL;
     }
-    timer.update();
     setup_default_state(ctx);
     rd::Blend_State bs;
     MEMZERO(bs);
@@ -1542,7 +1814,6 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
     ImGui::DestroyContext();
     rm->release_resource(vs);
     rm->release_resource(ps);
-    timer.release();
     delete this;
   }
 };
@@ -1550,12 +1821,13 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
 int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
+  g_camera.init();
   g_scene.init();
   GUI_Pass *    gui  = new GUI_Pass;
   rd::Pass_Mng *pmng = rd::Pass_Mng::create(rd::Impl_t::VULKAN);
   pmng->set_event_consumer(gui);
-  pmng->add_pass(rd::Pass_t::RENDER, new Mesh_Prepare_Pass);
-  pmng->add_pass(rd::Pass_t::COMPUTE, new Culling_Pass);
+  // pmng->add_pass(rd::Pass_t::RENDER, new Mesh_Prepare_Pass);
+  // pmng->add_pass(rd::Pass_t::COMPUTE, new Culling_Pass);
   pmng->add_pass(rd::Pass_t::RENDER, new Opaque_Pass);
   pmng->add_pass(rd::Pass_t::COMPUTE, new Postprocess_Pass);
   pmng->add_pass(rd::Pass_t::RENDER, new Merge_Pass);

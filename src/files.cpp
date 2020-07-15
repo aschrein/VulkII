@@ -42,10 +42,7 @@ Image2D_Raw load_image(string_ref filename, rd::Format format) {
   }
 }
 
-PBR_Model load_gltf_pbr(string_ref filename) {
-  PBR_Model out;
-  out.init();
-  out.nodes.push(Transform_Node{});
+Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
   string_ref dir_path = get_dir(filename);
   TMP_STORAGE_SCOPE;
   cgltf_options options;
@@ -57,27 +54,27 @@ PBR_Model load_gltf_pbr(string_ref filename) {
   ASSERT_ALWAYS(
       cgltf_load_buffers(&options, data, stref_to_tmp_cstr(filename)) ==
       cgltf_result_success);
-  Hash_Table<string_ref, i32>              loaded_textures;
-  Hash_Table<cgltf_mesh *, Pair<u32, u32>> mesh_table;
+  Hash_Table<string_ref, i32>          loaded_textures;
+  Hash_Table<cgltf_mesh *, MeshNode *> mesh_table;
   loaded_textures.init();
   mesh_table.init();
   defer(loaded_textures.release());
-  defer(mesh_table.release());
+  defer({ mesh_table.release(); });
   auto load_texture = [&](char const *uri, rd::Format format) {
     if (loaded_textures.contains(stref_s(uri))) {
       return loaded_textures.get(stref_s(uri));
     }
     char full_path[0x100];
     snprintf(full_path, sizeof(full_path), "%.*s/%s", STRF(dir_path), uri);
-    out.images.push(load_image(stref_s(full_path), format));
-    loaded_textures.insert(stref_s(uri), (i32)(out.images.size - 1));
-    return (i32)(out.images.size - 1);
+    u32 img_id = factory->add_image(load_image(stref_s(full_path), format));
+    loaded_textures.insert(stref_s(uri), (i32)img_id);
+    return (i32)img_id;
   };
-
   for (u32 mesh_index = 0; mesh_index < data->meshes_count; mesh_index++) {
 
-    cgltf_mesh *mesh       = &data->meshes[mesh_index];
-    u32         start_mesh = out.meshes.size;
+    cgltf_mesh *mesh  = &data->meshes[mesh_index];
+    MeshNode *  mnode = factory->add_mesh(stref_s(mesh->name));
+    mesh_table.insert(mesh, mnode);
     for (u32 primitive_index = 0; primitive_index < mesh->primitives_count;
          primitive_index++) {
       cgltf_primitive *primitive = &mesh->primitives[primitive_index];
@@ -85,11 +82,12 @@ PBR_Model load_gltf_pbr(string_ref filename) {
       ASSERT_ALWAYS(primitive->extensions_count == 0);
       ASSERT_ALWAYS(primitive->targets_count == 0);
       // Load material
+      PBR_Material pbrmat;
+      pbrmat.init();
       {
         cgltf_material *material = primitive->material;
         ASSERT_ALWAYS(material->extensions_count == 0);
-        PBR_Material pbrmat;
-        pbrmat.init();
+
         if (material->has_pbr_metallic_roughness) {
           if (material->pbr_metallic_roughness.base_color_texture.texture !=
               NULL)
@@ -134,7 +132,6 @@ PBR_Model load_gltf_pbr(string_ref filename) {
           pbrmat.normal_id =
               load_texture(material->normal_texture.texture->image->uri,
                            rd::Format::RGBA8_UNORM);
-        out.materials.push(pbrmat);
       }
       Raw_Mesh_Opaque opaque_mesh;
       opaque_mesh.init();
@@ -298,54 +295,45 @@ PBR_Model load_gltf_pbr(string_ref filename) {
         default: UNIMPLEMENTED;
         }
       }
-      out.meshes.push(opaque_mesh);
+
+      char buf[0x100];
+      snprintf(buf, sizeof(buf), "%s_%i", mesh->name, primitive_index);
+      opaque_mesh.sort_attributes();
+      mnode->add_primitive(opaque_mesh, pbrmat);
     }
-    u32 end_mesh = out.meshes.size;
-    mesh_table.insert(mesh, {start_mesh, end_mesh});
   }
-  Hash_Table<cgltf_node *, u32> node_indices;
+  Hash_Table<cgltf_node *, Node *> node_indices;
   node_indices.init();
   defer(node_indices.release());
-  std::function<u32(cgltf_node *)> load_node = [&](cgltf_node *node) {
+  std::function<Node *(cgltf_node *)> load_node = [&](cgltf_node *node) {
     if (node_indices.contains(node)) {
       return node_indices.get(node);
     }
-    Transform_Node tnode;
-    tnode.init();
+    Node *tnode = factory->add_node(stref_s(node->name));
     if (node->mesh != NULL) {
       ASSERT_ALWAYS(mesh_table.contains(node->mesh));
-      Pair<u32, u32> mesh_range = mesh_table.get(node->mesh);
-      for (u32 mesh_index = mesh_range.first; mesh_index < mesh_range.second;
-           mesh_index++) {
-        tnode.meshes.push(mesh_index);
-      }
+      MeshNode *mesh_range = mesh_table.get(node->mesh);
+      tnode->add_child(mesh_range);
     }
     if (node->has_translation) {
-      tnode.offset = float3(node->translation[0], node->translation[1],
-                            node->translation[2]);
+      tnode->offset = float3(node->translation[0], node->translation[1],
+                             node->translation[2]);
     }
     if (node->has_scale) {
-      tnode.scale = float3(node->scale[0], node->scale[1], node->scale[2]);
+      tnode->scale = float3(node->scale[0], node->scale[1], node->scale[2]);
     }
     if (node->has_rotation) {
-      tnode.rotation = quat(node->rotation[0], node->rotation[1],
-                            node->rotation[2], node->rotation[3]);
+      tnode->rotation = quat(node->rotation[0], node->rotation[1],
+                             node->rotation[2], node->rotation[3]);
     }
     for (u32 child_index = 0; child_index < node->children_count;
          child_index++) {
       cgltf_node *child_node = node->children[child_index];
-      tnode.children.push(load_node(child_node));
+      tnode->add_child(load_node(child_node));
     }
-    out.nodes.push(tnode);
-    node_indices.insert(node, (u32)(out.nodes.size - 1));
-    return (u32)(out.nodes.size - 1);
+    return tnode;
   };
-  for (u32 node_index = 0; node_index < data->nodes_count; node_index++) {
-    cgltf_node *node = &data->nodes[node_index];
-    if (node_indices.contains(node))
-      continue; // This node has already been loaded as part of some node
-    out.nodes[0].children.push(load_node(node));
-  }
+  Node *root = load_node(&data->nodes[0]);
 
   vec3 max = vec3(-1.0e10f);
   vec3 min = vec3(1.0e10f);
@@ -360,6 +348,6 @@ PBR_Model load_gltf_pbr(string_ref filename) {
 
   //
 
-  out.nodes[0].offset = -avg * vk;
-  return out;
+  root->offset = -avg * vk;
+  return root;
 }

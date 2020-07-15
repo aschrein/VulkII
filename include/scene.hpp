@@ -396,9 +396,7 @@ struct Triangle_Full {
   Vertex_Full v1;
   Vertex_Full v2;
 };
-// We are gonna use one simplified material schema for everything
 struct PBR_Material {
-  // AO+Roughness+Metalness
   i32    normal_id;
   i32    albedo_id;
   i32    arm_id;
@@ -431,7 +429,26 @@ struct Raw_Mesh_Opaque {
   u32                        num_indices;
   float3                     min;
   float3                     max;
+  bool                       is_compatible(Raw_Mesh_Opaque const &that) const {
+    if (attributes.size != that.attributes.size ||
+        index_type != that.index_type)
+      return false;
+    ito(attributes.size) {
+      if (attributes[i].format != that.attributes[i].format ||
+          attributes[i].stride != that.attributes[i].stride ||
+          attributes[i].type != that.attributes[i].type || false
 
+      )
+        return false;
+    }
+    return true;
+  }
+  void sort_attributes() {
+    quicky_sort(attributes.elems, attributes.size,
+                [](Attribute const &a, Attribute const &b) {
+                  return (u32)a.type < (u32)b.type;
+                });
+  }
   void init() {
     MEMZERO(*this);
     attributes.init();
@@ -592,31 +609,188 @@ struct Raw_Mesh_Opaque {
   }
 };
 
-struct Transform_Node {
-  float3     offset;
-  quat       rotation;
-  float3     scale;
-  float4x4   transform_cache;
-  Array<u32> meshes;
-  Array<u32> children;
-  void       init() {
-    MEMZERO(*this);
-    meshes.init();
+struct BVH_Node {
+  // Bit layout:
+  // +-------------------------+
+  // | 32 31 30 29 28 27 26 25 |
+  // | 24 23 22 21 20 19 18 17 |
+  // | 16 15 14 13 12 11 10 9  |
+  // | 8  7  6  5  4  3  2  1  |
+  // +-------------------------+
+  // +--------------+
+  // | [32:32] Leaf |
+  // +--------------+
+  // |  Leaf:
+  // +->+---------------------+---------------------+
+  // |  | [31:25] Item count  | [24:1] Items offset |
+  // |  +---------------------+---------------------+
+  // |
+  // |  Branch:
+  // +->+----------------------------+
+  //    | [24:1]  First child offset |
+  //    +----------------------------+
+
+  // constants
+  static constexpr u32 LEAF_BIT = 1 << 31;
+  // Leaf flags:
+  static constexpr u32 ITEMS_OFFSET_MASK  = 0xffffff;  // 24 bits
+  static constexpr u32 ITEMS_OFFSET_SHIFT = 0;         // low bits
+  static constexpr u32 NUM_ITEMS_MASK     = 0b1111111; // 7 bits
+  static constexpr u32 NUM_ITEMS_SHIFT    = 24;        // after first 24 bits
+  static constexpr u32 MAX_ITEMS          = 16;        // max items
+  // Node flags:
+  static constexpr u32 FIRST_CHILD_MASK  = 0xffffff;
+  static constexpr u32 FIRST_CHILD_SHIFT = 0;
+  static constexpr u32 MAX_DEPTH         = 20;
+  static constexpr f32 EPS               = 1.0e-3f;
+
+  float3 min;
+  float3 max;
+  u32    flags;
+
+  bool intersects(float3 tmin, float3 tmax) {
+    return                 //
+        tmax.x >= min.x && //
+        tmin.x <= max.x && //
+        tmax.y >= min.y && //
+        tmin.y <= max.y && //
+        tmax.z >= min.z && //
+        tmin.z <= max.z && //
+        true;
+  }
+  bool inside(float3 tmin) {
+    return                 //
+        tmin.x >= min.x && //
+        tmin.x <= max.x && //
+        tmin.y >= min.y && //
+        tmin.y <= max.y && //
+        tmin.z >= min.z && //
+        tmin.z <= max.z && //
+        true;
+  }
+  bool intersects_ray(float3 ro, float3 rd, float min_t) {
+    if (inside(ro)) return true;
+    float3 invd = 1.0f / rd;
+    float  dx_n = (min.x - ro.x) * invd.x;
+    float  dy_n = (min.y - ro.y) * invd.y;
+    float  dz_n = (min.z - ro.z) * invd.z;
+    float  dx_f = (max.x - ro.x) * invd.x;
+    float  dy_f = (max.y - ro.y) * invd.y;
+    float  dz_f = (max.z - ro.z) * invd.z;
+    float  nt   = MAX3(MIN(dx_n, dx_f), MIN(dy_n, dy_f), MIN(dz_n, dz_f));
+    float  ft   = MIN3(MAX(dx_n, dx_f), MAX(dy_n, dy_f), MAX(dz_n, dz_f));
+    if (nt > min_t || nt > ft - EPS) return false;
+    return true;
+  }
+  bool intersects_ray(float3 ro, float3 rd) {
+    if (inside(ro)) return true;
+    float3 invd = 1.0f / rd;
+    float  dx_n = (min.x - ro.x) * invd.x;
+    float  dy_n = (min.y - ro.y) * invd.y;
+    float  dz_n = (min.z - ro.z) * invd.z;
+    float  dx_f = (max.x - ro.x) * invd.x;
+    float  dy_f = (max.y - ro.y) * invd.y;
+    float  dz_f = (max.z - ro.z) * invd.z;
+    float  nt   = MAX3(MIN(dx_n, dx_f), MIN(dy_n, dy_f), MIN(dz_n, dz_f));
+    float  ft   = MIN3(MAX(dx_n, dx_f), MAX(dy_n, dy_f), MAX(dz_n, dz_f));
+    if (nt > ft - EPS) return false;
+    return true;
+  }
+  void init_leaf(float3 min, float3 max, u32 offset) {
+    flags = LEAF_BIT;
+    ASSERT_DEBUG(offset <= ITEMS_OFFSET_MASK);
+    flags |= ((offset << ITEMS_OFFSET_SHIFT));
+    this->min = min;
+    this->max = max;
+  }
+  void init_branch(float3 min, float3 max, BVH_Node *child) {
+    ptrdiff_t diff = ((u8 *)child - (u8 *)this) / sizeof(BVH_Node);
+    ASSERT_DEBUG(diff > 0 && diff < FIRST_CHILD_MASK);
+    flags     = ((u32)diff << FIRST_CHILD_SHIFT);
+    this->min = min;
+    this->max = max;
+  }
+  bool is_leaf() { return (flags & LEAF_BIT) == LEAF_BIT; }
+  u32  num_items() { return ((flags >> NUM_ITEMS_SHIFT) & NUM_ITEMS_MASK); }
+  u32  items_offset() {
+    return ((flags >> ITEMS_OFFSET_SHIFT) & ITEMS_OFFSET_MASK);
+  }
+  BVH_Node *first_child() {
+    return this + (((flags >> FIRST_CHILD_SHIFT) & FIRST_CHILD_MASK));
+  }
+  void set_num_items(u32 num) {
+    ASSERT_DEBUG(num <= NUM_ITEMS_MASK);
+    flags &= ~(NUM_ITEMS_MASK << NUM_ITEMS_SHIFT);
+    flags |= (num << NUM_ITEMS_SHIFT);
+  }
+  void add_item() { set_num_items(num_items() + 1); }
+  bool is_full() { return num_items() == MAX_ITEMS - 1; }
+};
+
+class Node {
+  protected:
+  u32                 id;
+  float4x4            transform_cache;
+  Node *              parent;
+  Array<Node *>       children;
+  float3              aabb_min;
+  float3              aabb_max;
+  inline_string<0x10> name;
+
+  static u32 gen_id() {
+    static u32 _id = 1;
+    return _id++;
+  }
+
+  void init(string_ref name) {
+    id = gen_id();
+    if (name.len == 0) {
+      char buf[0x10];
+      snprintf(buf, sizeof(buf), "node_%i", id);
+      this->name.init(stref_s(buf));
+    } else
+      this->name.init(name);
     children.init();
+    parent          = NULL;
     scale           = float3(1.0f, 1.0f, 1.0f);
     offset          = float3(0.0f, 0.0f, 0.0f);
+    aabb_min        = float3(0.0f, 0.0f, 0.0f);
+    aabb_max        = float3(0.0f, 0.0f, 0.0f);
+    rotation        = quat();
     transform_cache = float4x4(1.0f);
   }
-  void release() {
-    meshes.release();
+
+  public:
+  float3 offset;
+  quat   rotation;
+  float3 scale;
+
+  static Node *create(string_ref name) {
+    Node *out = new Node;
+    out->init(name);
+    return out;
+  }
+  static u64 ID() {
+    static char p;
+    return (u64)(intptr_t)&p;
+  }
+  virtual u64  get_type_id() const { return ID(); }
+  string_ref   get_name() const { return name.ref(); }
+  u32          get_id() const { return id; }
+  virtual void release() {
+    ito(children.size) children[i]->release();
     children.release();
-    MEMZERO(*this);
+    delete this;
+  }
+  void set_parent(Node *node) { parent = node; }
+  void add_child(Node *node) {
+    children.push(node);
+    node->set_parent(node);
   }
   void update_cache(float4x4 const &parent = float4x4(1.0f)) {
     transform_cache = parent * get_transform();
   }
   float4x4 get_transform() {
-    //  return transform;
     return glm::translate(float4x4(1.0f), offset) * (float4x4)rotation *
            glm::scale(float4x4(1.0f), scale);
   }
@@ -625,33 +799,245 @@ struct Transform_Node {
     mat4 transform = get_transform();
     cofactor(&transform[0][0], &out[0][0]);
   }
+  virtual void dump(u32 indent = 0) const {
+    ito(indent) fprintf(stdout, " ");
+    string_ref n = get_name();
+    fprintf(stdout, "%.*s\n", STRF(n));
+    ito(children.size) children[i]->dump(indent + 2);
+  }
+  void set_aabb(float3 aabb_min, float3 aabb_max) {
+    this->aabb_min = aabb_min;
+    this->aabb_max = aabb_max;
+  }
+  Array<Node *> const &get_children() const { return children; }
+  virtual ~Node() {}
 };
 
-// To make things simple we use one format of meshes
-struct PBR_Model {
-  Array<Image2D_Raw>     images;
-  Array<Raw_Mesh_Opaque> meshes;
-  Array<PBR_Material>    materials;
-  Array<Transform_Node>  nodes;
-
-  void init() {
-    images.init();
-    meshes.init();
-    materials.init();
-    nodes.init();
+template <typename T> struct BVH_Helper {
+  float3      min;
+  float3      max;
+  Array<T>    items;
+  BVH_Helper *left;
+  BVH_Helper *right;
+  bool        is_leaf;
+  void        init() {
+    MEMZERO(*this);
+    items.init();
+    min     = float3(1.0e10f, 1.0e10f, 1.0e10f);
+    max     = float3(-1.0e10f, -1.0e10f, -1.0e10f);
+    is_leaf = true;
   }
   void release() {
-    ito(images.size) images[i].release();
-    images.release();
-    ito(meshes.size) meshes[i].release();
-    meshes.release();
-    materials.release();
-    ito(nodes.size) nodes[i].release();
-    nodes.release();
+    if (left != NULL) left->release();
+    if (right != NULL) right->release();
+    items.release();
+    MEMZERO(*this);
+    delete this;
+  }
+  void reserve(size_t size) { items.reserve(size); }
+  void push(T const &item) {
+    items.push(item);
+    float3 tmin, tmax;
+    get_aabb(item, tmin, tmax);
+    ito(3) min[i] = MIN(min[i], tmin[i]);
+    ito(3) max[i] = MAX(max[i], tmax[i]);
+  }
+  u32 split(u32 max_items, u32 depth = 0) {
+    ASSERT_DEBUG(depth < BVH_Node::MAX_DEPTH);
+    if (items.size > max_items && depth < BVH_Node::MAX_DEPTH) {
+      left = new BVH_Helper;
+      left->init();
+      left->reserve(items.size / 2);
+      right = new BVH_Helper;
+      right->init();
+      right->reserve(items.size / 2);
+      struct Sorting_Node {
+        u32   id;
+        float val;
+      };
+      {
+        TMP_STORAGE_SCOPE;
+        u32           num_items = items.size;
+        Sorting_Node *sorted_dims[6];
+        ito(6) sorted_dims[i] =
+            (Sorting_Node *)tl_alloc_tmp(sizeof(Sorting_Node) * num_items);
+        T *items = items.ptr;
+        ito(num_items) {
+          float3 tmin, tmax;
+          get_aabb(items[i], tmin, tmax);
+          jto(3) {
+            sorted_dims[j][i].val     = tmin[j];
+            sorted_dims[j][i].id      = i;
+            sorted_dims[j + 3][i].val = tmax[j];
+            sorted_dims[j + 3][i].id  = i;
+          }
+        }
+        ito(6) quicky_sort(sorted_dims[i], num_items,
+                           [](Sorting_Node const &a, Sorting_Node const &b) {
+                             return a.val < b.val;
+                           });
+        float max_dim_diff = 0.0f;
+        u32   max_dim_id   = 0;
+        u32   last_item    = num_items - 1;
+        ito(3) {
+          // max - min
+          float diff =
+              sorted_dims[i + 3][last_item].val - sorted_dims[i][0].val;
+          if (diff > max_dim_diff) {
+            max_dim_diff = diff;
+            max_dim_id   = i;
+          }
+        }
+        u32 split_index = (last_item + 1) / 2;
+        ito(num_items) {
+          u32 item_id = sorted_dims[max_dim_id][i].id;
+          T   item    = items[item_id];
+          if (i < split_index) {
+            left->push(item);
+          } else {
+            right->push(item);
+          }
+        }
+      }
+      is_leaf = false;
+      items.release();
+      u32 cnt = left->split(max_items, depth + 1);
+      cnt += right->split(max_items, depth + 1);
+      return cnt + 1;
+    }
+    return 1;
   }
 };
 
-PBR_Model   load_gltf_pbr(string_ref filename);
+static_assert(sizeof(BVH_Node) == 28, "Blamey!");
+
+template <typename T> struct BVH {
+  Array<T>        item_pool;
+  Array<BVH_Node> node_pool;
+  BVH_Node *      root;
+
+  void gen(BVH_Node *node, BVH_Helper<T> *hnode) {
+    ASSERT_ALWAYS(node != NULL);
+    ASSERT_ALWAYS(hnode != NULL);
+    if (hnode->is_leaf) {
+      ASSERT_DEBUG(hnode->items.size != 0);
+      u32 item_offset = alloc_item_chunk();
+      node->init_leaf(hnode->min, hnode->max, item_offset);
+      ASSERT_DEBUG(hnode->items.size <= BVH_Node::MAX_ITEMS);
+      node->set_num_items(hnode->items.size);
+      T *items = item_pool.at(node->items_offset());
+      ito(hnode->items.size) { items->store(i, hnode->items[i]); }
+    } else {
+      BVH_Node *children = node_pool.alloc(2);
+      node->init_branch(hnode->min, hnode->max, children);
+      gen(children + 0, hnode->left);
+      gen(children + 1, hnode->right);
+    }
+  }
+  void init(T *items, u32 num_items) { //
+    BVH_Helper *hroot = new BVH_Helper;
+    hroot->init();
+    hroot->reserve(num_items);
+    defer(hroot->release());
+    ito(num_items) { hroot->push(items[i]); }
+    u32 ncnt = hroot->split(BVH_Node::MAX_ITEMS);
+    item_pool.init();
+    node_pool.init();
+    item_pool.reserve(num_items * 4);
+    node_pool.reserve(ncnt);
+    root = node_pool.alloc(1);
+    gen(root, hroot);
+  }
+  u32 alloc_item_chunk() {
+    T *new_chunk = item_pool.alloc(1);
+    MEMZERO(*new_chunk);
+    T *item_root = item_pool.at(0);
+    return (u32)(((u8 *)new_chunk - (u8 *)item_root) / sizeof(T));
+  }
+  void release() {
+    item_pool.release();
+    node_pool.release();
+  }
+  template <typename F> void traverse(float3 ro, float3 rd, F fn) {
+    if (!root->intersects_ray(ro, rd)) return;
+    traverse(root, ro, rd, fn);
+  }
+  template <typename F>
+  void traverse(BVH_Node *node, float3 ro, float3 rd, F fn) {
+    if (node->is_leaf()) {
+      T * items     = item_pool.at(node->items_offset());
+      u32 num_items = node->num_items();
+      ASSERT_ALWAYS(num_items <= vfloat3::WIDTH);
+      fn(*items);
+    } else {
+      BVH_Node *children = node->first_child();
+      BVH_Node *left     = children + 0;
+      BVH_Node *right    = children + 1;
+      if (left->intersects_ray(ro, rd)) traverse(left, ro, rd, fn);
+      if (right->intersects_ray(ro, rd)) traverse(right, ro, rd, fn);
+    }
+  }
+};
+
+struct Primitive {
+  Raw_Mesh_Opaque mesh;
+  PBR_Material    material;
+  void            init() {
+    mesh.init();
+    material.init();
+  }
+  void release() { mesh.release(); }
+};
+
+class MeshNode : public Node {
+  protected:
+  Array<Primitive> primitives;
+  void             init(string_ref name) {
+    Node::init(name);
+    primitives.init();
+  }
+
+  public:
+  static MeshNode *create(string_ref name) {
+    MeshNode *out = new MeshNode;
+    out->init(name);
+    return out;
+  }
+  static u64 ID() {
+    static char p;
+    return (u64)(intptr_t)&p;
+  }
+  u64  get_type_id() const override { return ID(); }
+  void add_primitive(Raw_Mesh_Opaque &mesh, PBR_Material &mat) {
+    if (primitives.size != 0) {
+      ASSERT_ALWAYS(primitives[0].mesh.is_compatible(mesh));
+    }
+    Primitive p;
+    p.init();
+    p.mesh     = mesh;
+    p.material = mat;
+    primitives.push(p);
+  }
+  void release() override {
+    ito(primitives.size) primitives[i].release();
+    primitives.release();
+    Node::release();
+  }
+  Array<Primitive> const &get_primitives() const { return primitives; }
+};
+
+template <typename T> static bool isa(Node *node) {
+  return node->get_type_id() == T::ID();
+}
+
+class IFactory {
+  public:
+  virtual Node *    add_node(string_ref name)  = 0;
+  virtual MeshNode *add_mesh(string_ref name)  = 0;
+  virtual u32       add_image(Image2D_Raw img) = 0;
+};
+
+Node *      load_gltf_pbr(IFactory *factory, string_ref filename);
 Image2D_Raw load_image(string_ref filename,
                        rd::Format format = rd::Format::RGBA8_SRGBA);
 #endif // SCENE
