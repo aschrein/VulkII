@@ -1,0 +1,16 @@
+(
+(camera
+ (set_phi 0.614272)
+ (set_theta 1.695790)
+ (set_distance 6.000000)
+ (set_look_at 0.675820 1.194198 4.189327)
+ (set_aspect 1.564103)
+ (set_fov 1.570796)
+ (set_znear 0.001000)
+ (set_zfar 1000000.000000)
+)
+(config
+ (enable_rasterization_pass 1)
+ (enable_compute_render_pass 1)
+)
+)

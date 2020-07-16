@@ -181,6 +181,7 @@ template <typename F> __Defer__<F> defer_func(F f) { return __Defer__<F>(f); }
 #define DEFER_2(x, y) DEFER_1(x, y)
 #define DEFER_3(x) DEFER_2(x, __COUNTER__)
 #define defer(code) auto DEFER_3(_defer_) = defer_func([&]() { code; })
+#define static_defer(code) auto DEFER_3(_defer_) = defer_func([]() { code; })
 
 #define STRINGIFY(a) _STRINGIFY(a)
 #define _STRINGIFY(a) #a
@@ -704,7 +705,8 @@ static inline void dump_file(char const *path, void const *data, size_t size) {
 
 static inline char *read_file_tmp(char const *filename) {
   FILE *text_file = fopen(filename, "rb");
-  ASSERT_ALWAYS(text_file);
+  if (text_file == NULL)
+    return NULL;
   fseek(text_file, 0, SEEK_END);
   long fsize = ftell(text_file);
   fseek(text_file, 0, SEEK_SET);

@@ -2612,7 +2612,10 @@ class Vk_Ctx : public rd::Imm_Ctx {
         ID sampler_id;
       } sampler;
     };
-    Resource_Binding() {}
+    void reset() { memset(this, 0, sizeof(*this)); }
+    bool operator==(Resource_Binding const &that) const {
+      return memcmp(this, &that, sizeof(*this)) == 0;
+    }
   };
 
   template <typename K, typename V>
@@ -3350,6 +3353,10 @@ class Vk_Ctx : public rd::Imm_Ctx {
   }
 
   void insert_binding(Resource_Binding rb) {
+    // Check for redundant bindings
+    if (deferred_bindings.contains({rb.set, rb.binding, rb.element})) {
+      if (deferred_bindings.get({rb.set, rb.binding, rb.element}) == rb) return;
+    }
     set_dirty_flags |= (1 << rb.set);
     deferred_bindings.insert({rb.set, rb.binding, rb.element}, rb);
   }

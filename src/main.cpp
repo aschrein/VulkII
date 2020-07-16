@@ -12,12 +12,39 @@
 #include <imgui.h>
 #include <imgui/examples/imgui_impl_sdl.h>
 
+struct Config {
+  bool enable_rasterization_pass  = true;
+  bool enable_compute_render_pass = true;
+
+  void traverse(List *l) {
+    if (l == NULL) return;
+    if (l->child) {
+      traverse(l->child);
+      traverse(l->next);
+    } else {
+      if (l->cmp_symbol("enable_rasterization_pass")) {
+        enable_rasterization_pass = l->get(1)->parse_int() > 0;
+      } else if (l->cmp_symbol("enable_compute_render_pass")) {
+        enable_compute_render_pass = l->get(1)->parse_int() > 0;
+      }
+    }
+  }
+
+  void dump(FILE *file) {
+    fprintf(file, "(config\n");
+    fprintf(file, " (enable_rasterization_pass %i)\n",
+            enable_rasterization_pass ? 1 : 0);
+    fprintf(file, " (enable_compute_render_pass %i)\n",
+            enable_compute_render_pass ? 1 : 0);
+    fprintf(file, ")\n");
+  }
+
+} g_config;
+
 struct Camera {
   float  phi;
   float  theta;
   float  distance;
-  float  mx;
-  float  my;
   float3 look_at;
   float  aspect;
   float  fov;
@@ -35,13 +62,53 @@ struct Camera {
     phi      = PI / 2.0f;
     theta    = PI / 2.0f;
     distance = 6.0f;
-    mx       = 0.0f;
-    my       = 0.0f;
     look_at  = float3(0.0f, -4.0f, 0.0f);
     aspect   = 1.0;
     fov      = PI / 2.0;
     znear    = 1.0e-3f;
     zfar     = 10.0e5f;
+  }
+
+  void traverse(List *l) {
+    if (l == NULL)
+      return;
+    if (l->child) {
+      traverse(l->child);
+      traverse(l->next);
+    } else {
+      if (l->cmp_symbol("set_phi")) {
+        phi = l->get(1)->parse_float();
+      } else if (l->cmp_symbol("set_theta")) {
+        theta = l->get(1)->parse_float();
+      } else if (l->cmp_symbol("set_distance")) {
+        distance = l->get(1)->parse_float();
+      } else if (l->cmp_symbol("set_look_at")) {
+        look_at.x = l->get(1)->parse_float();
+        look_at.y = l->get(2)->parse_float();
+        look_at.z = l->get(3)->parse_float();
+      } else if (l->cmp_symbol("set_aspect")) {
+        aspect = l->get(1)->parse_float();
+      } else if (l->cmp_symbol("set_fov")) {
+        fov = l->get(1)->parse_float();
+      } else if (l->cmp_symbol("set_znear")) {
+        znear = l->get(1)->parse_float();
+      } else if (l->cmp_symbol("set_zfar")) {
+        zfar = l->get(1)->parse_float();
+      }
+    }
+  }
+
+  void dump(FILE *file) {
+    fprintf(file, "(camera\n");
+    fprintf(file, " (set_phi %f)\n", phi);
+    fprintf(file, " (set_theta %f)\n", theta);
+    fprintf(file, " (set_distance %f)\n", distance);
+    fprintf(file, " (set_look_at %f %f %f)\n", look_at.x, look_at.y, look_at.z);
+    fprintf(file, " (set_aspect %f)\n", aspect);
+    fprintf(file, " (set_fov %f)\n", fov);
+    fprintf(file, " (set_znear %f)\n", znear);
+    fprintf(file, " (set_zfar %f)\n", zfar);
+    fprintf(file, ")\n");
   }
 
   void release() {}
@@ -68,6 +135,51 @@ struct Camera {
   }
   float4x4 viewproj() { return proj * view; }
 } g_camera;
+
+static void init_traverse(List *l) {
+  if (l == NULL)
+      return;
+  if (l->child) {
+    init_traverse(l->child);
+    init_traverse(l->next);
+  } else {
+    if (l->cmp_symbol("camera")) {
+      g_camera.traverse(l->next);
+    } else if (l->cmp_symbol("config")) {
+      g_config.traverse(l->next);
+    }
+  }
+}
+
+static int g_init = []() {
+  TMP_STORAGE_SCOPE;
+  struct List_Allocator {
+    List *alloc() {
+      List *out = (List *)tl_alloc_tmp(sizeof(List));
+      return out;
+    }
+  } list_allocator;
+  TMP_STORAGE_SCOPE;
+  g_camera.init();
+  char *state = read_file_tmp("scene_state");
+
+  if (state != NULL) {
+    List *cur = List::parse(stref_s(state), list_allocator);
+
+    init_traverse(cur);
+  }
+
+  return 0;
+}();
+
+static_defer({
+  FILE *scene_dump = fopen("scene_state", "wb");
+  fprintf(scene_dump, "(\n");
+  defer(fclose(scene_dump));
+  g_camera.dump(scene_dump);
+  g_config.dump(scene_dump);
+  fprintf(scene_dump, ")\n");
+});
 
 class GfxMeshNode : public MeshNode {
   protected:
@@ -174,7 +286,8 @@ class GfxMeshNode : public MeshNode {
     ctx->IA_set_index_buffer(vertex_buffer, offset + index_offset,
                              rd::Index_t::UINT32);
     // ctx->bind_storage_buffer(0, 1, instance_buffer, 0,
-    //                         cpu_instance_info.size * sizeof(Instance_Info));
+    //                         cpu_instance_info.size *
+    //                         sizeof(Instance_Info));
     u32 vertex_cursor = 0;
     u32 index_cursor  = 0;
     ito(primitives.size) {
@@ -302,7 +415,6 @@ public:
   }
   void gfx_exec(rd::Imm_Ctx *ctx) {
     if (dummy_initialized == false) {
-
       {
         u32 *ptr = (u32 *)ctx->map_buffer(staging_buffer);
         ito(16 * 16) { ptr[i] = 0xff0000ffu; }
@@ -400,8 +512,8 @@ class Opaque_Pass : public rd::IPass {
   Opaque_Pass() {
     vs.reset();
     ps.reset();
-    width  = 0;
-    height = 0;
+    width  = 512;
+    height = 512;
     uniform_buffer.reset();
     texture_sampler.reset();
   }
@@ -412,10 +524,17 @@ class Opaque_Pass : public rd::IPass {
     }
     g_scene.on_pass_end(rm);
   }
+  void set_size(u32 width, u32 height) {
+    this->width  = width;
+    this->height = height;
+  }
   void on_begin(rd::IResource_Manager *pc) override {
-    rd::Image2D_Info info = pc->get_swapchain_image_info();
-    width                 = info.width;
-    height                = info.height;
+    // rd::Image2D_Info info = pc->get_swapchain_image_info();
+    //    width                 = info.width;
+    // height                = info.height;
+    g_camera.aspect = (float)width / height;
+    g_camera.update();
+
     {
       rd::Clear_Color cl;
       cl.clear = true;
@@ -489,30 +608,30 @@ struct Instance_Info {
 )
 #ifdef VERTEX
 @(DECLARE_INPUT (location 0) (type float3) (name POSITION))
-@(DECLARE_INPUT (location 1) (type float2) (name NORMAL))
-@(DECLARE_INPUT (location 2) (type float2) (name BINORMAL))
-@(DECLARE_INPUT (location 3) (type float2) (name TANGENT))
+@(DECLARE_INPUT (location 1) (type float3) (name NORMAL))
+@(DECLARE_INPUT (location 2) (type float3) (name BINORMAL))
+@(DECLARE_INPUT (location 3) (type float3) (name TANGENT))
 @(DECLARE_INPUT (location 4) (type float2) (name TEXCOORD0))
 @(DECLARE_INPUT (location 5) (type float2) (name TEXCOORD1))
 @(DECLARE_INPUT (location 6) (type float2) (name TEXCOORD2))
 @(DECLARE_INPUT (location 7) (type float2) (name TEXCOORD3))
 
-@(DECLARE_OUTPUT
-  (location 0)
-  (type float2)
-  (name tex_coords)
-)
-@(DECLARE_OUTPUT
-  (location 1)
-  (type uint)
-  (name instance_index)
-)
+@(DECLARE_OUTPUT (location 0) (type float3) (name PIXEL_POSITION))
+@(DECLARE_OUTPUT (location 1) (type float3) (name PIXEL_NORMAL))
+@(DECLARE_OUTPUT (location 2) (type float3) (name PIXEL_BINORMAL))
+@(DECLARE_OUTPUT (location 3) (type float3) (name PIXEL_TANGENT))
+@(DECLARE_OUTPUT (location 4) (type float2) (name PIXEL_TEXCOORD0))
+@(DECLARE_OUTPUT (location 5) (type uint) (name PIXEL_INSTANCE_ID))
+
 @(ENTRY)
-  tex_coords = TEXCOORD0;
-  instance_index = INSTANCE_INDEX;
+  PIXEL_POSITION  = POSITION;
+  PIXEL_NORMAL    = NORMAL;
+  PIXEL_BINORMAL  = BINORMAL;
+  PIXEL_TANGENT   = TANGENT;
+  PIXEL_TEXCOORD0 = TEXCOORD0;
+  PIXEL_INSTANCE_ID = INSTANCE_INDEX;
   float3 position = POSITION;
   position.xyz *= 0.04;
-  position.y *= -1.0;
   // float4x4 world_matrix = buffer_load(instance_infos, INSTANCE_INDEX).model;
   @(EXPORT_POSITION
       viewproj * float4(position, 1.0)
@@ -520,16 +639,13 @@ struct Instance_Info {
 @(END)
 #endif
 #ifdef PIXEL
-@(DECLARE_INPUT
-  (location 0)
-  (type float2)
-  (name tex_coords)
-)
-@(DECLARE_INPUT
-  (location 1)
-  (type "flat uint")
-  (name instance_index)
-)
+@(DECLARE_INPUT (location 0) (type float3) (name PIXEL_POSITION))
+@(DECLARE_INPUT (location 1) (type float3) (name PIXEL_NORMAL))
+@(DECLARE_INPUT (location 2) (type float3) (name PIXEL_BINORMAL))
+@(DECLARE_INPUT (location 3) (type float3) (name PIXEL_TANGENT))
+@(DECLARE_INPUT (location 4) (type float3) (name PIXEL_TEXCOORD0))
+@(DECLARE_INPUT (location 5) (type "flat uint") (name PIXEL_INSTANCE_ID))
+
 @(DECLARE_RENDER_TARGET
   (location 0)
 )
@@ -539,7 +655,7 @@ struct Instance_Info {
   if (albedo_id >= 0) {
     albedo = texture(sampler2D(material_textures[nonuniformEXT(albedo_id)], my_sampler), tex_coords);
   }*/
-  @(EXPORT_COLOR 0 float4(albedo.rgb, 1.0));
+  @(EXPORT_COLOR 0 float4(0.5 * PIXEL_NORMAL.rgb + float3_splat(0.5), 1.0));
 @(END)
 #endif
 )");
@@ -575,6 +691,7 @@ struct Instance_Info {
     g_scene.on_pass_begin(pc);
   }
   void exec(rd::Imm_Ctx *ctx) override {
+    if (g_config.enable_rasterization_pass == false) return;
     setup_default_state(ctx);
     rd::DS_State ds_state;
     MEMZERO(ds_state);
@@ -599,6 +716,134 @@ struct Instance_Info {
   void       release(rd::IResource_Manager *rm) override {
     rm->release_resource(vs);
     rm->release_resource(ps);
+  }
+};
+
+class Compute_Render_Pass : public rd::IPass {
+  Resource_ID cs;
+  u32         width, height;
+  Resource_ID output_image;
+
+  public:
+  Compute_Render_Pass() {
+    cs.reset();
+    output_image.reset();
+  }
+  void on_end(rd::IResource_Manager *rm) override {}
+  void on_begin(rd::IResource_Manager *pc) override {
+    if (cs.is_null())
+      cs = pc->create_shader_raw(rd::Stage_t::COMPUTE, stref_s(R"(
+@(DECLARE_UNIFORM_BUFFER
+  (set 0)
+  (binding 0)
+  (add_field (type float4)   (name color))
+  (add_field (type u32)      (name control_flags))
+)
+#define CONTROL_ENABLE_FEEDBACK 1
+bool is_control_set(uint bits) {
+  return (control_flags & bits) != 0;
+}
+@(DECLARE_IMAGE
+  (type READ_ONLY)
+  (dim 2D)
+  (set 0)
+  (binding 1)
+  (format RGBA32_FLOAT)
+  (name my_image)
+)
+@(DECLARE_IMAGE
+  (type WRITE_ONLY)
+  (dim 2D)
+  (set 0)
+  (binding 2)
+  (format RGBA32_FLOAT)
+  (name out_image)
+)
+struct BVH_Node {
+  float3 min;
+  float3 max;
+  u32    flags;
+};
+@(DECLARE_BUFFER
+  (type READ_ONLY)
+  (set 0)
+  (binding 3)
+  (type BVH_Node)
+  (name bvh_nodes)
+)
+struct Dummy {
+  uint4    flags;
+};
+@(DECLARE_BUFFER
+  (type READ_ONLY)
+  (set 0)
+  (binding 4)
+  (type Dummy)
+  (name dummy)
+)
+float4 op_laplace(int2 coords) {
+  float4 val00 = image_load(my_image, coords + int2(-1, 0));
+  float4 val01 = image_load(my_image, coords + int2(1, 0));
+  float4 val10 = image_load(my_image, coords + int2(0, -1));
+  float4 val11 = image_load(my_image, coords + int2(0, 1));
+  float4 center = image_load(my_image, coords);
+  float4 laplace = abs(center * 4.0 - val00 - val01 - val10 - val11) / 4.0;
+  return laplace;
+  // float intensity = dot(laplace, float4_splat(1.0)); 
+  // return intensity > 0.5 ? float4_splat(1.0) : float4_splat(0.0);
+}
+
+@(GROUP_SIZE 16 16 1)
+@(ENTRY)
+  int2 dim = imageSize(my_image);
+  if (GLOBAL_THREAD_INDEX.x > dim.x || GLOBAL_THREAD_INDEX.y > dim.y)
+    return;
+  float2 uv = GLOBAL_THREAD_INDEX.xy / dim.xy;
+  
+  float4 in_val = image_load(my_image, GLOBAL_THREAD_INDEX.xy);
+  in_val = pow(in_val, float4(1.0/2.2));
+  if (GLOBAL_THREAD_INDEX.y == 777 && is_control_set(CONTROL_ENABLE_FEEDBACK)) {
+    Dummy d;
+    d.flags.x = GLOBAL_THREAD_INDEX.x;
+    d.flags.y = GLOBAL_THREAD_INDEX.y;
+    d.flags.z = GLOBAL_THREAD_INDEX.z;
+    d.flags.w = 666;
+    buffer_store(dummy, GLOBAL_THREAD_INDEX.x, d);
+  }
+  image_store(out_image, GLOBAL_THREAD_INDEX.xy, in_val);
+@(END)
+)"),
+                                 NULL, 0);
+    rd::Image2D_Info info = pc->get_swapchain_image_info();
+    if (output_image.is_null() || width != info.width ||
+        height != info.height) {
+      if (output_image.is_null() == false) pc->release_resource(output_image);
+      width  = info.width;
+      height = info.height;
+      rd::Image_Create_Info info;
+      MEMZERO(info);
+      info.format     = rd::Format::RGBA32_FLOAT;
+      info.width      = width;
+      info.height     = height;
+      info.depth      = 1;
+      info.layers     = 1;
+      info.levels     = 1;
+      info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
+      info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_UAV |
+                        (u32)rd::Image_Usage_Bits::USAGE_SAMPLED;
+      output_image = pc->create_image(info);
+      pc->assign_name(output_image, stref_s("compute_render/img0"));
+    }
+  }
+  void exec(rd::Imm_Ctx *ctx) override {
+    ctx->CS_set_shader(cs);
+    ctx->bind_rw_image(0, 0, 0, output_image, 0, 1, 0, 1);
+    ctx->dispatch((width + 15) / 16, (height + 15) / 16, 1);
+  }
+  string_ref get_name() override { return stref_s("compute_render_pass"); }
+  void       release(rd::IResource_Manager *rm) override {
+    rm->release_resource(cs);
+    rm->release_resource(output_image);
   }
 };
 
@@ -1501,36 +1746,32 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
   Resource_ID vertex_buffer;
   Resource_ID index_buffer;
 
-  Resource_ID    font_texture;
-  Resource_ID    staging_buffer;
+  Resource_ID font_texture;
+  Resource_ID staging_buffer;
+
+  Resource_ID opaque_rt0;
+
   unsigned char *font_pixels;
   int            font_width, font_height;
 
   i32         last_m_x;
   i32         last_m_y;
   ImDrawData *draw_data;
-
-  bool imgui_initialized;
+  Timer       timer;
+  bool        imgui_initialized;
 
   public:
   void consume(void *_event) override {
     SDL_Event *event = (SDL_Event *)_event;
-    if (imgui_initialized) ImGui_ImplSDL2_ProcessEvent(event);
+    if (imgui_initialized) {
+      ImGui_ImplSDL2_ProcessEvent(event);
+    }
     if (event->type == SDL_MOUSEMOTION) {
-      SDL_MouseMotionEvent *m       = (SDL_MouseMotionEvent *)event;
-      i32                   cur_m_x = m->x;
-      i32                   cur_m_y = m->y;
-      if ((m->state & 1) != 0 && last_m_x > 0) {
-        i32 dx = cur_m_x - last_m_x;
-        i32 dy = cur_m_y - last_m_y;
-        g_camera.phi += (float)(dx)*g_camera.aspect * 5.0e-3f;
-        g_camera.theta += (float)(dy)*5.0e-3f;
-      }
-      last_m_x = cur_m_x;
-      last_m_y = cur_m_y;
+      SDL_MouseMotionEvent *m = (SDL_MouseMotionEvent *)event;
     }
   }
   GUI_Pass() {
+    timer.init();
     imgui_initialized = false;
     draw_data         = NULL;
     last_m_x          = -1;
@@ -1554,14 +1795,13 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
     staging_buffer.reset();
   }
   void on_begin(rd::IResource_Manager *pc) override {
-    g_camera.aspect = (float)width / height;
-    g_camera.update();
     rd::Image2D_Info info = pc->get_swapchain_image_info();
     width                 = info.width;
     height                = info.height;
-
+    timer.update();
     rd::Clear_Color cl;
-    cl.clear = false;
+    MEMZERO(cl);
+    cl.clear = true;
 
     pc->add_render_target(pc->get_swapchain_image(), 0, 0, cl);
     static string_ref            shader    = stref_s(R"(
@@ -1660,7 +1900,7 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
       info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_SAMPLED |
                         (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST;
       font_texture    = pc->create_image(info);
-      io.Fonts->TexID = (ImTextureID)(intptr_t)font_texture.id._id;
+      io.Fonts->TexID = (ImTextureID)(intptr_t)font_texture.data;
 
       rd::Buffer_Create_Info buf_info;
       MEMZERO(buf_info);
@@ -1672,9 +1912,92 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
 
     ImGui_ImplSDL2_NewFrame((SDL_Window *)pc->get_window_handle());
     ImGui::NewFrame();
-    ImGuiIO &   io               = ImGui::GetIO();
-    static bool show_demo_window = true;
-    ImGui::ShowDemoWindow(&show_demo_window);
+    ImGuiWindowFlags window_flags =
+        ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoDocking;
+    ImGuiViewport *viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->Pos);
+    ImGui::SetNextWindowSize(viewport->Size);
+    ImGui::SetNextWindowViewport(viewport->ID);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    window_flags |= ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+                    ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove;
+    window_flags |=
+        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus;
+    window_flags |= ImGuiWindowFlags_NoBackground;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 1.0f);
+    ImGui::SetNextWindowBgAlpha(-1.0f);
+    ImGui::Begin("DockSpace", nullptr, window_flags);
+    ImGui::PopStyleVar(4);
+    ImGuiID dockspace_id = ImGui::GetID("MyDockSpace");
+    ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f),
+                     ImGuiDockNodeFlags_PassthruCentralNode);
+    ImGui::End();
+    ImGuiIO &io = ImGui::GetIO();
+    // static bool show_demo_window = true;
+    // ImGui::ShowDemoWindow(&show_demo_window);
+    {
+      ImGui::Begin("Config");
+      ImGui::Checkbox("enable_rasterization_pass",
+                      &g_config.enable_rasterization_pass);
+      ImGui::Checkbox("enable_compute_render_pass",
+                      &g_config.enable_compute_render_pass);
+      ImGui::End();
+    }
+
+    {
+      ImGui::Begin("my window");
+      auto  wpos        = ImGui::GetCursorScreenPos();
+      auto  wsize       = ImGui::GetWindowSize();
+      float height_diff = 24;
+      if (wsize.y < height_diff + 2) {
+        wsize.y = 2;
+      } else {
+        wsize.y = wsize.y - height_diff;
+      }
+      ((Opaque_Pass *)pc->get_pass(stref_s("opaque_pass")))
+          ->set_size(wsize.x, wsize.y);
+
+      if (ImGui::IsWindowHovered()) {
+        f32 camera_speed = 2.0f;
+        if (ImGui::GetIO().KeysDown[SDL_SCANCODE_LSHIFT]) {
+          camera_speed = 10.0f;
+        }
+        float3 camera_diff = float3(0.0f, 0.0f, 0.0f);
+        if (ImGui::GetIO().KeysDown[SDL_SCANCODE_W]) {
+          camera_diff += g_camera.look;
+        }
+        if (ImGui::GetIO().KeysDown[SDL_SCANCODE_S]) {
+          camera_diff -= g_camera.look;
+        }
+        if (ImGui::GetIO().KeysDown[SDL_SCANCODE_A]) {
+          camera_diff -= g_camera.right;
+        }
+        if (ImGui::GetIO().KeysDown[SDL_SCANCODE_D]) {
+          camera_diff += g_camera.right;
+        }
+        if (dot(camera_diff, camera_diff) > 1.0e-3f) {
+          g_camera.look_at +=
+              glm::normalize(camera_diff) * camera_speed * (float)timer.dt;
+        }
+        ImVec2 mpos    = ImGui::GetMousePos();
+        i32    cur_m_x = mpos.x;
+        i32    cur_m_y = mpos.y;
+        if (io.MouseDown[0] && last_m_x > 0) {
+          i32 dx = cur_m_x - last_m_x;
+          i32 dy = cur_m_y - last_m_y;
+          g_camera.phi += (float)(dx)*g_camera.aspect * 5.0e-3f;
+          g_camera.theta += (float)(dy)*5.0e-3f;
+        }
+        last_m_x = cur_m_x;
+        last_m_y = cur_m_y;
+      }
+      opaque_rt0 = pc->get_resource(stref_s("opaque_pass/rt0"));
+      ImGui::Image((ImTextureID)(intptr_t)opaque_rt0.data,
+                   ImVec2(wsize.x, wsize.y));
+      ImGui::End();
+    }
     ImGui::Render();
 
     draw_data = ImGui::GetDrawData();
@@ -1737,8 +2060,6 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
     ctx->VS_set_shader(vs);
     ctx->PS_set_shader(ps);
     ctx->set_viewport(0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f);
-
-    ctx->bind_image(0, 0, 0, font_texture, 0, 1, 0, 1);
     ctx->bind_sampler(0, 1, sampler);
     ImVec2 clip_off          = draw_data->DisplayPos;
     ImVec2 clip_scale        = draw_data->FramebufferScale;
@@ -1796,6 +2117,9 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
         clip_rect.y = (pcmd->ClipRect.y - clip_off.y) * clip_scale.y;
         clip_rect.z = (pcmd->ClipRect.z - clip_off.x) * clip_scale.x;
         clip_rect.w = (pcmd->ClipRect.w - clip_off.y) * clip_scale.y;
+        Resource_ID res_id;
+        res_id.data = (u64)pcmd->TextureId;
+        ctx->bind_image(0, 0, 0, res_id, 0, 1, 0, 1);
         ctx->set_scissor(clip_rect.x, clip_rect.y, clip_rect.z - clip_rect.x,
                          clip_rect.w - clip_rect.y);
         ctx->draw_indexed(pcmd->ElemCount, 1,
@@ -1821,7 +2145,6 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
 int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
-  g_camera.init();
   g_scene.init();
   GUI_Pass *    gui  = new GUI_Pass;
   rd::Pass_Mng *pmng = rd::Pass_Mng::create(rd::Impl_t::VULKAN);
@@ -1829,8 +2152,9 @@ int main(int argc, char *argv[]) {
   // pmng->add_pass(rd::Pass_t::RENDER, new Mesh_Prepare_Pass);
   // pmng->add_pass(rd::Pass_t::COMPUTE, new Culling_Pass);
   pmng->add_pass(rd::Pass_t::RENDER, new Opaque_Pass);
+  // pmng->add_pass(rd::Pass_t::COMPUTE, new Compute_Render_Pass);
   pmng->add_pass(rd::Pass_t::COMPUTE, new Postprocess_Pass);
-  pmng->add_pass(rd::Pass_t::RENDER, new Merge_Pass);
+  // pmng->add_pass(rd::Pass_t::RENDER, new Merge_Pass);
   pmng->add_pass(rd::Pass_t::RENDER, gui);
   pmng->loop();
   return 0;

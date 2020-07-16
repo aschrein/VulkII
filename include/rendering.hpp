@@ -14,8 +14,13 @@ struct ID {
 static_assert(sizeof(ID) == 4, "blimey!");
 
 struct Resource_ID {
-  ID   id;
-  u32  type;
+  union {
+    struct {
+      ID  id;
+      u32 type;
+    };
+    u64 data;
+  };
   u32  index() { return id.index(); }
   bool is_null() { return id.is_null(); }
   void reset() { memset(this, 0, sizeof(*this)); }

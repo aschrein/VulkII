@@ -120,6 +120,11 @@ struct List {
     ASSERT_ALWAYS(parse_decimal_int(symbol.ptr, symbol.len, &res));
     return res;
   }
+  f32 parse_float() {
+    f32 res;
+    ASSERT_ALWAYS(::parse_float(symbol.ptr, symbol.len, &res));
+    return res;
+  }
   bool nonempty() { return symbol.ptr != 0 && symbol.len != 0; }
   bool cmp_symbol(char const *str) {
     if (symbol.ptr == NULL) return false;
