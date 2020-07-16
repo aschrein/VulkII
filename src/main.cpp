@@ -13,8 +13,13 @@
 #include <imgui/examples/imgui_impl_sdl.h>
 
 struct Config {
+  // persistent state
   bool enable_rasterization_pass  = true;
   bool enable_compute_render_pass = true;
+
+  // volatile state
+  u32 g_buffer_width  = 512;
+  u32 g_buffer_height = 512;
 
   void traverse(List *l) {
     if (l == NULL) return;
@@ -70,8 +75,7 @@ struct Camera {
   }
 
   void traverse(List *l) {
-    if (l == NULL)
-      return;
+    if (l == NULL) return;
     if (l->child) {
       traverse(l->child);
       traverse(l->next);
@@ -137,8 +141,7 @@ struct Camera {
 } g_camera;
 
 static void init_traverse(List *l) {
-  if (l == NULL)
-      return;
+  if (l == NULL) return;
   if (l->child) {
     init_traverse(l->child);
     init_traverse(l->next);
@@ -266,6 +269,7 @@ class GfxMeshNode : public MeshNode {
       indices_offset += index_size;
     }
   }
+
   void draw(rd::Imm_Ctx *ctx, Resource_ID vertex_buffer, size_t offset) {
     ito(attributes.size) {
       Attribute attr = attributes[i];
@@ -293,6 +297,29 @@ class GfxMeshNode : public MeshNode {
     ito(primitives.size) {
       ctx->draw_indexed(primitives[i].mesh.num_indices, 1, index_cursor, 0,
                         vertex_cursor);
+      index_cursor += primitives[i].mesh.num_indices;
+      vertex_cursor += primitives[i].mesh.num_vertices;
+    }
+  }
+  void dispatch(rd::Imm_Ctx *ctx, Resource_ID vertex_buffer, size_t offset) {
+    static u32 attribute_to_location[] = {
+        0xffffffffu, 0, 1, 2, 3, 4, 5, 6, 7, 8,
+    };
+    ito(attributes.size) {
+      Attribute attr = attributes[i];
+      ctx->bind_storage_buffer(2, 1 + attribute_to_location[(u32)attr.type],
+                               vertex_buffer, offset + attribute_offsets[i],
+                               attribute_sizes[i]);
+    }
+    ctx->bind_storage_buffer(2, 0, vertex_buffer, offset + index_offset,
+                             get_num_indices() * 4);
+    u32 vertex_cursor = 0;
+    u32 index_cursor  = 0;
+    ito(primitives.size) {
+      ctx->push_constants(&primitives[i].mesh.num_indices, 64, 4);
+      ctx->push_constants(&index_cursor, 64 + 4, 4);
+      ctx->push_constants(&vertex_cursor, 64 + 8, 4);
+      ctx->dispatch((primitives[i].mesh.num_indices + 255) / 256, 1, 1);
       index_cursor += primitives[i].mesh.num_indices;
       vertex_cursor += primitives[i].mesh.num_vertices;
     }
@@ -380,7 +407,8 @@ public:
       rd::Buffer_Create_Info buf_info;
       MEMZERO(buf_info);
       buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
-      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER |
+      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_UAV |
+                            (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER |
                             (u32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER;
       buf_info.size = total_memory;
       vertex_buffer = rm->create_buffer(buf_info);
@@ -404,6 +432,10 @@ public:
         }
       }
     }
+    if (staging_buffer.is_null() == false) {
+      rm->release_resource(staging_buffer);
+      staging_buffer.reset();
+    }
     {
       rd::Buffer_Create_Info buf_info;
       MEMZERO(buf_info);
@@ -413,7 +445,7 @@ public:
       staging_buffer      = rm->create_buffer(buf_info);
     }
   }
-  void gfx_exec(rd::Imm_Ctx *ctx) {
+  void gfx_bind(rd::Imm_Ctx *ctx) {
     if (dummy_initialized == false) {
       {
         u32 *ptr = (u32 *)ctx->map_buffer(staging_buffer);
@@ -442,19 +474,26 @@ public:
         ctx->bind_image(1, 1, i, dummy_texture, 0, 1, 0, 1);
       }
     }
+  }
+  void gfx_exec(rd::Imm_Ctx *ctx) {
+    gfx_bind(ctx);
     ito(meshes.size) { meshes[i]->draw(ctx, vertex_buffer, mesh_offsets[i]); }
   }
-  void on_pass_end(rd::IResource_Manager *rm) {
-    if (staging_buffer.is_null() == false) {
-      rm->release_resource(staging_buffer);
-      staging_buffer.reset();
+  void gfx_dispatch(rd::Imm_Ctx *ctx) {
+    gfx_bind(ctx);
+    ito(meshes.size) {
+      meshes[i]->dispatch(ctx, vertex_buffer, mesh_offsets[i]);
     }
   }
+  void on_pass_end(rd::IResource_Manager *rm) {}
   void release_gfx(rd::IResource_Manager *rm) {
     ito(gfx_images.size) rm->release_resource(gfx_images[i]);
     gfx_images.release();
     rm->release_resource(vertex_buffer);
-    rm->release_resource(staging_buffer);
+    if (staging_buffer.is_null() == false) {
+      rm->release_resource(staging_buffer);
+      staging_buffer.reset();
+    }
   }
   template <typename F> void traverse(F fn) { traverse(fn, root); }
   void                       update() {}
@@ -500,7 +539,6 @@ static void setup_default_state(rd::Imm_Ctx *ctx, u32 num_rts = 1) {
 class Opaque_Pass : public rd::IPass {
   Resource_ID vs;
   Resource_ID ps;
-  u32         width, height;
   Resource_ID uniform_buffer;
   Resource_ID texture_sampler;
   struct Uniform {
@@ -512,8 +550,6 @@ class Opaque_Pass : public rd::IPass {
   Opaque_Pass() {
     vs.reset();
     ps.reset();
-    width  = 512;
-    height = 512;
     uniform_buffer.reset();
     texture_sampler.reset();
   }
@@ -524,15 +560,11 @@ class Opaque_Pass : public rd::IPass {
     }
     g_scene.on_pass_end(rm);
   }
-  void set_size(u32 width, u32 height) {
-    this->width  = width;
-    this->height = height;
-  }
   void on_begin(rd::IResource_Manager *pc) override {
     // rd::Image2D_Info info = pc->get_swapchain_image_info();
     //    width                 = info.width;
     // height                = info.height;
-    g_camera.aspect = (float)width / height;
+    g_camera.aspect = (float)g_config.g_buffer_width / g_config.g_buffer_height;
     g_camera.update();
 
     {
@@ -545,8 +577,8 @@ class Opaque_Pass : public rd::IPass {
       rd::Image_Create_Info rt0_info;
       MEMZERO(rt0_info);
       rt0_info.format     = rd::Format::RGBA32_FLOAT;
-      rt0_info.width      = width;
-      rt0_info.height     = height;
+      rt0_info.width      = g_config.g_buffer_width;
+      rt0_info.height     = g_config.g_buffer_height;
       rt0_info.depth      = 1;
       rt0_info.layers     = 1;
       rt0_info.levels     = 1;
@@ -563,8 +595,8 @@ class Opaque_Pass : public rd::IPass {
       rd::Image_Create_Info info;
       MEMZERO(info);
       info.format     = rd::Format::D32_FLOAT;
-      info.width      = width;
-      info.height     = height;
+      info.width      = g_config.g_buffer_width;
+      info.height     = g_config.g_buffer_height;
       info.depth      = 1;
       info.layers     = 1;
       info.levels     = 1;
@@ -701,8 +733,9 @@ struct Instance_Info {
     ctx->DS_set_state(ds_state);
     ctx->VS_set_shader(vs);
     ctx->PS_set_shader(ps);
-    ctx->set_viewport(0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f);
-    ctx->set_scissor(0, 0, width, height);
+    ctx->set_viewport(0.0f, 0.0f, (float)g_config.g_buffer_width,
+                      (float)g_config.g_buffer_height, 0.0f, 1.0f);
+    ctx->set_scissor(0, 0, g_config.g_buffer_width, g_config.g_buffer_height);
     {
       Uniform *ptr  = (Uniform *)ctx->map_buffer(uniform_buffer);
       ptr->viewproj = g_camera.viewproj();
@@ -721,124 +754,175 @@ struct Instance_Info {
 
 class Compute_Render_Pass : public rd::IPass {
   Resource_ID cs;
-  u32         width, height;
+  Resource_ID clear_cs;
   Resource_ID output_image;
+  Resource_ID output_depth;
 
   public:
   Compute_Render_Pass() {
     cs.reset();
+    clear_cs.reset();
     output_image.reset();
   }
   void on_end(rd::IResource_Manager *rm) override {}
   void on_begin(rd::IResource_Manager *pc) override {
     if (cs.is_null())
       cs = pc->create_shader_raw(rd::Stage_t::COMPUTE, stref_s(R"(
-@(DECLARE_UNIFORM_BUFFER
-  (set 0)
-  (binding 0)
-  (add_field (type float4)   (name color))
-  (add_field (type u32)      (name control_flags))
-)
-#define CONTROL_ENABLE_FEEDBACK 1
-bool is_control_set(uint bits) {
-  return (control_flags & bits) != 0;
-}
-@(DECLARE_IMAGE
-  (type READ_ONLY)
-  (dim 2D)
-  (set 0)
-  (binding 1)
-  (format RGBA32_FLOAT)
-  (name my_image)
+@(DECLARE_PUSH_CONSTANTS
+  (add_field (type float4x4)  (name viewproj))
+  (add_field (type u32)       (name index_count))
+  (add_field (type u32)       (name first_index))
+  (add_field (type i32)       (name vertex_offset))
 )
 @(DECLARE_IMAGE
   (type WRITE_ONLY)
   (dim 2D)
   (set 0)
-  (binding 2)
+  (binding 0)
   (format RGBA32_FLOAT)
   (name out_image)
 )
-struct BVH_Node {
-  float3 min;
-  float3 max;
-  u32    flags;
-};
+@(DECLARE_IMAGE
+  (type READ_WRITE)
+  (dim 2D)
+  (set 0)
+  (binding 1)
+  (format R32_UINT)
+  (name out_depth)
+)
 @(DECLARE_BUFFER
   (type READ_ONLY)
-  (set 0)
-  (binding 3)
-  (type BVH_Node)
-  (name bvh_nodes)
+  (set 2)
+  (binding 0)
+  (type u32)
+  (name index_buffer)
 )
-struct Dummy {
-  uint4    flags;
-};
 @(DECLARE_BUFFER
   (type READ_ONLY)
-  (set 0)
-  (binding 4)
-  (type Dummy)
-  (name dummy)
+  (set 2)
+  (binding 1)
+  (type float3)
+  (name position_buffer)
 )
-float4 op_laplace(int2 coords) {
-  float4 val00 = image_load(my_image, coords + int2(-1, 0));
-  float4 val01 = image_load(my_image, coords + int2(1, 0));
-  float4 val10 = image_load(my_image, coords + int2(0, -1));
-  float4 val11 = image_load(my_image, coords + int2(0, 1));
-  float4 center = image_load(my_image, coords);
-  float4 laplace = abs(center * 4.0 - val00 - val01 - val10 - val11) / 4.0;
-  return laplace;
-  // float intensity = dot(laplace, float4_splat(1.0)); 
-  // return intensity > 0.5 ? float4_splat(1.0) : float4_splat(0.0);
-}
+@(DECLARE_BUFFER
+  (type READ_ONLY)
+  (set 2)
+  (binding 2)
+  (type float3)
+  (name normal_buffer)
+)
 
-@(GROUP_SIZE 16 16 1)
+@(GROUP_SIZE 256 1 1)
 @(ENTRY)
-  int2 dim = imageSize(my_image);
-  if (GLOBAL_THREAD_INDEX.x > dim.x || GLOBAL_THREAD_INDEX.y > dim.y)
+  if (GLOBAL_THREAD_INDEX.x > index_count / 3)
     return;
-  float2 uv = GLOBAL_THREAD_INDEX.xy / dim.xy;
+  u32 id = GLOBAL_THREAD_INDEX.x;
+  u32 i0 = buffer_load(index_buffer, first_index + id * 3 + 0);
+  u32 i1 = buffer_load(index_buffer, first_index + id * 3 + 1);
+  u32 i2 = buffer_load(index_buffer, first_index + id * 3 + 2);
+  float3 p0 = buffer_load(position_buffer, vertex_offset + i0);
+  float3 n0 = buffer_load(normal_buffer, vertex_offset + i0);
+  float3 p1 = buffer_load(position_buffer, vertex_offset + i1);
+  float3 n1 = buffer_load(normal_buffer, vertex_offset + i1);
+  float3 p2 = buffer_load(position_buffer, vertex_offset + i2);
+  float3 n2 = buffer_load(normal_buffer, vertex_offset + i2);
+  float4 pp0 = mul4(viewproj, float4(p0 * 0.04, 1.0));
+  float4 pp1 = mul4(viewproj, float4(p1 * 0.04, 1.0));
+  float4 pp2 = mul4(viewproj, float4(p2 * 0.04, 1.0));
+  pp0 /= pp0.w;
+  pp1 /= pp1.w;
+  pp2 /= pp2.w;
+  int2 dim = imageSize(out_image);
+  if (pp0.x > 1.0 || pp0.x < -1.0 || pp0.y > 1.0 || pp0.y < -1.0)
+    return;
+  i32 x = i32(0.5 + dim.x * (pp0.x + 1.0) / 2.0);
+  i32 y = i32(0.5 + dim.y * (pp0.y + 1.0) / 2.0);
   
-  float4 in_val = image_load(my_image, GLOBAL_THREAD_INDEX.xy);
-  in_val = pow(in_val, float4(1.0/2.2));
-  if (GLOBAL_THREAD_INDEX.y == 777 && is_control_set(CONTROL_ENABLE_FEEDBACK)) {
-    Dummy d;
-    d.flags.x = GLOBAL_THREAD_INDEX.x;
-    d.flags.y = GLOBAL_THREAD_INDEX.y;
-    d.flags.z = GLOBAL_THREAD_INDEX.z;
-    d.flags.w = 666;
-    buffer_store(dummy, GLOBAL_THREAD_INDEX.x, d);
+  if (pp0.z > 0.0 && x > 0 && y > 0 && x < dim.x && y < dim.y) {
+    u32 depth = u32(pp0.z * 100000);
+    if (depth > imageAtomicMax(out_depth, int2(x, y), depth)) {
+      image_store(out_image, int2(x, y), float4((0.5 * n0 + float3_splat(0.5)), 1.0));
+    }
   }
-  image_store(out_image, GLOBAL_THREAD_INDEX.xy, in_val);
 @(END)
 )"),
                                  NULL, 0);
-    rd::Image2D_Info info = pc->get_swapchain_image_info();
-    if (output_image.is_null() || width != info.width ||
-        height != info.height) {
+    if (clear_cs.is_null())
+      clear_cs = pc->create_shader_raw(rd::Stage_t::COMPUTE, stref_s(R"(
+@(DECLARE_IMAGE
+  (type WRITE_ONLY)
+  (dim 2D)
+  (set 0)
+  (binding 0)
+  (format RGBA32_FLOAT)
+  (name out_image)
+)
+@(DECLARE_IMAGE
+  (type READ_WRITE)
+  (dim 2D)
+  (set 0)
+  (binding 1)
+  (format R32_UINT)
+  (name out_depth)
+)
+@(GROUP_SIZE 16 16 1)
+@(ENTRY)
+  int2 dim = imageSize(out_image);
+  if (GLOBAL_THREAD_INDEX.x > dim.x || GLOBAL_THREAD_INDEX.y > dim.y)
+    return;
+  image_store(out_image, int2(GLOBAL_THREAD_INDEX.xy), float4(0.0, 0.0, 0.0, 1.0));
+  image_store(out_depth, int2(GLOBAL_THREAD_INDEX.xy), uint4(0, 0, 0, 0));
+@(END)
+)"),
+                                       NULL, 0);
+    rd::Image_Info info;
+    MEMZERO(info);
+    if (output_image.is_null() == false)
+      info = pc->get_image_info(output_image);
+    if (output_image.is_null() || g_config.g_buffer_width != info.width ||
+        g_config.g_buffer_height != info.height) {
       if (output_image.is_null() == false) pc->release_resource(output_image);
-      width  = info.width;
-      height = info.height;
-      rd::Image_Create_Info info;
-      MEMZERO(info);
-      info.format     = rd::Format::RGBA32_FLOAT;
-      info.width      = width;
-      info.height     = height;
-      info.depth      = 1;
-      info.layers     = 1;
-      info.levels     = 1;
-      info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
-      info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_UAV |
-                        (u32)rd::Image_Usage_Bits::USAGE_SAMPLED;
-      output_image = pc->create_image(info);
+      if (output_depth.is_null() == false) pc->release_resource(output_depth);
+      {
+        rd::Image_Create_Info info;
+        MEMZERO(info);
+        info.format     = rd::Format::RGBA32_FLOAT;
+        info.width      = g_config.g_buffer_width;
+        info.height     = g_config.g_buffer_height;
+        info.depth      = 1;
+        info.layers     = 1;
+        info.levels     = 1;
+        info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
+        info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_UAV |
+                          (u32)rd::Image_Usage_Bits::USAGE_SAMPLED;
+        output_image = pc->create_image(info);
+      }
+      {
+        rd::Image_Create_Info info;
+        MEMZERO(info);
+        info.format     = rd::Format::R32_UINT;
+        info.width      = g_config.g_buffer_width;
+        info.height     = g_config.g_buffer_height;
+        info.depth      = 1;
+        info.layers     = 1;
+        info.levels     = 1;
+        info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
+        info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_UAV |
+                          (u32)rd::Image_Usage_Bits::USAGE_SAMPLED;
+        output_depth = pc->create_image(info);
+      }
       pc->assign_name(output_image, stref_s("compute_render/img0"));
     }
   }
   void exec(rd::Imm_Ctx *ctx) override {
-    ctx->CS_set_shader(cs);
+    ctx->CS_set_shader(clear_cs);
     ctx->bind_rw_image(0, 0, 0, output_image, 0, 1, 0, 1);
-    ctx->dispatch((width + 15) / 16, (height + 15) / 16, 1);
+    ctx->dispatch((g_config.g_buffer_width + 15) / 16,
+                  (g_config.g_buffer_height + 15) / 16, 1);
+    ctx->CS_set_shader(cs);
+    float4x4 vp = g_camera.viewproj();
+    ctx->push_constants(&vp, 0, sizeof(vp));
+    g_scene.gfx_dispatch(ctx);
   }
   string_ref get_name() override { return stref_s("compute_render_pass"); }
   void       release(rd::IResource_Manager *rm) override {
@@ -1749,8 +1833,6 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
   Resource_ID font_texture;
   Resource_ID staging_buffer;
 
-  Resource_ID opaque_rt0;
-
   unsigned char *font_pixels;
   int            font_width, font_height;
 
@@ -1956,9 +2038,8 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
       } else {
         wsize.y = wsize.y - height_diff;
       }
-      ((Opaque_Pass *)pc->get_pass(stref_s("opaque_pass")))
-          ->set_size(wsize.x, wsize.y);
-
+      g_config.g_buffer_width  = wsize.x;
+      g_config.g_buffer_height = wsize.y;
       if (ImGui::IsWindowHovered()) {
         f32 camera_speed = 2.0f;
         if (ImGui::GetIO().KeysDown[SDL_SCANCODE_LSHIFT]) {
@@ -1993,9 +2074,12 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
         last_m_x = cur_m_x;
         last_m_y = cur_m_y;
       }
-      opaque_rt0 = pc->get_resource(stref_s("opaque_pass/rt0"));
-      ImGui::Image((ImTextureID)(intptr_t)opaque_rt0.data,
-                   ImVec2(wsize.x, wsize.y));
+      Resource_ID img;
+      if (g_config.enable_compute_render_pass)
+        img = pc->get_resource(stref_s("compute_render/img0"));
+      else
+        img = pc->get_resource(stref_s("opaque_pass/rt0"));
+      ImGui::Image((ImTextureID)(intptr_t)img.data, ImVec2(wsize.x, wsize.y));
       ImGui::End();
     }
     ImGui::Render();
@@ -2152,7 +2236,7 @@ int main(int argc, char *argv[]) {
   // pmng->add_pass(rd::Pass_t::RENDER, new Mesh_Prepare_Pass);
   // pmng->add_pass(rd::Pass_t::COMPUTE, new Culling_Pass);
   pmng->add_pass(rd::Pass_t::RENDER, new Opaque_Pass);
-  // pmng->add_pass(rd::Pass_t::COMPUTE, new Compute_Render_Pass);
+  pmng->add_pass(rd::Pass_t::COMPUTE, new Compute_Render_Pass);
   pmng->add_pass(rd::Pass_t::COMPUTE, new Postprocess_Pass);
   // pmng->add_pass(rd::Pass_t::RENDER, new Merge_Pass);
   pmng->add_pass(rd::Pass_t::RENDER, gui);

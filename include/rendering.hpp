@@ -57,6 +57,7 @@ enum class Format {
   RGB32_FLOAT,
   RG32_FLOAT,
   R32_FLOAT,
+  R32_UINT,
   D32_FLOAT,
 };
 

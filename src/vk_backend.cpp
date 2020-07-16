@@ -231,6 +231,7 @@ VkFormat to_vk(rd::Format format) {
   case rd::Format::RG32_FLOAT      : return VK_FORMAT_R32G32_SFLOAT       ;
   case rd::Format::R32_FLOAT       : return VK_FORMAT_R32_SFLOAT          ;
   case rd::Format::D32_FLOAT       : return VK_FORMAT_D32_SFLOAT          ;
+  case rd::Format::R32_UINT        : return VK_FORMAT_R32_UINT            ;
   default: UNIMPLEMENTED;
   }
   // clang-format on
@@ -257,6 +258,7 @@ rd::Format from_vk(VkFormat format) {
   case VK_FORMAT_R32G32_SFLOAT       : return rd::Format::RG32_FLOAT      ;
   case VK_FORMAT_R32_SFLOAT          : return rd::Format::R32_FLOAT       ;
   case VK_FORMAT_D32_SFLOAT          : return rd::Format::D32_FLOAT       ;
+  case VK_FORMAT_R32_UINT            : return rd::Format::R32_UINT        ;
   default: UNIMPLEMENTED;
   }
   // clang-format on
@@ -488,6 +490,21 @@ static void execute_preprocessor(List *l, char const *list_end,
     string_ref format_to_glsl() {
       if (format == stref_s("RGBA32_FLOAT")) {
         return stref_s("rgba32f");
+      } else if (format == stref_s("R32_UINT")) {
+        return stref_s("r32ui");
+      } else {
+        UNIMPLEMENTED;
+      }
+    }
+    string_ref type_to_glsl() {
+      // uimage2D
+      static char buf[0x100];
+      if (format == stref_s("RGBA32_FLOAT")) {
+        snprintf(buf, sizeof(buf), "image%.*s", STRF(dim));
+        return stref_s(buf);
+      } else if (format == stref_s("R32_UINT")) {
+        snprintf(buf, sizeof(buf), "uimage%.*s", STRF(dim));
+        return stref_s(buf);
       } else {
         UNIMPLEMENTED;
       }
@@ -533,44 +550,47 @@ static void execute_preprocessor(List *l, char const *list_end,
     } else if (param_eval.type == stref_s("WRITE_ONLY")) {
       if (param_eval.array_size > 0) {
         builder.putf("layout(set = %i, binding = %i, %.*s) uniform writeonly "
-                     "image%.*s %.*s[%i];",
+                     "%.*s %.*s[%i];",
                      param_eval.set, param_eval.binding,
-                     STRF(param_eval.format_to_glsl()), STRF(param_eval.dim),
-                     STRF(param_eval.name), param_eval.array_size);
+                     STRF(param_eval.format_to_glsl()),
+                     STRF(param_eval.type_to_glsl()), STRF(param_eval.name),
+                     param_eval.array_size);
       } else {
         builder.putf("layout(set = %i, binding = %i, %.*s) uniform writeonly "
-                     "image%.*s %.*s;",
+                     "%.*s %.*s;",
                      param_eval.set, param_eval.binding,
-                     STRF(param_eval.format_to_glsl()), STRF(param_eval.dim),
-                     STRF(param_eval.name));
+                     STRF(param_eval.format_to_glsl()),
+                     STRF(param_eval.type_to_glsl()), STRF(param_eval.name));
       }
     } else if (param_eval.type == stref_s("READ_ONLY")) {
       if (param_eval.array_size > 0) {
         builder.putf("layout(set = %i, binding = %i, %.*s) uniform readonly "
-                     "image%.*s %.*s[%i];",
+                     "%.*s %.*s[%i];",
                      param_eval.set, param_eval.binding,
-                     STRF(param_eval.format_to_glsl()), STRF(param_eval.dim),
-                     STRF(param_eval.name), param_eval.array_size);
+                     STRF(param_eval.format_to_glsl()),
+                     STRF(param_eval.type_to_glsl()), STRF(param_eval.name),
+                     param_eval.array_size);
       } else {
         builder.putf("layout(set = %i, binding = %i, %.*s) uniform readonly "
-                     "image%.*s %.*s;",
+                     "%.*s %.*s;",
                      param_eval.set, param_eval.binding,
-                     STRF(param_eval.format_to_glsl()), STRF(param_eval.dim),
-                     STRF(param_eval.name));
+                     STRF(param_eval.format_to_glsl()),
+                     STRF(param_eval.type_to_glsl()), STRF(param_eval.name));
       }
     } else if (param_eval.type == stref_s("READ_WRITE")) {
       if (param_eval.array_size > 0) {
-        builder.putf("layout(set = %i, binding = %i, %.*s) uniform "
-                     "image%.*s %.*s[%i];",
+        builder.putf("layout(set = %i, binding = %i, %.*s) volatile coherent uniform "
+                     "%.*s %.*s[%i];",
                      param_eval.set, param_eval.binding,
-                     STRF(param_eval.format_to_glsl()), STRF(param_eval.dim),
-                     STRF(param_eval.name), param_eval.array_size);
+                     STRF(param_eval.format_to_glsl()),
+                     STRF(param_eval.type_to_glsl()), STRF(param_eval.name),
+                     param_eval.array_size);
       } else {
-        builder.putf("layout(set = %i, binding = %i, %.*s) uniform "
-                     "image%.*s %.*s;",
+        builder.putf("layout(set = %i, binding = %i, %.*s) volatile coherent uniform "
+                     "%.*s %.*s;",
                      param_eval.set, param_eval.binding,
-                     STRF(param_eval.format_to_glsl()), STRF(param_eval.dim),
-                     STRF(param_eval.name));
+                     STRF(param_eval.format_to_glsl()),
+                     STRF(param_eval.type_to_glsl()), STRF(param_eval.name));
       }
     } else {
       UNIMPLEMENTED;
@@ -631,7 +651,7 @@ static void execute_preprocessor(List *l, char const *list_end,
   } else if (l->cmp_symbol("DECLARE_PUSH_CONSTANTS")) {
     param_eval.reset();
     param_eval.exec(l->next);
-    builder.putf("layout(push_constant) uniform PC {\n");
+    builder.putf("layout(push_constant, std430) uniform PC {\n");
     List *cur = l->next;
     while (cur != NULL) {
       if (cur->child != NULL && cur->child->cmp_symbol("add_field")) {
@@ -680,6 +700,7 @@ static void preprocess_shader(String_Builder &builder, string_ref body) {
 #define float2_splat(x)  vec2(x, x)
 #define float3_splat(x)  vec3(x, x, x)
 #define float4_splat(x)  vec4(x, x, x, x)
+#define mul4(x, y)  (x * y)
 
 #define image_load(image, coords) imageLoad(image, ivec2(coords))
 #define image_store(image, coords, data) imageStore(image, ivec2(coords), data)
