@@ -16,6 +16,8 @@ struct Config {
   // persistent state
   bool enable_rasterization_pass  = true;
   bool enable_compute_render_pass = true;
+  bool enable_compute_depth       = true;
+  u32  triangles_per_lane         = 1;
 
   // volatile state
   u32 g_buffer_width  = 512;
@@ -31,16 +33,22 @@ struct Config {
         enable_rasterization_pass = l->get(1)->parse_int() > 0;
       } else if (l->cmp_symbol("enable_compute_render_pass")) {
         enable_compute_render_pass = l->get(1)->parse_int() > 0;
+      } else if (l->cmp_symbol("enable_compute_render_pass")) {
+        enable_compute_depth = l->get(1)->parse_int() > 0;
+      } else if (l->cmp_symbol("triangles_per_lane")) {
+        triangles_per_lane = l->get(1)->parse_int();
       }
     }
   }
 
   void dump(FILE *file) {
     fprintf(file, "(config\n");
-    fprintf(file, " (enable_rasterization_pass %i)\n",
-            enable_rasterization_pass ? 1 : 0);
-    fprintf(file, " (enable_compute_render_pass %i)\n",
-            enable_compute_render_pass ? 1 : 0);
+    // clang-format off
+    fprintf(file, " (enable_rasterization_pass %i)\n", enable_rasterization_pass ? 1 : 0);
+    fprintf(file, " (enable_compute_depth %i)\n", enable_compute_depth ? 1 : 0);
+    fprintf(file, " (enable_compute_render_pass %i)\n", enable_compute_render_pass ? 1 : 0);
+    fprintf(file, " (triangles_per_lane %i)\n", triangles_per_lane);
+    // clang-format on
     fprintf(file, ")\n");
   }
 
@@ -301,7 +309,8 @@ class GfxMeshNode : public MeshNode {
       vertex_cursor += primitives[i].mesh.num_vertices;
     }
   }
-  void dispatch(rd::Imm_Ctx *ctx, Resource_ID vertex_buffer, size_t offset) {
+  void dispatch(rd::Imm_Ctx *ctx, Resource_ID vertex_buffer, size_t offset,
+                u32 push_offset) {
     static u32 attribute_to_location[] = {
         0xffffffffu, 0, 1, 2, 3, 4, 5, 6, 7, 8,
     };
@@ -316,10 +325,13 @@ class GfxMeshNode : public MeshNode {
     u32 vertex_cursor = 0;
     u32 index_cursor  = 0;
     ito(primitives.size) {
-      ctx->push_constants(&primitives[i].mesh.num_indices, 64, 4);
-      ctx->push_constants(&index_cursor, 64 + 4, 4);
-      ctx->push_constants(&vertex_cursor, 64 + 8, 4);
-      ctx->dispatch((primitives[i].mesh.num_indices + 255) / 256, 1, 1);
+      ctx->push_constants(&primitives[i].mesh.num_indices, push_offset, 4);
+      ctx->push_constants(&index_cursor, push_offset + 4, 4);
+      ctx->push_constants(&vertex_cursor, push_offset + 8, 4);
+      ctx->dispatch(((primitives[i].mesh.num_indices + 255) / 256 +
+                     g_config.triangles_per_lane - 1) /
+                        g_config.triangles_per_lane,
+                    1, 1);
       index_cursor += primitives[i].mesh.num_indices;
       vertex_cursor += primitives[i].mesh.num_vertices;
     }
@@ -479,10 +491,10 @@ public:
     gfx_bind(ctx);
     ito(meshes.size) { meshes[i]->draw(ctx, vertex_buffer, mesh_offsets[i]); }
   }
-  void gfx_dispatch(rd::Imm_Ctx *ctx) {
+  void gfx_dispatch(rd::Imm_Ctx *ctx, u32 push_offset) {
     gfx_bind(ctx);
     ito(meshes.size) {
-      meshes[i]->dispatch(ctx, vertex_buffer, mesh_offsets[i]);
+      meshes[i]->dispatch(ctx, vertex_buffer, mesh_offsets[i], push_offset);
     }
   }
   void on_pass_end(rd::IResource_Manager *rm) {}
@@ -770,10 +782,16 @@ class Compute_Render_Pass : public rd::IPass {
       cs = pc->create_shader_raw(rd::Stage_t::COMPUTE, stref_s(R"(
 @(DECLARE_PUSH_CONSTANTS
   (add_field (type float4x4)  (name viewproj))
+  (add_field (type u32)       (name control_flags))
+  (add_field (type u32)       (name num_triangles_per_lane))
   (add_field (type u32)       (name index_count))
   (add_field (type u32)       (name first_index))
   (add_field (type i32)       (name vertex_offset))
 )
+
+#define CONTROL_DEPTH_ENABLE 1
+#define is_control(flag) (control_flags & flag) != 0
+
 @(DECLARE_IMAGE
   (type WRITE_ONLY)
   (dim 2D)
@@ -797,6 +815,15 @@ class Compute_Render_Pass : public rd::IPass {
   (type u32)
   (name index_buffer)
 )
+
+struct Vertex {
+  float3 position;
+  float3 normal;
+};
+
+//#define FETCH_FLOAT3
+
+#ifdef FETCH_FLOAT3
 @(DECLARE_BUFFER
   (type READ_ONLY)
   (set 2)
@@ -811,37 +838,94 @@ class Compute_Render_Pass : public rd::IPass {
   (type float3)
   (name normal_buffer)
 )
+Vertex fetch(u32 index) {
+  Vertex o;  
+  o.position = buffer_load(position_buffer, index);
+  o.normal = buffer_load(normal_buffer, index);
+  return o;
+}
+#else
+@(DECLARE_BUFFER
+  (type READ_ONLY)
+  (set 2)
+  (binding 1)
+  (type float)
+  (name position_buffer)
+)
+@(DECLARE_BUFFER
+  (type READ_ONLY)
+  (set 2)
+  (binding 2)
+  (type float)
+  (name normal_buffer)
+)
+
+Vertex fetch(u32 index) {
+  Vertex o;  
+  o.position.x = buffer_load(position_buffer, index * 3 + 0);
+  o.position.y = buffer_load(position_buffer, index * 3 + 1);
+  o.position.z = buffer_load(position_buffer, index * 3 + 2);
+  o.normal.x = buffer_load(normal_buffer, index * 3 + 0);
+  o.normal.y = buffer_load(normal_buffer, index * 3 + 1);
+  o.normal.z = buffer_load(normal_buffer, index * 3 + 2);
+  return o;
+}
+#endif
 
 @(GROUP_SIZE 256 1 1)
 @(ENTRY)
-  if (GLOBAL_THREAD_INDEX.x > index_count / 3)
-    return;
-  u32 id = GLOBAL_THREAD_INDEX.x;
-  u32 i0 = buffer_load(index_buffer, first_index + id * 3 + 0);
-  u32 i1 = buffer_load(index_buffer, first_index + id * 3 + 1);
-  u32 i2 = buffer_load(index_buffer, first_index + id * 3 + 2);
-  float3 p0 = buffer_load(position_buffer, vertex_offset + i0);
-  float3 n0 = buffer_load(normal_buffer, vertex_offset + i0);
-  float3 p1 = buffer_load(position_buffer, vertex_offset + i1);
-  float3 n1 = buffer_load(normal_buffer, vertex_offset + i1);
-  float3 p2 = buffer_load(position_buffer, vertex_offset + i2);
-  float3 n2 = buffer_load(normal_buffer, vertex_offset + i2);
-  float4 pp0 = mul4(viewproj, float4(p0 * 0.04, 1.0));
-  float4 pp1 = mul4(viewproj, float4(p1 * 0.04, 1.0));
-  float4 pp2 = mul4(viewproj, float4(p2 * 0.04, 1.0));
-  pp0 /= pp0.w;
-  pp1 /= pp1.w;
-  pp2 /= pp2.w;
-  int2 dim = imageSize(out_image);
-  if (pp0.x > 1.0 || pp0.x < -1.0 || pp0.y > 1.0 || pp0.y < -1.0)
-    return;
-  i32 x = i32(0.5 + dim.x * (pp0.x + 1.0) / 2.0);
-  i32 y = i32(0.5 + dim.y * (pp0.y + 1.0) / 2.0);
-  
-  if (pp0.z > 0.0 && x > 0 && y > 0 && x < dim.x && y < dim.y) {
-    u32 depth = u32(pp0.z * 100000);
-    if (depth > imageAtomicMax(out_depth, int2(x, y), depth)) {
-      image_store(out_image, int2(x, y), float4((0.5 * n0 + float3_splat(0.5)), 1.0));
+  for (u32 iter_id = 0; iter_id < num_triangles_per_lane; iter_id++) {
+    u32 triangle_index = iter_id + GLOBAL_THREAD_INDEX.x * num_triangles_per_lane;
+    if (triangle_index > index_count / 3)
+      return;
+
+    u32 i0 = buffer_load(index_buffer, first_index + triangle_index * 3 + 0);
+    u32 i1 = buffer_load(index_buffer, first_index + triangle_index * 3 + 1);
+    u32 i2 = buffer_load(index_buffer, first_index + triangle_index * 3 + 2);
+   
+    Vertex v0 = fetch(vertex_offset + i0);
+    Vertex v1 = fetch(vertex_offset + i1);
+    Vertex v2 = fetch(vertex_offset + i2);
+
+    float4 pp0 = mul4(viewproj, float4(v0.position * 0.04, 1.0));
+    float4 pp1 = mul4(viewproj, float4(v1.position * 0.04, 1.0));
+    float4 pp2 = mul4(viewproj, float4(v2.position * 0.04, 1.0));
+    pp0.xyz /= pp0.w;
+    pp1.xyz /= pp1.w;
+    pp2.xyz /= pp2.w;
+    {
+      float2 e0 = pp0.xy - pp2.xy; 
+      float2 e1 = pp1.xy - pp0.xy; 
+      float2 e2 = pp2.xy - pp1.xy; 
+      float2 n0 = float2(e0.y, -e0.x);
+      if (dot(e1, n0) > 0.0)
+        continue;
+    }
+    float area = 1.0;
+    float b0 = 1.0 / 3.0;
+    float b1 = 1.0 / 3.0;
+    float b2 = 1.0 / 3.0;
+    b0 /= area;
+    b1 /= area;
+    b2 /= area;
+    float z = 1.0 / (b0 / pp0.w + b1 / pp1.w + b2 / pp2.w);
+
+    float3 pp = pp0.xyz * b0 + pp1.xyz * b1 + pp2.xyz * b2;
+    float3 n = normalize(z * (v0.normal * b0 + v1.normal * b1 + v1.normal * b2));
+    int2 dim = imageSize(out_image);
+    if (pp.x > 1.0 || pp.x < -1.0 || pp.y > 1.0 || pp.y < -1.0)
+      continue;
+    i32 x = i32(0.5 + dim.x * (pp.x + 1.0) / 2.0);
+    i32 y = i32(0.5 + dim.y * (pp.y + 1.0) / 2.0);
+    if (pp.z > 0.0 && x > 0 && y > 0 && x < dim.x && y < dim.y) {
+      if (is_control(CONTROL_DEPTH_ENABLE)) {
+        u32 depth = u32(1.0 / pp.z);
+        if (depth <= imageAtomicMin(out_depth, int2(x, y), depth)) {
+          image_store(out_image, int2(x, y), float4((0.5 * n + float3_splat(0.5)), 1.0));
+        }
+      } else {
+        image_store(out_image, int2(x, y), float4((0.5 * n + float3_splat(0.5)), 1.0));
+      }
     }
   }
 @(END)
@@ -871,7 +955,7 @@ class Compute_Render_Pass : public rd::IPass {
   if (GLOBAL_THREAD_INDEX.x > dim.x || GLOBAL_THREAD_INDEX.y > dim.y)
     return;
   image_store(out_image, int2(GLOBAL_THREAD_INDEX.xy), float4(0.0, 0.0, 0.0, 1.0));
-  image_store(out_depth, int2(GLOBAL_THREAD_INDEX.xy), uint4(0, 0, 0, 0));
+  image_store(out_depth, int2(GLOBAL_THREAD_INDEX.xy), uint4(1 << 31, 0, 0, 0));
 @(END)
 )"),
                                        NULL, 0);
@@ -915,14 +999,21 @@ class Compute_Render_Pass : public rd::IPass {
     }
   }
   void exec(rd::Imm_Ctx *ctx) override {
+    if (g_config.enable_compute_render_pass == false) return;
     ctx->CS_set_shader(clear_cs);
     ctx->bind_rw_image(0, 0, 0, output_image, 0, 1, 0, 1);
+    ctx->bind_rw_image(0, 1, 0, output_depth, 0, 1, 0, 1);
     ctx->dispatch((g_config.g_buffer_width + 15) / 16,
                   (g_config.g_buffer_height + 15) / 16, 1);
     ctx->CS_set_shader(cs);
     float4x4 vp = g_camera.viewproj();
     ctx->push_constants(&vp, 0, sizeof(vp));
-    g_scene.gfx_dispatch(ctx);
+    u32 control_flags = 0;
+    control_flags |= (g_config.enable_compute_depth ? 1 : 0) << 0;
+    ctx->push_constants(&control_flags, 64, 4);
+    g_config.triangles_per_lane = MAX(0, MIN(128, g_config.triangles_per_lane));
+    ctx->push_constants(&g_config.triangles_per_lane, 64 + 4, 4);
+    g_scene.gfx_dispatch(ctx, 72);
   }
   string_ref get_name() override { return stref_s("compute_render_pass"); }
   void       release(rd::IResource_Manager *rm) override {
@@ -1951,10 +2042,10 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
       info.address_mode_u = rd::Address_Mode::CLAMP_TO_EDGE;
       info.address_mode_v = rd::Address_Mode::CLAMP_TO_EDGE;
       info.address_mode_w = rd::Address_Mode::CLAMP_TO_EDGE;
-      info.mag_filter     = rd::Filter::LINEAR;
-      info.min_filter     = rd::Filter::LINEAR;
+      info.mag_filter     = rd::Filter::NEAREST;
+      info.min_filter     = rd::Filter::NEAREST;
       info.mip_mode       = rd::Filter::NEAREST;
-      info.anisotropy     = true;
+      info.anisotropy     = false;
       info.max_anisotropy = 16.0f;
       sampler             = pc->create_sampler(info);
     }
@@ -2016,20 +2107,27 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
     ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f),
                      ImGuiDockNodeFlags_PassthruCentralNode);
     ImGui::End();
-    ImGuiIO &io = ImGui::GetIO();
-    // static bool show_demo_window = true;
-    // ImGui::ShowDemoWindow(&show_demo_window);
+    ImGuiIO &   io               = ImGui::GetIO();
+    static bool show_demo_window = true;
+    ImGui::ShowDemoWindow(&show_demo_window);
     {
       ImGui::Begin("Config");
       ImGui::Checkbox("enable_rasterization_pass",
                       &g_config.enable_rasterization_pass);
       ImGui::Checkbox("enable_compute_render_pass",
                       &g_config.enable_compute_render_pass);
+      ImGui::Checkbox("enable_compute_depth", &g_config.enable_compute_depth);
+      ImGui::SliderInt("triangles_per_lane",
+                       (int *)&g_config.triangles_per_lane, 1, 128);
+      ImGui::LabelText("hw rasterizer", "%f ms",
+                       pc->get_pass_duration(stref_s("opaque_pass")));
+      ImGui::LabelText("sw rasterizer", "%f ms",
+                       pc->get_pass_duration(stref_s("compute_render_pass")));
       ImGui::End();
     }
 
     {
-      ImGui::Begin("my window");
+      ImGui::Begin("sw rasterization");
       auto  wpos        = ImGui::GetCursorScreenPos();
       auto  wsize       = ImGui::GetWindowSize();
       float height_diff = 24;
@@ -2074,12 +2172,16 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
         last_m_x = cur_m_x;
         last_m_y = cur_m_y;
       }
-      Resource_ID img;
-      if (g_config.enable_compute_render_pass)
-        img = pc->get_resource(stref_s("compute_render/img0"));
-      else
-        img = pc->get_resource(stref_s("opaque_pass/rt0"));
-      ImGui::Image((ImTextureID)(intptr_t)img.data, ImVec2(wsize.x, wsize.y));
+      {
+        Resource_ID img = pc->get_resource(stref_s("compute_render/img0"));
+        ImGui::Image((ImTextureID)(intptr_t)img.data, ImVec2(wsize.x, wsize.y));
+      }
+      ImGui::End();
+      ImGui::Begin("hw rasterization");
+      {
+        Resource_ID img = pc->get_resource(stref_s("opaque_pass/rt0"));
+        ImGui::Image((ImTextureID)(intptr_t)img.data, ImVec2(wsize.x, wsize.y));
+      }
       ImGui::End();
     }
     ImGui::Render();

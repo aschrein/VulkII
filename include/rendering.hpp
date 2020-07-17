@@ -315,6 +315,7 @@ class IResource_Manager {
     return (size) & ~(BUFFER_ALIGNMENT - 1);
   }
   virtual IPass *     get_pass(string_ref name)                         = 0;
+  virtual double      get_pass_duration(string_ref name)                = 0;
   virtual Resource_ID create_image(Image_Create_Info info)              = 0;
   virtual Resource_ID create_buffer(Buffer_Create_Info info)            = 0;
   virtual Resource_ID create_shader_raw(Stage_t type, string_ref text,

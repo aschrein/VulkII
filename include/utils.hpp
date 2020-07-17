@@ -600,8 +600,7 @@ template <int N> struct inline_string {
   void init(string_ref str) {
     size_t len = MIN(str.len, N);
     memcpy(buf, str.ptr, len);
-    if (len < N)
-      buf[len] = '\0';
+    if (len < N) buf[len] = '\0';
   }
   string_ref ref() const { return string_ref{&buf[0], len()}; }
   u32        len() const {
@@ -705,8 +704,7 @@ static inline void dump_file(char const *path, void const *data, size_t size) {
 
 static inline char *read_file_tmp(char const *filename) {
   FILE *text_file = fopen(filename, "rb");
-  if (text_file == NULL)
-    return NULL;
+  if (text_file == NULL) return NULL;
   fseek(text_file, 0, SEEK_END);
   long fsize = ftell(text_file);
   fseek(text_file, 0, SEEK_SET);
@@ -884,7 +882,7 @@ template <typename T, unsigned int N> struct InlineArray {
     elems[size++] = a;
     ASSERT_DEBUG(size <= N);
   }
-  void init() { size = 0; }
+  void init() { memset(this, 0, sizeof(*this)); }
   void memzero() { memset(elems, 0, sizeof(elems)); }
   void release() { size = 0; }
   T    pop() {

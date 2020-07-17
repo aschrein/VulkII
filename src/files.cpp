@@ -8,6 +8,103 @@
 #include "cgltf.h"
 #include <functional>
 
+#include <meshoptimizer.h>
+
+void optimize_mesh(Raw_Mesh_Opaque &opaque_mesh) {
+  ASSERT_ALWAYS(opaque_mesh.index_type == rd::Index_t::UINT32);
+  u32        index_count = opaque_mesh.num_indices;
+  Array<u32> indices;
+  indices.init();
+  defer(indices.release());
+  indices.resize(opaque_mesh.num_indices);
+  Array<u32> remap;
+  remap.init();
+  remap.resize(opaque_mesh.num_indices);
+  defer(remap.release());
+  Array<u8> vertex_blob;
+  vertex_blob.init();
+  vertex_blob.resize(opaque_mesh.num_vertices * sizeof(Vertex_Full));
+
+  defer(vertex_blob.release());
+
+  ito(opaque_mesh.num_vertices) {
+    Vertex_Full v = opaque_mesh.fetch_vertex(i);
+    memcpy(&vertex_blob[i * sizeof(v)], &v, sizeof(v));
+  }
+  size_t vertex_count =
+      meshopt_generateVertexRemap(&remap[0], NULL, index_count, &vertex_blob[0],
+                                  index_count, sizeof(Vertex_Full));
+  meshopt_remapIndexBuffer(&indices[0], NULL, opaque_mesh.num_indices,
+                           &remap[0]);
+  Array<Vertex_Full> vertices;
+  vertices.init();
+  vertices.resize(vertex_count);
+  defer(vertices.release());
+  meshopt_remapVertexBuffer(&vertices[0], &vertex_blob[0], index_count,
+                            sizeof(Vertex_Full), &remap[0]);
+  meshopt_optimizeVertexCache(&indices[0], &indices[0], index_count,
+                              vertex_count);
+  meshopt_optimizeVertexFetch(&vertices[0], &indices[0], index_count,
+                              &vertices[0], vertex_count, sizeof(Vertex_Full));
+
+  opaque_mesh.attribute_data.release();
+  opaque_mesh.index_data.release();
+
+  opaque_mesh.index_data.resize(indices.size * 4);
+  ito(indices.size) {
+    u32 index = indices[i];
+    memcpy(&opaque_mesh.index_data[i * 4], &index, 4);
+  }
+  InlineArray<size_t, 16> attribute_offsets;
+  InlineArray<size_t, 16> attribute_sizes;
+  InlineArray<size_t, 16> attribute_cursors;
+  attribute_offsets.init();
+  attribute_sizes.init();
+  attribute_cursors.init();
+
+  ito(opaque_mesh.attributes.size) {
+    attribute_sizes[i] = vertices.size * opaque_mesh.attributes[i].stride;
+  }
+  u32 total_mem = 0;
+  ito(opaque_mesh.attributes.size) {
+    jto(i) attribute_offsets[i] += attribute_sizes[j];
+    total_mem = attribute_offsets[i] + attribute_sizes[i];
+  }
+  opaque_mesh.attribute_data.resize(total_mem);
+  ito(vertices.size) {
+    Vertex_Full v = vertices[i];
+    jto(opaque_mesh.attributes.size) {
+      memcpy(opaque_mesh.attribute_data.ptr + attribute_offsets[j] + attribute_cursors[j],
+             v.get_attribute(opaque_mesh.attributes[j].type),
+             opaque_mesh.attributes[j].stride);
+      attribute_cursors[j] += opaque_mesh.attributes[j].stride;
+    }
+  }
+  ito(opaque_mesh.attributes.size) {
+    opaque_mesh.attributes[i].offset = attribute_offsets[i];  
+  }
+ /* {
+    Attribute attr;
+    MEMZERO(attr);
+    attr.type   = rd::Attriute_t::POSITION;
+    attr.format = rd::Format::RGB32_FLOAT;
+    attr.offset = 0;
+    attr.stride = sizeof(float3);
+    opaque_mesh.attributes.push(attr);
+  }
+  {
+    Attribute attr;
+    MEMZERO(attr);
+    attr.type   = rd::Attriute_t::NORMAL;
+    attr.format = rd::Format::RGB32_FLOAT;
+    attr.offset = vertices.size * sizeof(float3);
+    attr.stride = sizeof(float3);
+    opaque_mesh.attributes.push(attr);
+  }*/
+  opaque_mesh.num_indices  = indices.size;
+  opaque_mesh.num_vertices = vertices.size;
+}
+
 Image2D_Raw load_image(string_ref filename, rd::Format format) {
   TMP_STORAGE_SCOPE;
   if (stref_find(filename, stref_s(".hdr")) != -1) {
@@ -299,6 +396,7 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
       char buf[0x100];
       snprintf(buf, sizeof(buf), "%s_%i", mesh->name, primitive_index);
       opaque_mesh.sort_attributes();
+      optimize_mesh(opaque_mesh);
       mnode->add_primitive(opaque_mesh, pbrmat);
     }
   }

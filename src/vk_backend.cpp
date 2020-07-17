@@ -579,18 +579,19 @@ static void execute_preprocessor(List *l, char const *list_end,
       }
     } else if (param_eval.type == stref_s("READ_WRITE")) {
       if (param_eval.array_size > 0) {
-        builder.putf("layout(set = %i, binding = %i, %.*s) volatile coherent uniform "
-                     "%.*s %.*s[%i];",
-                     param_eval.set, param_eval.binding,
-                     STRF(param_eval.format_to_glsl()),
-                     STRF(param_eval.type_to_glsl()), STRF(param_eval.name),
-                     param_eval.array_size);
+        builder.putf(
+            "layout(set = %i, binding = %i, %.*s) volatile coherent uniform "
+            "%.*s %.*s[%i];",
+            param_eval.set, param_eval.binding,
+            STRF(param_eval.format_to_glsl()), STRF(param_eval.type_to_glsl()),
+            STRF(param_eval.name), param_eval.array_size);
       } else {
-        builder.putf("layout(set = %i, binding = %i, %.*s) volatile coherent uniform "
-                     "%.*s %.*s;",
-                     param_eval.set, param_eval.binding,
-                     STRF(param_eval.format_to_glsl()),
-                     STRF(param_eval.type_to_glsl()), STRF(param_eval.name));
+        builder.putf(
+            "layout(set = %i, binding = %i, %.*s) volatile coherent uniform "
+            "%.*s %.*s;",
+            param_eval.set, param_eval.binding,
+            STRF(param_eval.format_to_glsl()), STRF(param_eval.type_to_glsl()),
+            STRF(param_eval.name));
       }
     } else {
       UNIMPLEMENTED;
@@ -646,8 +647,9 @@ static void execute_preprocessor(List *l, char const *list_end,
     builder.putf("layout(set = %i, binding = %i, std430) buffer SBO_%i_%i {\n",
                  param_eval.set, param_eval.binding, param_eval.set,
                  param_eval.binding);
-    builder.putf("  %.*s internal_data[];\n", STRF(param_eval.type));
-    builder.putf("} %.*s;\n", STRF(param_eval.name));
+    builder.putf("  %.*s %.*s[];\n", STRF(param_eval.type),
+                 STRF(param_eval.name));
+    builder.putf("};\n");
   } else if (l->cmp_symbol("DECLARE_PUSH_CONSTANTS")) {
     param_eval.reset();
     param_eval.exec(l->next);
@@ -704,8 +706,8 @@ static void preprocess_shader(String_Builder &builder, string_ref body) {
 
 #define image_load(image, coords) imageLoad(image, ivec2(coords))
 #define image_store(image, coords, data) imageStore(image, ivec2(coords), data)
-#define buffer_load(buffer, index) buffer.internal_data[index]
-#define buffer_store(buffer, index, data) buffer.internal_data[index] = data
+#define buffer_load(buffer, index) buffer[index]
+#define buffer_store(buffer, index, data) buffer[index] = data
 #define buffer_atomic_add(buffer, index, num) atomicAdd(buffer.internal_data[index], num)
 
 )");
@@ -1629,12 +1631,16 @@ struct Window {
   i32          window_width  = 1280;
   i32          window_height = 720;
 
-  VkInstance       instance                   = VK_NULL_HANDLE;
-  VkPhysicalDevice physdevice                 = VK_NULL_HANDLE;
-  VkQueue          queue                      = VK_NULL_HANDLE;
-  VkDevice         device                     = VK_NULL_HANDLE;
-  VkCommandPool    cmd_pool                   = VK_NULL_HANDLE;
-  VkCommandBuffer  cmd_buffers[MAX_SC_IMAGES] = {};
+  VkInstance                 instance                   = VK_NULL_HANDLE;
+  VkPhysicalDevice           physdevice                 = VK_NULL_HANDLE;
+  VkPhysicalDeviceProperties device_properties          = {};
+  VkQueue                    queue                      = VK_NULL_HANDLE;
+  VkDevice                   device                     = VK_NULL_HANDLE;
+  VkCommandPool              cmd_pool                   = VK_NULL_HANDLE;
+  VkQueryPool                query_pool                 = VK_NULL_HANDLE;
+  u32                        timestamp_frequency        = 0;
+  u32                        query_cursor               = 0;
+  VkCommandBuffer            cmd_buffers[MAX_SC_IMAGES] = {};
 
   VkSwapchainKHR     swapchain                = VK_NULL_HANDLE;
   uint32_t           sc_image_count           = 0;
@@ -1824,6 +1830,7 @@ struct Window {
     ito(mem_chunks.size) mem_chunks[i].release(device);
     mem_chunks.release();
     vkDeviceWaitIdle(device);
+    vkDestroyQueryPool(device, query_pool, NULL);
     ito(sc_image_count) vkDestroySemaphore(device, sc_free_sem[i], NULL);
     ito(sc_image_count) vkDestroySemaphore(device, render_finish_sem[i], NULL);
     ito(sc_image_count) vkDestroyFence(device, frame_fences[i], NULL);
@@ -1837,6 +1844,8 @@ struct Window {
   }
 
   Descriptor_Pool &get_descriptor_pool() { return desc_pools[cmd_index]; }
+
+  u32 allocate_timestamp_id() { return (query_cursor++ % 1000); }
 
   u32 find_mem_chunk(u32 prop_flags, u32 memory_type_bits, u32 alignment,
                      u32 size) {
@@ -2427,7 +2436,7 @@ struct Window {
         vkCreateDevice(graphics_device_id, &device_create_info, NULL, &device));
     vkGetDeviceQueue(device, graphics_queue_id, 0, &queue);
     ASSERT_ALWAYS(queue != VK_NULL_HANDLE);
-
+    vkGetPhysicalDeviceProperties(physdevice, &device_properties);
     update_swapchain();
     {
       VkCommandPoolCreateInfo info;
@@ -2436,7 +2445,15 @@ struct Window {
       info.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
       info.queueFamilyIndex = graphics_queue_id;
 
-      vkCreateCommandPool(device, &info, 0, &cmd_pool);
+      VK_ASSERT_OK(vkCreateCommandPool(device, &info, 0, &cmd_pool));
+    }
+    {
+      VkQueryPoolCreateInfo info;
+      MEMZERO(info);
+      info.sType      = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+      info.queryType  = VK_QUERY_TYPE_TIMESTAMP;
+      info.queryCount = 1000;
+      VK_ASSERT_OK(vkCreateQueryPool(device, &info, NULL, &query_pool));
     }
     {
       VkCommandBufferAllocateInfo info;
@@ -2597,6 +2614,9 @@ class Vk_Ctx : public rd::Imm_Ctx {
   InlineArray<Graphics_Pipeline_State, 8> stack;
   ID                                      cur_pass;
   u8                                      _push_constants[128];
+  u32                                     timestamp_begin_id;
+  u32                                     timestamp_end_id;
+  u64                                     last_ms;
 
   enum class Binding_t {
     UNIFORM_BUFFER,
@@ -2798,7 +2818,6 @@ class Vk_Ctx : public rd::Imm_Ctx {
     db.new_access_flags = new_access_flags;
     cpu_cmd.write(Cmd_t::BARRIER, &db);
   }
-
   void flush_render_pass() {
     Render_Pass &pass = wnd->render_passes[cur_pass];
     ito(pass.rts.size) {
@@ -2820,6 +2839,19 @@ class Vk_Ctx : public rd::Imm_Ctx {
     binfo.renderPass      = pass.pass;
     binfo.pClearValues    = &pass.clear_values[0];
     binfo.clearValueCount = pass.clear_values.size;
+    {
+      u64      timestamp_results[2];
+      VkResult res = vkGetQueryPoolResults(
+          wnd->device, wnd->query_pool, timestamp_begin_id, 2, 16,
+          timestamp_results, 8, VK_QUERY_RESULT_64_BIT);
+      if (res == VK_SUCCESS) {
+        u64 diff = timestamp_results[1] - timestamp_results[0];
+        last_ms  = diff * wnd->device_properties.limits.timestampPeriod;
+        vkResetQueryPool(wnd->device, wnd->query_pool, timestamp_begin_id, 2);
+      }
+    }
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                        wnd->query_pool, timestamp_begin_id);
     vkCmdBeginRenderPass(cmd, &binfo, VK_SUBPASS_CONTENTS_INLINE);
     u8  pcs[128];
     u32 pc_dirty_range = 0;
@@ -2896,9 +2928,24 @@ class Vk_Ctx : public rd::Imm_Ctx {
     }
     cpu_cmd.reset();
     vkCmdEndRenderPass(cmd);
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                        wnd->query_pool, timestamp_end_id);
   }
 
   void flush_compute_pass() {
+    {
+      u64      timestamp_results[2];
+      VkResult res = vkGetQueryPoolResults(
+          wnd->device, wnd->query_pool, timestamp_begin_id, 2, 16,
+          timestamp_results, 8, VK_QUERY_RESULT_64_BIT);
+      if (res == VK_SUCCESS) {
+        u64 diff = timestamp_results[1] - timestamp_results[0];
+        last_ms  = diff * wnd->device_properties.limits.timestampPeriod;
+        vkResetQueryPool(wnd->device, wnd->query_pool, timestamp_begin_id, 2);
+      }
+    }
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                        wnd->query_pool, timestamp_begin_id);
     u8  pcs[128];
     u32 pc_dirty_range = 0;
     while (cpu_cmd.has_data()) {
@@ -2938,6 +2985,8 @@ class Vk_Ctx : public rd::Imm_Ctx {
         UNIMPLEMENTED;
       }
     }
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                        wnd->query_pool, timestamp_end_id);
     cpu_cmd.reset();
   }
 
@@ -3137,6 +3186,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
   }
 
   public:
+  u64  get_dt() { return last_ms; }
   void reset() {
     vkResetCommandBuffer(cmd, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
     this->cur_pass = {0};
@@ -3155,8 +3205,10 @@ class Vk_Ctx : public rd::Imm_Ctx {
     VK_ASSERT_OK(vkBeginCommandBuffer(cmd, &begin_info));
   }
   void init(rd::Pass_t type, Window *wnd) {
-    this->type      = type;
-    set_dirty_flags = 0;
+    this->type         = type;
+    timestamp_begin_id = wnd->allocate_timestamp_id();
+    timestamp_end_id   = wnd->allocate_timestamp_id();
+    set_dirty_flags    = 0;
     memset(set_cache, 0, sizeof(set_cache));
     deferred_bindings.init();
     cpu_cmd.init();
@@ -3670,6 +3722,7 @@ class VkResource_Manager : public rd::IResource_Manager {
       vkResetFences(wnd->device, 1, &fence.fence);
     }
   }
+  double  get_pass_duration(string_ref name) override;
   void    on_pass_end() {}
   VkFence get_on_finish_fence() {
     Fence &fence = wnd->fences[on_finish_fence.id];
@@ -4100,6 +4153,7 @@ class VkPass_Mng : public rd::Pass_Mng {
     u32                 cur_ctx;
     Vk_Ctx *            ctx[3];
     ID                  pass_id;
+    double              last_duration;
     void                release() {
       pass->release(rsmng[cur_ctx]);
       ito(3) ctx[i]->release();
@@ -4173,6 +4227,11 @@ class VkPass_Mng : public rd::Pass_Mng {
         last_ctx = passes[i].ctx[cur_ctx];
         passes[i].pass->on_end(passes[i].rsmng[cur_ctx]);
         passes[i].rsmng[cur_ctx]->on_pass_end();
+        passes[i].last_duration =
+            (double)passes[i].ctx[cur_ctx]->get_dt() * 1.0e-6;
+        /* string_ref pass_name = passes[i].pass->get_name();
+         fprintf(stdout, "%.*s duration: %d\n", STRF(pass_name),
+                 passes[i].ctx[cur_ctx]->get_dt());*/
       }
       if (last_ctx != NULL) {
         VkSemaphore sem = last_ctx->get_on_finish();
@@ -4202,6 +4261,14 @@ class VkPass_Mng : public rd::Pass_Mng {
     this->consumer = consumer;
   }
 };
+
+double VkResource_Manager::get_pass_duration(string_ref name) {
+  if (mng->pass_table.contains(name)) {
+    return mng->passes[mng->pass_table.get(name)].last_duration;
+  } else {
+    TRAP;
+  }
+}
 
 rd::IPass *VkResource_Manager::get_pass(string_ref name) {
   if (mng->pass_table.contains(name)) {

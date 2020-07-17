@@ -366,14 +366,27 @@ static inline float3 safe_normalize(float3 v) {
 }
 
 struct Vertex_Full {
-  float3      position;
-  float3      normal;
-  float3      binormal;
-  float3      tangent;
-  float2      u0;
-  float2      u1;
-  float2      u2;
-  float2      u3;
+  float3 position;
+  float3 normal;
+  float3 binormal;
+  float3 tangent;
+  float2 u0;
+  float2 u1;
+  float2 u2;
+  float2 u3;
+  u8 *   get_attribute(rd::Attriute_t type) {
+    switch (type) {
+    case rd::Attriute_t::POSITION: return (u8 *)&position;
+    case rd::Attriute_t::NORMAL: return (u8 *)&normal;
+    case rd::Attriute_t::BINORMAL: return (u8 *)&binormal;
+    case rd::Attriute_t::TANGENT: return (u8 *)&tangent;
+    case rd::Attriute_t::TEXCOORD0: return (u8 *)&u0;
+    case rd::Attriute_t::TEXCOORD1: return (u8 *)&u1;
+    case rd::Attriute_t::TEXCOORD2: return (u8 *)&u2;
+    case rd::Attriute_t::TEXCOORD3: return (u8 *)&u3;
+    default: TRAP;
+    }
+  }
   Vertex_Full transform(float4x4 const &transform) {
     Vertex_Full out;
     float4x4    cmat = cofactor(transform);

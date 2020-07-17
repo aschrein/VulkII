@@ -14,6 +14,7 @@ ELSE()
   message(STATUS ${Vulkan_LIBRARY})
   message(STATUS "$ENV{VULKAN_SDK}/include")
 ENDIF()
+add_subdirectory(3rdparty/meshoptimizer)
 add_executable(vulkii
 src/main.cpp
 src/vk_backend.cpp
@@ -80,5 +81,6 @@ target_include_directories(vulkii
 )
 target_link_libraries(vulkii
 ${Vulkan_LIBRARY}
+meshoptimizer
 ${LIBS}
 )
