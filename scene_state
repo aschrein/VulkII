@@ -1,10 +1,10 @@
 (
 (camera
- (set_phi -75.702888)
- (set_theta -16.669294)
+ (set_phi -89.219360)
+ (set_theta -17.369759)
  (set_distance 6.000000)
- (set_look_at 7.533084 -3.920133 4.689169)
- (set_aspect 1.187730)
+ (set_look_at -0.197773 -0.240555 -2.780177)
+ (set_aspect 1.606007)
  (set_fov 1.570796)
  (set_znear 0.001000)
  (set_zfar 1000000.000000)
@@ -14,5 +14,6 @@
  (enable_compute_depth 1)
  (enable_compute_render_pass 1)
  (triangles_per_lane 1)
+ (enable_meshlets_render_pass 1)
 )
 )

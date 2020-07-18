@@ -234,6 +234,16 @@ struct MS_State {
 
 enum class Input_Rate { VERTEX, INSTANCE };
 
+enum class Access_Bits : u32 {
+  SHADER_READ  = 0b00001,
+  SHADER_WRITE = 0b00010,
+};
+
+enum class Image_Layout {
+  SHADER_READ_WRITE_OPTIMAL,
+  SHADER_READ_ONLY_OPTIMAL,
+};
+
 class Imm_Ctx {
   public:
   ////////////////////////////
@@ -243,6 +253,9 @@ class Imm_Ctx {
   virtual void clear_bindings()                                        = 0;
   virtual void push_state()                                            = 0;
   virtual void pop_state()                                             = 0;
+  virtual void image_barrier(Resource_ID image_id, u32 access_flags,
+                             Image_Layout layout)                      = 0;
+  virtual void buffer_barrier(Resource_ID buf_id, u32 access_flags)    = 0;
   virtual bool get_fence_state(Resource_ID fence_id)                   = 0;
   virtual void IA_set_topology(Primitive topology)                     = 0;
   virtual void IA_set_index_buffer(Resource_ID id, u32 offset,

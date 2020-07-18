@@ -431,6 +431,54 @@ struct Attribute {
   rd::Format     format;
   u32            offset;
   u32            stride;
+  u32            size;
+};
+
+// Copy pasted from meshoptimizer
+
+struct Meshlet {
+  u32 vertex_offset;
+  u32 index_offset;
+  u32 triangle_count;
+  u32 vertex_count;
+  // (x, y, z, radius)
+  float4 sphere;
+  // (x, y, z, _)
+  float4 cone_apex;
+  // (x, y, z, cutoff)
+  float4 cone_axis_cutoff;
+  union {
+    struct {
+      i8 cone_axis_s8[3];
+      i8 cone_cutoff_s8;
+    };
+    u32 cone_pack;
+  };
+};
+
+struct Raw_Meshlets_Opaque {
+  Array<u8>                  attribute_data;
+  Array<u8>                  index_data;
+  Array<Meshlet>             meshlets;
+  InlineArray<Attribute, 16> attributes;
+  u32                        num_vertices;
+  u32                        num_indices;
+  u32                        get_attribute_size(u32 index) const {
+    return attributes[index].size * num_vertices;
+  }
+  void init() {
+    MEMZERO(*this);
+    attributes.init();
+    attribute_data.init();
+    meshlets.init();
+    index_data.init();
+  }
+  void release() {
+    attributes.release();
+    attribute_data.release();
+    meshlets.release();
+    index_data.release();
+  }
 };
 
 struct Raw_Mesh_Opaque {
@@ -449,6 +497,7 @@ struct Raw_Mesh_Opaque {
     ito(attributes.size) {
       if (attributes[i].format != that.attributes[i].format ||
           attributes[i].stride != that.attributes[i].stride ||
+          attributes[i].size != that.attributes[i].size ||
           attributes[i].type != that.attributes[i].type || false
 
       )
@@ -481,8 +530,13 @@ struct Raw_Mesh_Opaque {
     TRAP;
   }
 
+  u8 *get_attribute_data(u32 attrib_index, u32 vertex_index) {
+    return &attribute_data[attributes[attrib_index].offset +
+                           attributes[attrib_index].stride * vertex_index];
+  }
+
   u32 get_attribute_size(u32 index) const {
-    return attributes[index].stride * num_vertices;
+    return attributes[index].size * num_vertices;
   }
 
   float3 fetch_position(u32 index) {
@@ -993,13 +1047,18 @@ template <typename T> struct BVH {
 };
 
 struct Primitive {
-  Raw_Mesh_Opaque mesh;
-  PBR_Material    material;
-  void            init() {
+  Raw_Mesh_Opaque     mesh;
+  Raw_Meshlets_Opaque meshlets;
+  PBR_Material        material;
+  void                init() {
     mesh.init();
     material.init();
+    meshlets.init();
   }
-  void release() { mesh.release(); }
+  void release() {
+    mesh.release();
+    meshlets.release();
+  }
 };
 
 class MeshNode : public Node {
@@ -1021,7 +1080,8 @@ class MeshNode : public Node {
     return (u64)(intptr_t)&p;
   }
   u64  get_type_id() const override { return ID(); }
-  void add_primitive(Raw_Mesh_Opaque &mesh, PBR_Material &mat) {
+  void add_primitive(Raw_Mesh_Opaque &mesh, Raw_Meshlets_Opaque &meshlets,
+                     PBR_Material &mat) {
     if (primitives.size != 0) {
       ASSERT_ALWAYS(primitives[0].mesh.is_compatible(mesh));
     }
@@ -1029,6 +1089,7 @@ class MeshNode : public Node {
     p.init();
     p.mesh     = mesh;
     p.material = mat;
+    p.meshlets = meshlets;
     primitives.push(p);
   }
   void release() override {

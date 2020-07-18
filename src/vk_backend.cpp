@@ -158,6 +158,7 @@ struct Buffer : public Ref_Cnt {
     bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     bar.buffer              = buffer;
+    bar.size                = VK_WHOLE_SIZE;
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 1,
                          &bar, 0, NULL);
@@ -212,6 +213,27 @@ struct Image_Info {
   VkImageUsageFlags     usage;
   VkSharingMode         sharingMode;
 };
+
+VkAccessFlags to_vk_access_flags(u32 flags) {
+  u32 out = 0;
+  if (flags & (i32)rd::Access_Bits::SHADER_READ) {
+    out |= VK_ACCESS_SHADER_READ_BIT;
+  }
+  if (flags & (i32)rd::Access_Bits::SHADER_WRITE) {
+    out |= VK_ACCESS_SHADER_WRITE_BIT;
+  }
+  return out;
+}
+
+VkImageLayout to_vk(rd::Image_Layout layout) {
+  // clang-format off
+  switch (layout) {
+  case rd::Image_Layout::SHADER_READ_ONLY_OPTIMAL      : return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  case rd::Image_Layout::SHADER_READ_WRITE_OPTIMAL     : return VK_IMAGE_LAYOUT_GENERAL;
+  default: UNIMPLEMENTED;
+  }
+  // clang-format on
+}
 
 VkFormat to_vk(rd::Format format) {
   // clang-format off
@@ -424,7 +446,17 @@ static Array<u32> compile_glsl(VkDevice device, string_ref text,
   });
   if (shaderc_result_get_compilation_status(result) !=
       shaderc_compilation_status_success) {
-    fprintf(stderr, "%.*s\n", STRF(text));
+    u32 len = 1;
+    fprintf(stderr, "%i:", len);
+    ito(text.len) {
+      fprintf(stderr, "%c", text.ptr[i]);
+      if (text.ptr[i] == '\n') {
+        len += 1;
+        fprintf(stderr, "%i:", len);
+        
+      }
+    }
+
     fprintf(stderr, shaderc_result_get_error_message(result));
     TRAP;
   }
@@ -644,7 +676,7 @@ static void execute_preprocessor(List *l, char const *list_end,
   } else if (l->cmp_symbol("DECLARE_BUFFER")) {
     param_eval.reset();
     param_eval.exec(l->next);
-    builder.putf("layout(set = %i, binding = %i, std430) buffer SBO_%i_%i {\n",
+    builder.putf("layout(set = %i, binding = %i, scalar) buffer SBO_%i_%i {\n",
                  param_eval.set, param_eval.binding, param_eval.set,
                  param_eval.binding);
     builder.putf("  %.*s %.*s[];\n", STRF(param_eval.type),
@@ -697,6 +729,7 @@ static void preprocess_shader(String_Builder &builder, string_ref body) {
 #define VERTEX_INDEX  gl_VertexIndex
 #define INSTANCE_INDEX  gl_InstanceIndex
 #define GLOBAL_THREAD_INDEX  gl_GlobalInvocationID
+#define GROUPT_INDEX  gl_WorkGroupID
 #define LOCAL_THREAD_INDEX  gl_LocalInvocationID
 #define lerp          mix
 #define float2_splat(x)  vec2(x, x)
@@ -1490,7 +1523,7 @@ struct Compute_Pipeline_Wrapper : public Slot {
       VkPipelineShaderStageCreateInfo stage;
       MEMZERO(stage);
       stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-      stage.stage  = VK_SHADER_STAGE_VERTEX_BIT;
+      stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
       stage.module = cs_module;
       stage.pName  = "main";
       stages[0]    = stage;
@@ -1516,7 +1549,7 @@ struct Compute_Pipeline_Wrapper : public Slot {
       pipe_layout_info.setLayoutCount = set_layouts.size;
       VkPushConstantRange push_range;
       push_range.offset     = 0;
-      push_range.stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
+      push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
       push_range.size       = push_constants_size;
       ;
       if (push_range.size > 0) {
@@ -2314,8 +2347,11 @@ struct Window {
     app_info.pApplicationName   = "Vulkii";
     app_info.pEngineName        = "Vulkii";
 
-    const char *         layerNames[]      = {"VK_LAYER_KHRONOS_validation"};
-    bool                 enable_validation = false;
+    const char *layerNames[]      = {"VK_LAYER_KHRONOS_validation"};
+    bool        enable_validation = false;
+#ifndef NDEBUG
+    enable_validation = true;
+#endif
     VkInstanceCreateInfo info;
     MEMZERO(info);
     info.sType            = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -2411,15 +2447,34 @@ struct Window {
     MEMZERO(pd_index_features);
     pd_index_features.sType =
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT;
+
     pd_features2.pNext = ((void *)&pd_index_features);
     vkGetPhysicalDeviceFeatures2(physdevice, &pd_features2);
     ASSERT_DEBUG(pd_index_features.shaderSampledImageArrayNonUniformIndexing);
     ASSERT_DEBUG(pd_index_features.descriptorBindingPartiallyBound);
     ASSERT_DEBUG(pd_index_features.runtimeDescriptorArray);
+
     VkPhysicalDeviceFeatures pd_features;
     MEMZERO(pd_features);
     vkGetPhysicalDeviceFeatures(physdevice, &pd_features);
     ASSERT_DEBUG(pd_features.fillModeNonSolid);
+
+    VkPhysicalDeviceHostQueryResetFeatures query_reset_features;
+    MEMZERO(query_reset_features);
+    query_reset_features.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES_EXT;
+    query_reset_features.hostQueryReset = VK_TRUE;
+
+    VkPhysicalDeviceScalarBlockLayoutFeatures scalar_features;
+    MEMZERO(scalar_features);
+    scalar_features.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES;
+    scalar_features.scalarBlockLayout = VK_TRUE;
+
+    query_reset_features.pNext = &scalar_features;
+    pd_index_features.pNext    = &query_reset_features;
+
+    device_create_info.pNext = &pd_index_features;
 
     VkPhysicalDeviceFeatures enabled_features;
     MEMZERO(enabled_features);
@@ -2847,9 +2902,9 @@ class Vk_Ctx : public rd::Imm_Ctx {
       if (res == VK_SUCCESS) {
         u64 diff = timestamp_results[1] - timestamp_results[0];
         last_ms  = diff * wnd->device_properties.limits.timestampPeriod;
-        vkResetQueryPool(wnd->device, wnd->query_pool, timestamp_begin_id, 2);
       }
     }
+    vkResetQueryPool(wnd->device, wnd->query_pool, timestamp_begin_id, 2);
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                         wnd->query_pool, timestamp_begin_id);
     vkCmdBeginRenderPass(cmd, &binfo, VK_SUBPASS_CONTENTS_INLINE);
@@ -2941,9 +2996,9 @@ class Vk_Ctx : public rd::Imm_Ctx {
       if (res == VK_SUCCESS) {
         u64 diff = timestamp_results[1] - timestamp_results[0];
         last_ms  = diff * wnd->device_properties.limits.timestampPeriod;
-        vkResetQueryPool(wnd->device, wnd->query_pool, timestamp_begin_id, 2);
       }
     }
+    vkResetQueryPool(wnd->device, wnd->query_pool, timestamp_begin_id, 2);
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                         wnd->query_pool, timestamp_begin_id);
     u8  pcs[128];
@@ -3023,6 +3078,9 @@ class Vk_Ctx : public rd::Imm_Ctx {
   }
 
   void record_barriers() {
+    // Semi-Automatic barriers for compute shader
+    if (type == rd::Pass_t::COMPUTE) return;
+
     deferred_bindings.iter_pairs([&](Resource_Path const &   path,
                                      Resource_Binding const &rb) {
       if (rb.type == Binding_t::UNIFORM_BUFFER) {
@@ -3574,7 +3632,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
     info.bufferImageHeight = image.info.extent.height;
     vkCmdCopyBufferToImage(cmd, buffer.buffer, image.image,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &info);
-    image.barrier(cmd, old_access_flags, old_layout);
+    // image.barrier(cmd, old_access_flags, old_layout);
   }
   void draw_indexed(u32 index_count, u32 instance_count, u32 first_index,
                     u32 first_instance, i32 vertex_offset) override {
@@ -3623,6 +3681,16 @@ class Vk_Ctx : public rd::Imm_Ctx {
     current_draw.multi_draw_indexed_indirect.max_count      = max_count;
     current_draw.multi_draw_indexed_indirect.stride         = stride;
     cpu_cmd.write(Cmd_t::DRAW, &current_draw);
+  }
+  virtual void image_barrier(Resource_ID image_id, u32 access_flags,
+                             rd::Image_Layout layout) override {
+    ASSERT_ALWAYS(type == rd::Pass_t::COMPUTE);
+    push_image_barrier(image_id.id, to_vk_access_flags(access_flags),
+                       to_vk(layout));
+  }
+  virtual void buffer_barrier(Resource_ID buf_id, u32 access_flags) override {
+    ASSERT_ALWAYS(type == rd::Pass_t::COMPUTE);
+    push_buffer_barrier(buf_id.id, to_vk_access_flags(access_flags));
   }
   void dispatch(u32 dim_x, u32 dim_y, u32 dim_z) override {
     ASSERT_ALWAYS(type == rd::Pass_t::COMPUTE);
@@ -4227,8 +4295,8 @@ class VkPass_Mng : public rd::Pass_Mng {
         last_ctx = passes[i].ctx[cur_ctx];
         passes[i].pass->on_end(passes[i].rsmng[cur_ctx]);
         passes[i].rsmng[cur_ctx]->on_pass_end();
-        passes[i].last_duration =
-            (double)passes[i].ctx[cur_ctx]->get_dt() * 1.0e-6;
+        passes[i].last_duration +=
+            ((double)passes[i].ctx[cur_ctx]->get_dt() * 1.0e-6 - passes[i].last_duration) * 0.1;
         /* string_ref pass_name = passes[i].pass->get_name();
          fprintf(stdout, "%.*s duration: %d\n", STRF(pass_name),
                  passes[i].ctx[cur_ctx]->get_dt());*/
@@ -4245,6 +4313,7 @@ class VkPass_Mng : public rd::Pass_Mng {
     pw.type    = type;
     pw.pass    = pass;
     pw.cur_ctx = 0;
+    pw.last_duration = 0.0;
     ito(3) {
       pw.ctx[i] = new Vk_Ctx();
       pw.ctx[i]->init(type, wnd);
