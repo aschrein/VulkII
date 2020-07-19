@@ -611,6 +611,12 @@ template <int N> struct inline_string {
   }
 };
 
+template <int N>
+static inline bool operator==(inline_string<N> a, inline_string<N> b) {
+  if (a.len() != b.len()) return false;
+  return strncmp(a.buf, b.buf, a.len()) == 0 ? true : false;
+}
+
 struct string {
   char * ptr;
   size_t len;
@@ -635,15 +641,11 @@ static inline bool operator==(string a, string b) {
                         : strncmp(a.ptr, b.ptr, a.len) == 0 ? true : false;
 }
 
-static inline uint64_t hash_of(string a) {
-  uint64_t hash = 5381;
-  for (size_t i = 0; i < a.len; i++) {
-    hash =
-        //(hash << 6) + (hash << 16) - hash + a.ptr[i];
-        ((hash << 5) + hash) + a.ptr[i];
-  }
-  return hash;
+template <int N> static inline uint64_t hash_of(inline_string<N> a) {
+  return hash_of(a.ref());
 }
+
+static inline uint64_t hash_of(string a) { return hash_of(a.ref()); }
 
 static inline string make_string(char const *static_string) {
   if (static_string == NULL || static_string[0] == '\0') return string{NULL, 0};

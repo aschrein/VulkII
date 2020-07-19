@@ -453,7 +453,6 @@ static Array<u32> compile_glsl(VkDevice device, string_ref text,
       if (text.ptr[i] == '\n') {
         len += 1;
         fprintf(stderr, "%i:", len);
-        
       }
     }
 
@@ -3634,6 +3633,21 @@ class Vk_Ctx : public rd::Imm_Ctx {
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &info);
     // image.barrier(cmd, old_access_flags, old_layout);
   }
+  void copy_buffer(Resource_ID src_buf_id, size_t src_offset,
+                   Resource_ID dst_buf_id, size_t dst_offset,
+                   u32 size) override {
+    Buffer &src_buffer = wnd->buffers[src_buf_id.id];
+    Buffer &dst_buffer = wnd->buffers[dst_buf_id.id];
+
+    src_buffer.barrier(cmd, VK_ACCESS_TRANSFER_READ_BIT);
+    dst_buffer.barrier(cmd, VK_ACCESS_TRANSFER_WRITE_BIT);
+    VkBufferCopy info;
+    MEMZERO(info);
+    info.dstOffset = dst_offset;
+    info.size      = size;
+    info.srcOffset = src_offset;
+    vkCmdCopyBuffer(cmd, src_buffer.buffer, dst_buffer.buffer, 1, &info);
+  }
   void draw_indexed(u32 index_count, u32 instance_count, u32 first_index,
                     u32 first_instance, i32 vertex_offset) override {
     ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
@@ -4296,7 +4310,9 @@ class VkPass_Mng : public rd::Pass_Mng {
         passes[i].pass->on_end(passes[i].rsmng[cur_ctx]);
         passes[i].rsmng[cur_ctx]->on_pass_end();
         passes[i].last_duration +=
-            ((double)passes[i].ctx[cur_ctx]->get_dt() * 1.0e-6 - passes[i].last_duration) * 0.1;
+            ((double)passes[i].ctx[cur_ctx]->get_dt() * 1.0e-6 -
+             passes[i].last_duration) *
+            0.1;
         /* string_ref pass_name = passes[i].pass->get_name();
          fprintf(stdout, "%.*s duration: %d\n", STRF(pass_name),
                  passes[i].ctx[cur_ctx]->get_dt());*/
@@ -4310,9 +4326,9 @@ class VkPass_Mng : public rd::Pass_Mng {
   }
   void add_pass(rd::Pass_t type, rd::IPass *pass) override {
     Pass_Wrapper pw;
-    pw.type    = type;
-    pw.pass    = pass;
-    pw.cur_ctx = 0;
+    pw.type          = type;
+    pw.pass          = pass;
+    pw.cur_ctx       = 0;
     pw.last_duration = 0.0;
     ito(3) {
       pw.ctx[i] = new Vk_Ctx();

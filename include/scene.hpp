@@ -832,6 +832,11 @@ class Node {
   quat   rotation;
   float3 scale;
 
+  Node *rename(string_ref name) {
+    this->name.init(name);
+    return this;
+  }
+
   static Node *create(string_ref name) {
     Node *out = new Node;
     out->init(name);

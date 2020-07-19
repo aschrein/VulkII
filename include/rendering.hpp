@@ -302,6 +302,9 @@ class Imm_Ctx {
   virtual void copy_buffer_to_image(Resource_ID buf_id, size_t offset,
                                     Resource_ID img_id, u32 dst_layer,
                                     u32 dst_level)                          = 0;
+  virtual void copy_buffer(Resource_ID src_buf_id, size_t src_offset,
+                           Resource_ID dst_buf_id, size_t dst_offset,
+                           u32 size)                                        = 0;
 };
 
 struct Clear_Color {
