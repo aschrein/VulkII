@@ -1,10 +1,10 @@
 (
 (camera
- (set_phi -89.219360)
- (set_theta -17.369759)
+ (set_phi -95.667976)
+ (set_theta -17.699923)
  (set_distance 6.000000)
- (set_look_at -0.197773 -0.240555 -2.780177)
- (set_aspect 1.606007)
+ (set_look_at -1.347528 1.129130 -5.567182)
+ (set_aspect 1.000000)
  (set_fov 1.570796)
  (set_znear 0.001000)
  (set_zfar 1000000.000000)

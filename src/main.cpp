@@ -459,8 +459,8 @@ class GfxMeshNode : public MeshNode {
       Raw_Meshlets_Opaque &meshlets = primitives[i].meshlets;
       ctx->push_constants(&meshlets.meshlets.size, push_offset, 4);
       ctx->push_constants(&meshlet_cursor, push_offset + 4, 4);
-      ctx->push_constants(&index_cursor, push_offset + 4, 4);
-      ctx->push_constants(&vertex_cursor, push_offset + 8, 4);
+      ctx->push_constants(&index_cursor, push_offset + 8, 4);
+      ctx->push_constants(&vertex_cursor, push_offset + 12, 4);
       ctx->dispatch(meshlets.meshlets.size, 1, 1);
       index_cursor += meshlets.num_indices;
       vertex_cursor += meshlets.num_vertices;
@@ -518,7 +518,9 @@ public:
     gfx_images.init();
     images.init();
     SceneFactory sf(this);
-    root = load_gltf_pbr(&sf, stref_s("models/light/scene.gltf"));
+     root = load_gltf_pbr(&sf, stref_s("models/light/scene.gltf"));
+    //root = load_gltf_pbr(
+        //&sf, stref_s("models/chateau-de-marvao-portugal/scene.gltf"));
     root->dump();
   }
   void on_pass_begin(rd::IResource_Manager *rm) {
@@ -819,7 +821,6 @@ struct Instance_Info {
   //PIXEL_TEXCOORD0 = TEXCOORD0;
   PIXEL_INSTANCE_ID = INSTANCE_INDEX;
   float3 position = POSITION;
-  position.xyz *= 0.04;
   // float4x4 world_matrix = buffer_load(instance_infos, INSTANCE_INDEX).model;
   @(EXPORT_POSITION
       viewproj * float4(position, 1.0)
@@ -892,6 +893,14 @@ struct Instance_Info {
     ctx->set_viewport(0.0f, 0.0f, (float)g_config.g_buffer_width,
                       (float)g_config.g_buffer_height, 0.0f, 1.0f);
     ctx->set_scissor(0, 0, g_config.g_buffer_width, g_config.g_buffer_height);
+    rd::RS_State rs_state;
+    MEMZERO(rs_state);
+    rs_state.polygon_mode = rd::Polygon_Mode::FILL;
+    rs_state.front_face   = rd::Front_Face::CW;
+    rs_state.cull_mode    = rd::Cull_Mode::BACK;
+    rs_state.line_width   = 1.0f;
+    rs_state.depth_bias   = 0.0f;
+    ctx->RS_set_state(rs_state);
     {
       Uniform *ptr  = (Uniform *)ctx->map_buffer(uniform_buffer);
       ptr->viewproj = g_camera.viewproj();
@@ -1032,9 +1041,9 @@ Vertex fetch(u32 index) {
     Vertex v1 = fetch(vertex_offset + i1);
     Vertex v2 = fetch(vertex_offset + i2);
 
-    float4 pp0 = mul4(viewproj, float4(v0.position * 0.04, 1.0));
-    float4 pp1 = mul4(viewproj, float4(v1.position * 0.04, 1.0));
-    float4 pp2 = mul4(viewproj, float4(v2.position * 0.04, 1.0));
+    float4 pp0 = mul4(viewproj, float4(v0.position, 1.0));
+    float4 pp1 = mul4(viewproj, float4(v1.position, 1.0));
+    float4 pp2 = mul4(viewproj, float4(v2.position, 1.0));
     pp0.xyz /= pp0.w;
     pp1.xyz /= pp1.w;
     pp2.xyz /= pp2.w;
@@ -1321,9 +1330,9 @@ u32 fetch_index(u32 index) {
   //Vertex v2 = gs_vertices[i2];//fetch(vertex_offset + meshlet.vertex_offset + i2);
   Vertex v2 = fetch(vertex_offset + meshlet.vertex_offset + i2);
 
-  float4 pp0 = mul4(viewproj, float4(v0.position * 0.04, 1.0));
-  float4 pp1 = mul4(viewproj, float4(v1.position * 0.04, 1.0));
-  float4 pp2 = mul4(viewproj, float4(v2.position * 0.04, 1.0));
+  float4 pp0 = mul4(viewproj, float4(v0.position, 1.0));
+  float4 pp1 = mul4(viewproj, float4(v1.position, 1.0));
+  float4 pp2 = mul4(viewproj, float4(v2.position, 1.0));
   pp0.xyz /= pp0.w;
   pp1.xyz /= pp1.w;
   pp2.xyz /= pp2.w;
@@ -1358,13 +1367,10 @@ u32 fetch_index(u32 index) {
         float((meshlet_index >> 16) % 255) / 255.0,
         1.0
         );
-    if (is_control(CONTROL_DEPTH_ENABLE)) {
-      u32 depth = u32(1.0 / pp.z);
-      if (depth <= imageAtomicMin(out_depth, int2(x, y), depth)) {
-        image_store(out_image, int2(x, y), color);//float4((0.5 * n + float3_splat(0.5)), 1.0));
-      }
-    } else {
-      image_store(out_image, int2(x, y), color);//float4((0.5 * n + float3_splat(0.5)), 1.0));
+    color = float4((0.5 * n + float3_splat(0.5)), 1.0);
+    u32 depth = u32(1.0 / pp.z);
+    if (depth <= imageAtomicMin(out_depth, int2(x, y), depth)) {
+      image_store(out_image, int2(x, y), color);
     }
   }
 @(END)
@@ -2017,6 +2023,11 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
       ImGui::Checkbox("enable_compute_depth", &g_config.enable_compute_depth);
       ImGui::SliderInt("triangles_per_lane",
                        (int *)&g_config.triangles_per_lane, 1, 128);
+      ImGui::SliderInt("g_buffer_width", (int *)&g_config.g_buffer_width, 4,
+                       1024);
+      ImGui::SliderInt("g_buffer_height", (int *)&g_config.g_buffer_height, 4,
+                       1024);
+
       ImGui::LabelText("hw rasterizer", "%f ms",
                        pc->get_pass_duration(stref_s("opaque_pass")));
       ImGui::LabelText("sw rasterizer", "%f ms",
@@ -2028,6 +2039,13 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
 
     {
       ImGui::Begin("sw rasterization");
+      {
+        auto  wsize       = ImGui::GetWindowSize();
+        Resource_ID img = pc->get_resource(stref_s("compute_render/img0"));
+        ImGui::Image((ImTextureID)(intptr_t)img.data, ImVec2(wsize.x, wsize.y));
+      }
+      ImGui::End();
+      ImGui::Begin("hw rasterization");
       auto  wpos        = ImGui::GetCursorScreenPos();
       auto  wsize       = ImGui::GetWindowSize();
       float height_diff = 24;
@@ -2036,12 +2054,12 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
       } else {
         wsize.y = wsize.y - height_diff;
       }
-      g_config.g_buffer_width  = wsize.x;
-      g_config.g_buffer_height = wsize.y;
+      // g_config.g_buffer_width  = wsize.x;
+      // g_config.g_buffer_height = wsize.y;
       if (ImGui::IsWindowHovered()) {
         f32 camera_speed = 2.0f;
         if (ImGui::GetIO().KeysDown[SDL_SCANCODE_LSHIFT]) {
-          camera_speed = 10.0f;
+          camera_speed = 20.0f;
         }
         float3 camera_diff = float3(0.0f, 0.0f, 0.0f);
         if (ImGui::GetIO().KeysDown[SDL_SCANCODE_W]) {
@@ -2073,12 +2091,7 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
         last_m_y = cur_m_y;
       }
       {
-        Resource_ID img = pc->get_resource(stref_s("compute_render/img0"));
-        ImGui::Image((ImTextureID)(intptr_t)img.data, ImVec2(wsize.x, wsize.y));
-      }
-      ImGui::End();
-      ImGui::Begin("hw rasterization");
-      {
+        auto  wsize       = ImGui::GetWindowSize();
         Resource_ID img = pc->get_resource(stref_s("opaque_pass/rt0"));
         ImGui::Image((ImTextureID)(intptr_t)img.data, ImVec2(wsize.x, wsize.y));
       }
@@ -2086,6 +2099,7 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
       ImGui::End();
       ImGui::Begin("meshlet rasterization");
       {
+        auto  wsize       = ImGui::GetWindowSize();
         Resource_ID img = pc->get_resource(stref_s("meshlet_render/img0"));
         ImGui::Image((ImTextureID)(intptr_t)img.data, ImVec2(wsize.x, wsize.y));
       }

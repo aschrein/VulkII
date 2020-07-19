@@ -11,7 +11,7 @@
 #include <meshoptimizer.h>
 
 void optimize_mesh(Raw_Mesh_Opaque &opaque_mesh) {
-  ASSERT_ALWAYS(opaque_mesh.index_type == rd::Index_t::UINT32);
+  // ASSERT_ALWAYS(opaque_mesh.index_type == rd::Index_t::UINT32);
   u32        index_count = opaque_mesh.num_indices;
   Array<u32> indices;
   indices.init();
@@ -53,8 +53,8 @@ void optimize_mesh(Raw_Mesh_Opaque &opaque_mesh) {
                               &vertices[0], vertex_count, sizeof(Vertex_Full));
 
   opaque_mesh.attribute_data.release();
+  opaque_mesh.index_type = rd::Index_t::UINT32;
   opaque_mesh.index_data.release();
-
   opaque_mesh.index_data.resize(indices.size * 4);
   ito(indices.size) {
     u32 index = indices[i];
@@ -204,7 +204,7 @@ Raw_Meshlets_Opaque build_meshlets(Raw_Mesh_Opaque &opaque_mesh) {
   }
   while (result.meshlets.size % 32 != 0) result.meshlets.push(Meshlet{});
   result.num_vertices = vertex_offset;
-  result.num_indices = index_offset;
+  result.num_indices  = index_offset;
 
   return result;
 }
@@ -262,6 +262,7 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
   defer(loaded_textures.release());
   defer({ mesh_table.release(); });
   auto load_texture = [&](char const *uri, rd::Format format) {
+    if (uri == NULL) return -1;
     if (loaded_textures.contains(stref_s(uri))) {
       return loaded_textures.get(stref_s(uri));
     }
@@ -412,6 +413,9 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
           ito(attribute->data->count) {
             float pos[3];
             cgltf_accessor_read_float(attribute->data, i, pos, 3);
+            pos[0] *= -0.04f;
+            pos[1] *= -0.04f;
+            pos[2] *= 0.04f;
             opaque_mesh.max.x = MAX(opaque_mesh.max.x, pos[0]);
             opaque_mesh.max.y = MAX(opaque_mesh.max.y, pos[1]);
             opaque_mesh.max.z = MAX(opaque_mesh.max.z, pos[2]);
@@ -463,6 +467,7 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
           break;
         }
         case cgltf_attribute_type_texcoord: {
+          if (attribute->index >= 4) continue;
           ASSERT_ALWAYS(attribute->index < 4);
           ASSERT_ALWAYS(attribute->data->stride == 8);
           ASSERT_ALWAYS(attribute->data->component_type ==
