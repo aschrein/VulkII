@@ -65,8 +65,7 @@ static_defer({
   fprintf(scene_dump, ")\n");
 });
 
-class GfxMeshNode : public MeshNode {
-  protected:
+struct GfxMesh : public Mesh {
   InlineArray<size_t, 16>    attribute_offsets;
   InlineArray<size_t, 16>    meshlet_attribute_offsets;
   InlineArray<size_t, 16>    attribute_sizes;
@@ -79,8 +78,9 @@ class GfxMeshNode : public MeshNode {
   size_t                     meshlet_total_index_data;
   size_t                     meshlet_data_offset;
   size_t                     meshlet_data_size;
-  void                       init(string_ref name) {
-    MeshNode::init(name);
+
+  void init(string_ref name) {
+    Mesh::init(name);
     total_memory_needed = 0;
     total_indices       = 0;
     index_offset        = 0;
@@ -106,9 +106,8 @@ class GfxMeshNode : public MeshNode {
   };
   static_assert(sizeof(GPU_Meshlet) == 68, "Packing error");
 
-  public:
-  static GfxMeshNode *create(string_ref name) {
-    GfxMeshNode *out = new GfxMeshNode;
+  static GfxMesh *create(string_ref name) {
+    GfxMesh *out = new GfxMesh;
     out->init(name);
     return out;
   }
@@ -116,9 +115,11 @@ class GfxMeshNode : public MeshNode {
     static char p;
     return (u64)(intptr_t)&p;
   }
-  u64  get_type_id() const override { return ID(); }
-  void release() override { MeshNode::release(); }
-  u32  get_num_indices() {
+  void release() {
+    Mesh::release();
+    delete this;
+  }
+  u32 get_num_indices() {
     if (total_indices == 0) {
       ito(primitives.size) total_indices += primitives[i].mesh.num_indices;
     }
@@ -355,20 +356,19 @@ class GfxMeshNode : public MeshNode {
 class Scene {
   Node *             root;
   Array<Image2D_Raw> images;
+  Array<GfxMesh *>   meshes;
 
   // GFX state cache
-  Array<Resource_ID>   gfx_images;
-  Array<GfxMeshNode *> meshes;
-  Array<size_t>        mesh_offsets;
-  Array<size_t>        meshlet_offsets;
-  bool                 gfx_buffers_initialized;
-  u32                  texture_streaming_id;
-  size_t               total_memory;
-  Resource_ID          vertex_buffer;
-  Resource_ID          staging_vertex_buffer;
-  Resource_ID          staging_buffer;
-  Resource_ID          dummy_texture;
-  bool                 dummy_initialized;
+  Array<Resource_ID>            gfx_images;
+  Hash_Table<GfxMesh *, size_t> mesh_offsets;
+  bool                          gfx_buffers_initialized;
+  u32                           texture_streaming_id;
+  size_t                        total_memory;
+  Resource_ID                   vertex_buffer;
+  Resource_ID                   staging_vertex_buffer;
+  Resource_ID                   staging_buffer;
+  Resource_ID                   dummy_texture;
+  bool                          dummy_initialized;
 
   friend class SceneFactory;
   class SceneFactory : public IFactory {
@@ -377,15 +377,21 @@ class Scene {
 public:
     SceneFactory(Scene *scene) : scene(scene) {}
     Node *    add_node(string_ref name) override { return Node::create(name); }
-    MeshNode *add_mesh(string_ref name) override {
-      GfxMeshNode *model = GfxMeshNode::create(name);
+    MeshNode *add_mesh_node(string_ref name) override {
+      MeshNode *model = MeshNode::create(name);
       return model;
+    }
+    Mesh *add_mesh(string_ref name) override {
+      GfxMesh *mesh = GfxMesh::create(name);
+      scene->meshes.push(mesh);
+      return mesh;
     }
     u32 add_image(Image2D_Raw img) override {
       scene->images.push(img);
       return scene->images.size - 1;
     }
   };
+
   template <typename F> void traverse(F fn, Node *node) {
     fn(node);
     ito(node->get_children().size) { traverse(fn, node->get_children()[i]); }
@@ -410,6 +416,14 @@ public:
                         ->rename(stref_s("LOW")));
     root->add_child(load_gltf_pbr(&sf, stref_s("models/light/scene.gltf"))
                         ->rename(stref_s("HIGH")));
+    Node *high = get_node(stref_s("HIGH"));
+    Node *low  = get_node(stref_s("LOW"));
+    ito(10) {
+      jto(10) {
+        high->clone()->translate(float3((f32)i * 2.0f, 0.0f, (f32)j * 8.0f));
+        low->clone()->translate(float3((f32)i * 2.0f, 0.0f, (f32)j * 8.0f));
+      }
+    }
     // root = load_gltf_pbr(
     //    &sf, stref_s("models/chateau-de-marvao-portugal/scene.gltf"));
     root->dump();
@@ -426,6 +440,7 @@ public:
   }
 
   void on_pass_begin(rd::IResource_Manager *rm) {
+    root->update_transform();
     if (dummy_texture.is_null()) {
       rd::Image_Create_Info info;
       MEMZERO(info);
@@ -440,16 +455,12 @@ public:
                         (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST;
       dummy_texture = rm->create_image(info);
     }
-    if (meshes.size == 0) {
-      traverse([&](Node *node) {
-        if (isa<GfxMeshNode>(node)) {
-          meshes.push((GfxMeshNode *)node);
-        }
-      });
+    if (!gfx_buffers_initialized) {
+      gfx_buffers_initialized = true;
       ito(meshes.size) {
         size_t mesh_mem = meshes[i]->get_needed_memory();
         mesh_mem        = rd::IResource_Manager::align_up(mesh_mem);
-        mesh_offsets.push(total_memory);
+        mesh_offsets.insert(meshes[i], total_memory);
         total_memory += mesh_mem;
       }
       {
@@ -514,7 +525,9 @@ public:
       }
       {
         u8 *ptr = (u8 *)ctx->map_buffer(staging_vertex_buffer);
-        ito(meshes.size) { meshes[i]->put_data(ptr + mesh_offsets[i]); }
+        ito(meshes.size) {
+          meshes[i]->put_data(ptr + mesh_offsets.get(meshes[i]));
+        }
         ctx->unmap_buffer(staging_vertex_buffer);
         ctx->copy_buffer(staging_vertex_buffer, 0, vertex_buffer, 0,
                          total_memory);
@@ -539,20 +552,74 @@ public:
   }
   void gfx_exec(rd::Imm_Ctx *ctx) {
     gfx_bind(ctx);
-    ito(meshes.size) { meshes[i]->draw(ctx, vertex_buffer, mesh_offsets[i]); }
+    traverse(
+        [&](Node *node) {
+          if (isa<MeshNode>(node) && node->get_name() == stref_s("HIGH")) {
+            GfxMesh *gfxmesh = ((GfxMesh *)((MeshNode *)node)->get_mesh());
+            ctx->push_constants(&node->get_transform(), 0, sizeof(float4x4));
+            gfxmesh->draw(ctx, vertex_buffer, mesh_offsets.get(gfxmesh));
+          }
+        },
+        root);
+    // ito(meshes.size) { meshes[i]->draw(ctx, vertex_buffer, mesh_offsets[i]);
+    // }
+  }
+  void gfx_exec_low(rd::Imm_Ctx *ctx) {
+    gfx_bind(ctx);
+    traverse(
+        [&](Node *node) {
+          if (isa<MeshNode>(node) && node->get_name() == stref_s("LOW")) {
+            GfxMesh *gfxmesh = ((GfxMesh *)((MeshNode *)node)->get_mesh());
+            ctx->push_constants(&node->get_transform(), 0, sizeof(float4x4));
+            ((GfxMesh *)((MeshNode *)node)->get_mesh())
+                ->draw(ctx, vertex_buffer,
+                       mesh_offsets.get(
+                           ((GfxMesh *)((MeshNode *)node)->get_mesh())));
+          }
+        },
+        root);
   }
   void gfx_dispatch(rd::Imm_Ctx *ctx, u32 push_offset) {
     gfx_bind(ctx);
-    ito(meshes.size) {
-      meshes[i]->dispatch(ctx, vertex_buffer, mesh_offsets[i], push_offset);
-    }
+    traverse(
+        [&](Node *node) {
+          if (isa<MeshNode>(node) && node->get_name() == stref_s("HIGH")) {
+            GfxMesh *gfxmesh = ((GfxMesh *)((MeshNode *)node)->get_mesh());
+            ctx->push_constants(&node->get_transform(), push_offset,
+                                sizeof(float4x4));
+            ((GfxMesh *)((MeshNode *)node)->get_mesh())
+                ->dispatch(ctx, vertex_buffer,
+                           mesh_offsets.get(
+                               ((GfxMesh *)((MeshNode *)node)->get_mesh())),
+                           push_offset + 64);
+          }
+        },
+        root);
+    // ito(meshes.size) {
+    //  meshes[i]->dispatch(ctx, vertex_buffer, mesh_offsets[i], push_offset);
+    //}
   }
   void gfx_dispatch_meshlets(rd::Imm_Ctx *ctx, u32 push_offset) {
     gfx_bind(ctx);
-    ito(meshes.size) {
-      meshes[i]->dispatch_meshlets(ctx, vertex_buffer, mesh_offsets[i],
-                                   push_offset);
-    }
+    traverse(
+        [&](Node *node) {
+          if (isa<MeshNode>(node) && node->get_name() == stref_s("HIGH")) {
+            GfxMesh *gfxmesh = ((GfxMesh *)((MeshNode *)node)->get_mesh());
+            ctx->push_constants(&node->get_transform(), push_offset,
+                                sizeof(float4x4));
+            ((GfxMesh *)((MeshNode *)node)->get_mesh())
+                ->dispatch_meshlets(
+                    ctx, vertex_buffer,
+                    mesh_offsets.get(
+                        ((GfxMesh *)((MeshNode *)node)->get_mesh())),
+                    push_offset + 64);
+          }
+        },
+        root);
+    // ito(meshes.size) {
+    // meshes[i]->dispatch_meshlets(ctx, vertex_buffer, mesh_offsets[i],
+    // push_offset);
+    //}
   }
 
   void on_pass_end(rd::IResource_Manager *rm) {
@@ -574,6 +641,7 @@ public:
   template <typename F> void traverse(F fn) { traverse(fn, root); }
   void                       update() {}
   void                       release() {
+    ito(meshes.size) meshes[i]->release();
     meshes.release();
     ito(images.size) images[i].release();
     images.release();
@@ -611,6 +679,156 @@ static void setup_default_state(rd::Imm_Ctx *ctx, u32 num_rts = 1) {
   ms_state.num_samples = 1;
   ctx->MS_set_state(ms_state);
 }
+
+class Depth_PrePass : public rd::IPass {
+  Resource_ID vs;
+  Resource_ID ps;
+  Resource_ID uniform_buffer;
+  struct Uniform {
+    afloat4x4 viewproj;
+  };
+  static_assert(sizeof(Uniform) == 64, "Uniform packing is wrong");
+
+  public:
+  Depth_PrePass() {
+    vs.reset();
+    ps.reset();
+    uniform_buffer.reset();
+  }
+  void on_end(rd::IResource_Manager *rm) override {
+    if (uniform_buffer.is_null() == false) {
+      rm->release_resource(uniform_buffer);
+      uniform_buffer.reset();
+    }
+    g_scene.on_pass_end(rm);
+  }
+  void on_begin(rd::IResource_Manager *pc) override {
+    g_camera.aspect = (float)g_config.get_u32("g_buffer_width") /
+                      g_config.get_u32("g_buffer_height");
+    g_camera.update();
+    {
+      rd::Clear_Depth cl;
+      cl.clear = true;
+      cl.d     = 0.0f;
+      rd::Image_Create_Info info;
+      MEMZERO(info);
+      info.format     = rd::Format::D32_FLOAT;
+      info.width      = g_config.get_u32("g_buffer_width");
+      info.height     = g_config.get_u32("g_buffer_height");
+      info.depth      = 1;
+      info.layers     = 1;
+      info.levels     = 1;
+      info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
+      info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_DT |
+                        (u32)rd::Image_Usage_Bits::USAGE_SAMPLED;
+      pc->add_depth_target(stref_s("depth_prepas/ds"), info, 0, 0, cl);
+    }
+    static string_ref            shader    = stref_s(R"(
+@(DECLARE_UNIFORM_BUFFER
+  (set 0)
+  (binding 0)
+  (add_field (type float4x4) (name viewproj))
+)
+
+@(DECLARE_PUSH_CONSTANTS
+  (add_field (type float4x4)  (name world_transform))
+)
+
+struct Instance_Info {
+  i32 albedo_id;
+  i32 arm_id;
+  i32 normal_id;
+  i32 pad;
+  float4x4 model;
+};
+@(DECLARE_BUFFER
+  (type READ_ONLY)
+  (set 0)
+  (binding 1)
+  (type Instance_Info)
+  (name instance_infos)
+)
+#ifdef VERTEX
+@(DECLARE_INPUT (location 0) (type float3) (name POSITION))
+
+@(DECLARE_OUTPUT (location 0) (type float3) (name PIXEL_POSITION))
+
+@(DECLARE_OUTPUT (location 1) (type uint) (name PIXEL_INSTANCE_ID))
+
+@(ENTRY)
+  PIXEL_POSITION  = POSITION;
+  PIXEL_INSTANCE_ID = INSTANCE_INDEX;
+  float3 position = POSITION;
+  // float4x4 world_matrix = buffer_load(instance_infos, INSTANCE_INDEX).model;
+  @(EXPORT_POSITION
+      viewproj * world_transform * float4(position, 1.0)
+  );
+@(END)
+#endif
+#ifdef PIXEL
+@(DECLARE_INPUT (location 0) (type float3) (name PIXEL_POSITION))
+
+@(DECLARE_INPUT (location 1) (type "flat uint") (name PIXEL_INSTANCE_ID))
+
+@(ENTRY)
+@(END)
+#endif
+)");
+    Pair<string_ref, string_ref> defines[] = {
+        {stref_s("VERTEX"), {}},
+        {stref_s("PIXEL"), {}},
+    };
+    if (vs.is_null())
+      vs = pc->create_shader_raw(rd::Stage_t::VERTEX, shader, &defines[0], 1);
+    if (ps.is_null())
+      ps = pc->create_shader_raw(rd::Stage_t::PIXEL, shader, &defines[1], 1);
+    {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER;
+      buf_info.size       = sizeof(Uniform);
+      uniform_buffer      = pc->create_buffer(buf_info);
+    }
+    g_scene.on_pass_begin(pc);
+  }
+  void exec(rd::Imm_Ctx *ctx) override {
+    if (g_config.get_bool("enable_rasterization_pass") == false) return;
+    setup_default_state(ctx);
+    rd::DS_State ds_state;
+    MEMZERO(ds_state);
+    ds_state.cmp_op             = rd::Cmp::GE;
+    ds_state.enable_depth_test  = true;
+    ds_state.enable_depth_write = true;
+    ctx->DS_set_state(ds_state);
+    ctx->VS_set_shader(vs);
+    ctx->PS_set_shader(ps);
+    ctx->set_viewport(0.0f, 0.0f, (float)g_config.get_u32("g_buffer_width"),
+                      (float)g_config.get_u32("g_buffer_height"), 0.0f, 1.0f);
+    ctx->set_scissor(0, 0, g_config.get_u32("g_buffer_width"),
+                     g_config.get_u32("g_buffer_height"));
+    rd::RS_State rs_state;
+    MEMZERO(rs_state);
+    rs_state.polygon_mode = rd::Polygon_Mode::FILL;
+    rs_state.front_face   = rd::Front_Face::CW;
+    rs_state.cull_mode    = rd::Cull_Mode::BACK;
+    rs_state.line_width   = 1.0f;
+    rs_state.depth_bias   = 0.0f;
+    ctx->RS_set_state(rs_state);
+    {
+      Uniform *ptr  = (Uniform *)ctx->map_buffer(uniform_buffer);
+      ptr->viewproj = g_camera.viewproj();
+      ctx->unmap_buffer(uniform_buffer);
+    }
+    ctx->bind_uniform_buffer(0, 0, uniform_buffer, 0, sizeof(Uniform));
+    g_scene.gfx_exec_low(ctx);
+  }
+  string_ref get_name() override { return stref_s("depth_prepass"); }
+  void       release(rd::IResource_Manager *rm) override {
+    rm->release_resource(vs);
+    rm->release_resource(ps);
+  }
+};
 
 class Opaque_Pass : public rd::IPass {
   Resource_ID vs;
@@ -688,6 +906,11 @@ class Opaque_Pass : public rd::IPass {
   (binding 0)
   (add_field (type float4x4) (name viewproj))
 )
+
+@(DECLARE_PUSH_CONSTANTS
+  (add_field (type float4x4)  (name world_transform))
+)
+
 struct Instance_Info {
   i32 albedo_id;
   i32 arm_id;
@@ -745,7 +968,7 @@ struct Instance_Info {
   float3 position = POSITION;
   // float4x4 world_matrix = buffer_load(instance_infos, INSTANCE_INDEX).model;
   @(EXPORT_POSITION
-      viewproj * float4(position, 1.0)
+      viewproj * world_transform * float4(position, 1.0)
   );
 @(END)
 #endif
@@ -846,6 +1069,7 @@ class Compute_Render_Pass : public rd::IPass {
   Resource_ID clear_cs;
   Resource_ID output_image;
   Resource_ID output_depth;
+  Resource_ID uniform_buffer;
 
   public:
   Compute_Render_Pass() {
@@ -853,15 +1077,34 @@ class Compute_Render_Pass : public rd::IPass {
     clear_cs.reset();
     output_image.reset();
     output_depth.reset();
+    uniform_buffer.reset();
   }
-  void on_end(rd::IResource_Manager *rm) override {}
+  void on_end(rd::IResource_Manager *rm) override {
+    if (uniform_buffer.is_null() == false) {
+      rm->release_resource(uniform_buffer);
+      uniform_buffer.reset();
+    }
+  }
   void on_begin(rd::IResource_Manager *pc) override {
+    {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER;
+      buf_info.size       = 68;
+      uniform_buffer      = pc->create_buffer(buf_info);
+    }
     if (cs.is_null())
       cs = pc->create_shader_raw(rd::Stage_t::COMPUTE, stref_s(R"(
-@(DECLARE_PUSH_CONSTANTS
+@(DECLARE_UNIFORM_BUFFER
+  (set 0)
+  (binding 0)
   (add_field (type float4x4)  (name viewproj))
   (add_field (type u32)       (name control_flags))
-  (add_field (type u32)       (name num_triangles_per_lane))
+)
+
+@(DECLARE_PUSH_CONSTANTS
+  (add_field (type float4x4)  (name world_transform))
   (add_field (type u32)       (name index_count))
   (add_field (type u32)       (name first_index))
   (add_field (type i32)       (name vertex_offset))
@@ -874,7 +1117,7 @@ class Compute_Render_Pass : public rd::IPass {
   (type WRITE_ONLY)
   (dim 2D)
   (set 0)
-  (binding 0)
+  (binding 1)
   (format RGBA32_FLOAT)
   (name out_image)
 )
@@ -882,7 +1125,7 @@ class Compute_Render_Pass : public rd::IPass {
   (type READ_WRITE)
   (dim 2D)
   (set 0)
-  (binding 1)
+  (binding 2)
   (format R32_UINT)
   (name out_depth)
 )
@@ -952,317 +1195,22 @@ Vertex fetch(u32 index) {
 
 @(GROUP_SIZE 256 1 1)
 @(ENTRY)
-  for (u32 iter_id = 0; iter_id < num_triangles_per_lane; iter_id++) {
-    u32 triangle_index = iter_id + GLOBAL_THREAD_INDEX.x * num_triangles_per_lane;
-    if (triangle_index > index_count / 3)
-      return;
-
-    u32 i0 = buffer_load(index_buffer, first_index + triangle_index * 3 + 0);
-    u32 i1 = buffer_load(index_buffer, first_index + triangle_index * 3 + 1);
-    u32 i2 = buffer_load(index_buffer, first_index + triangle_index * 3 + 2);
-   
-    Vertex v0 = fetch(vertex_offset + i0);
-    Vertex v1 = fetch(vertex_offset + i1);
-    Vertex v2 = fetch(vertex_offset + i2);
-
-    float4 pp0 = mul4(viewproj, float4(v0.position, 1.0));
-    float4 pp1 = mul4(viewproj, float4(v1.position, 1.0));
-    float4 pp2 = mul4(viewproj, float4(v2.position, 1.0));
-    pp0.xyz /= pp0.w;
-    pp1.xyz /= pp1.w;
-    pp2.xyz /= pp2.w;
-    {
-      float2 e0 = pp0.xy - pp2.xy; 
-      float2 e1 = pp1.xy - pp0.xy; 
-      float2 e2 = pp2.xy - pp1.xy; 
-      float2 n0 = float2(e0.y, -e0.x);
-      if (dot(e1, n0) > 0.0)
-        continue;
-    }
-    float area = 1.0;
-    float b0 = 1.0 / 3.0;
-    float b1 = 1.0 / 3.0;
-    float b2 = 1.0 / 3.0;
-    b0 /= area;
-    b1 /= area;
-    b2 /= area;
-    float z = 1.0 / (b0 / pp0.w + b1 / pp1.w + b2 / pp2.w);
-
-    float3 pp = pp0.xyz * b0 + pp1.xyz * b1 + pp2.xyz * b2;
-    float3 n = normalize(z * (v0.normal * b0 + v1.normal * b1 + v1.normal * b2));
-    int2 dim = imageSize(out_image);
-    if (pp.x > 1.0 || pp.x < -1.0 || pp.y > 1.0 || pp.y < -1.0)
-      continue;
-    i32 x = i32(0.5 + dim.x * (pp.x + 1.0) / 2.0);
-    i32 y = i32(0.5 + dim.y * (pp.y + 1.0) / 2.0);
-    if (pp.z > 0.0 && x > 0 && y > 0 && x < dim.x && y < dim.y) {
-      float4 color = float4_splat(1.0) * (0.5 + 0.5 * dot(n, normalize(float3(1.0, 1.0, 1.0))));
-      if (is_control(CONTROL_DEPTH_ENABLE)) {
-        u32 depth = u32(1.0 / pp.z);
-        if (depth <= imageAtomicMin(out_depth, int2(x, y), depth)) {
-          image_store(out_image, int2(x, y), color);
-        }
-      } else {
-        image_store(out_image, int2(x, y), color);
-      }
-    }
-  }
-@(END)
-)"),
-                                 NULL, 0);
-    if (clear_cs.is_null())
-      clear_cs = pc->create_shader_raw(rd::Stage_t::COMPUTE, stref_s(R"(
-@(DECLARE_IMAGE
-  (type WRITE_ONLY)
-  (dim 2D)
-  (set 0)
-  (binding 0)
-  (format RGBA32_FLOAT)
-  (name out_image)
-)
-@(DECLARE_IMAGE
-  (type READ_WRITE)
-  (dim 2D)
-  (set 0)
-  (binding 1)
-  (format R32_UINT)
-  (name out_depth)
-)
-@(GROUP_SIZE 16 16 1)
-@(ENTRY)
-  int2 dim = imageSize(out_image);
-  if (GLOBAL_THREAD_INDEX.x > dim.x || GLOBAL_THREAD_INDEX.y > dim.y)
-    return;
-  image_store(out_image, int2(GLOBAL_THREAD_INDEX.xy), float4(0.0, 0.0, 0.0, 1.0));
-  image_store(out_depth, int2(GLOBAL_THREAD_INDEX.xy), uint4(1 << 31, 0, 0, 0));
-@(END)
-)"),
-                                       NULL, 0);
-    rd::Image_Info info;
-    MEMZERO(info);
-    if (output_image.is_null() == false)
-      info = pc->get_image_info(output_image);
-    if (output_image.is_null() ||
-        g_config.get_u32("g_buffer_width") != info.width ||
-        g_config.get_u32("g_buffer_height") != info.height) {
-      if (output_image.is_null() == false) pc->release_resource(output_image);
-      if (output_depth.is_null() == false) pc->release_resource(output_depth);
-      {
-        rd::Image_Create_Info info;
-        MEMZERO(info);
-        info.format     = rd::Format::RGBA32_FLOAT;
-        info.width      = g_config.get_u32("g_buffer_width");
-        info.height     = g_config.get_u32("g_buffer_height");
-        info.depth      = 1;
-        info.layers     = 1;
-        info.levels     = 1;
-        info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
-        info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_UAV |
-                          (u32)rd::Image_Usage_Bits::USAGE_SAMPLED;
-        output_image = pc->create_image(info);
-      }
-      {
-        rd::Image_Create_Info info;
-        MEMZERO(info);
-        info.format     = rd::Format::R32_UINT;
-        info.width      = g_config.get_u32("g_buffer_width");
-        info.height     = g_config.get_u32("g_buffer_height");
-        info.depth      = 1;
-        info.layers     = 1;
-        info.levels     = 1;
-        info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
-        info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_UAV |
-                          (u32)rd::Image_Usage_Bits::USAGE_SAMPLED;
-        output_depth = pc->create_image(info);
-      }
-      pc->assign_name(output_image, stref_s("compute_render/img0"));
-    }
-  }
-  void exec(rd::Imm_Ctx *ctx) override {
-    if (g_config.get_bool("enable_compute_render_pass") == false) return;
-    ctx->image_barrier(output_image, (u32)rd::Access_Bits::SHADER_WRITE,
-                       rd::Image_Layout::SHADER_READ_WRITE_OPTIMAL);
-    ctx->image_barrier(output_depth, (u32)rd::Access_Bits::SHADER_WRITE,
-                       rd::Image_Layout::SHADER_READ_WRITE_OPTIMAL);
-    ctx->CS_set_shader(clear_cs);
-    ctx->image_barrier(output_image, (u32)rd::Access_Bits::SHADER_WRITE,
-                       rd::Image_Layout::SHADER_READ_WRITE_OPTIMAL);
-    ctx->image_barrier(output_depth,
-                       (u32)rd::Access_Bits::SHADER_WRITE |
-                           (u32)rd::Access_Bits::SHADER_READ,
-                       rd::Image_Layout::SHADER_READ_WRITE_OPTIMAL);
-    ctx->bind_rw_image(0, 0, 0, output_image, 0, 1, 0, 1);
-    ctx->bind_rw_image(0, 1, 0, output_depth, 0, 1, 0, 1);
-    ctx->dispatch((g_config.get_u32("g_buffer_width") + 15) / 16,
-                  (g_config.get_u32("g_buffer_height") + 15) / 16, 1);
-    ctx->CS_set_shader(cs);
-    float4x4 vp = g_camera.viewproj();
-    ctx->push_constants(&vp, 0, sizeof(vp));
-    u32 control_flags = 0;
-    control_flags |= (g_config.get_bool("enable_compute_depth") ? 1 : 0) << 0;
-    ctx->push_constants(&control_flags, 64, 4);
-    g_config.get_u32("triangles_per_lane") =
-        MAX(0, MIN(128, g_config.get_u32("triangles_per_lane")));
-    ctx->push_constants(&g_config.get_u32("triangles_per_lane"), 64 + 4, 4);
-    g_scene.gfx_dispatch(ctx, 72);
-  }
-  string_ref get_name() override { return stref_s("compute_render_pass"); }
-  void       release(rd::IResource_Manager *rm) override {
-    rm->release_resource(cs);
-    rm->release_resource(output_image);
-  }
-};
-
-class Meshlet_Tile {
-  Resource_ID cs;
-  Resource_ID clear_cs;
-  Resource_ID output_image;
-  Resource_ID output_depth;
-  u32         width;
-  u32         height;
-
-  public:
-  void init(u32 width, u32 height) {
-    cs.reset();
-    clear_cs.reset();
-    output_image.reset();
-    output_depth.reset();
-    this->width  = width;
-    this->height = height;
-  }
-  void on_end(rd::IResource_Manager *rm) {}
-  void on_begin(rd::IResource_Manager *pc) {
-    if (cs.is_null())
-      cs = pc->create_shader_raw(rd::Stage_t::COMPUTE, stref_s(R"(
-@(DECLARE_PUSH_CONSTANTS
-  (add_field (type float4x4)  (name viewproj))
-  (add_field (type u32)       (name num_meshlets))
-  (add_field (type u32)       (name meshlet_offset))
-  (add_field (type u32)       (name index_offset))
-  (add_field (type u32)       (name vertex_offset))
-)
-
-#define CONTROL_DEPTH_ENABLE 1
-#define is_control(flag) (control_flags & flag) != 0
-
-@(DECLARE_IMAGE
-  (type WRITE_ONLY)
-  (dim 2D)
-  (set 0)
-  (binding 0)
-  (format RGBA32_FLOAT)
-  (name out_image)
-)
-@(DECLARE_IMAGE
-  (type READ_WRITE)
-  (dim 2D)
-  (set 0)
-  (binding 1)
-  (format R32_UINT)
-  (name out_depth)
-)
-struct Meshlet {
-  u32 vertex_offset;
-  u32 index_offset;
-  u32  triangle_count;
-  u32  vertex_count;
-  float4 sphere;
-  float4 cone_apex;
-  float4 cone_axis_cutoff;
-  u32 cone_pack;
-};
-
-struct Vertex {
-  float3 position;
-  float3 normal;
-};
-
-@(DECLARE_BUFFER
-  (type READ_ONLY)
-  (set 1)
-  (binding 0)
-  (type Meshlet)
-  (name meshlet_buffer)
-)
-
-@(DECLARE_BUFFER
-  (type READ_ONLY)
-  (set 2)
-  (binding 0)
-  (type u32)
-  (name index_buffer)
-)
-
-@(DECLARE_BUFFER
-  (type READ_ONLY)
-  (set 2)
-  (binding 1)
-  (type float3)
-  (name position_buffer)
-)
-
-@(DECLARE_BUFFER
-  (type READ_ONLY)
-  (set 2)
-  (binding 2)
-  (type float3)
-  (name normal_buffer)
-)
-
-Vertex fetch(u32 index) {
-  Vertex o;  
-  o.position = buffer_load(position_buffer, index);
-  o.normal = buffer_load(normal_buffer, index);
-  return o;
-}
-
-u32 fetch_index(u32 index) {
-  u32 raw = buffer_load(index_buffer, (index_offset + index) / 4);
-  u32 sub_index = index & 0x3;
-  return (raw >> (sub_index * 8)) & 0xffu;
-}
-
-// shared Vertex gs_vertices[64];
-
-@(GROUP_SIZE 256 1 1)
-@(ENTRY)
   
-  u32 meshlet_index = GROUPT_INDEX.x;
-  if (meshlet_index > num_meshlets)
+  u32 triangle_index =  GLOBAL_THREAD_INDEX.x;
+  if (triangle_index > index_count / 3)
     return;
 
-  Meshlet meshlet = buffer_load(meshlet_buffer, meshlet_offset + meshlet_index);
-  
-  {
-    float4 cp = mul4(viewproj, float4(meshlet.cone_apex.xyz, 1.0));
-    float4 ca = mul4(viewproj, float4(meshlet.cone_apex.xyz + meshlet.cone_axis_cutoff.xyz, 1.0));
-    if (ca.z > cp.z)
-      return;
-  }
-  //if (LOCAL_THREAD_INDEX.x < 64)
-  //  gs_vertices[LOCAL_THREAD_INDEX.x] = fetch(vertex_offset + meshlet.vertex_offset + LOCAL_THREAD_INDEX.x);
-
-  // barrier();
-
-  u32 triangle_index = LOCAL_THREAD_INDEX.x;
-
-  if (triangle_index > meshlet.triangle_count)
-    return;
-
-  u32 i0 = fetch_index(meshlet.index_offset + triangle_index * 3 + 0);
-  u32 i1 = fetch_index(meshlet.index_offset + triangle_index * 3 + 1);
-  u32 i2 = fetch_index(meshlet.index_offset + triangle_index * 3 + 2);
+  u32 i0 = buffer_load(index_buffer, first_index + triangle_index * 3 + 0);
+  u32 i1 = buffer_load(index_buffer, first_index + triangle_index * 3 + 1);
+  u32 i2 = buffer_load(index_buffer, first_index + triangle_index * 3 + 2);
    
-  //Vertex v0 = gs_vertices[i0];//fetch(vertex_offset + meshlet.vertex_offset + i0);
-  Vertex v0 = fetch(vertex_offset + meshlet.vertex_offset + i0);
-  //Vertex v1 = gs_vertices[i1];//fetch(vertex_offset + meshlet.vertex_offset + i1);
-  Vertex v1 = fetch(vertex_offset + meshlet.vertex_offset + i1);
-  //Vertex v2 = gs_vertices[i2];//fetch(vertex_offset + meshlet.vertex_offset + i2);
-  Vertex v2 = fetch(vertex_offset + meshlet.vertex_offset + i2);
+  Vertex v0 = fetch(vertex_offset + i0);
+  Vertex v1 = fetch(vertex_offset + i1);
+  Vertex v2 = fetch(vertex_offset + i2);
 
-  float4 pp0 = mul4(viewproj, float4(v0.position, 1.0));
-  float4 pp1 = mul4(viewproj, float4(v1.position, 1.0));
-  float4 pp2 = mul4(viewproj, float4(v2.position, 1.0));
+  float4 pp0 = mul4(viewproj * world_transform, float4(v0.position, 1.0));
+  float4 pp1 = mul4(viewproj * world_transform, float4(v1.position, 1.0));
+  float4 pp2 = mul4(viewproj * world_transform, float4(v2.position, 1.0));
   pp0.xyz /= pp0.w;
   pp1.xyz /= pp1.w;
   pp2.xyz /= pp2.w;
@@ -1291,18 +1239,17 @@ u32 fetch_index(u32 index) {
   i32 x = i32(0.5 + dim.x * (pp.x + 1.0) / 2.0);
   i32 y = i32(0.5 + dim.y * (pp.y + 1.0) / 2.0);
   if (pp.z > 0.0 && x > 0 && y > 0 && x < dim.x && y < dim.y) {
-    float4 color = float4(
-        float(((31 * meshlet_index) >> 0) % 255) / 255.0,
-        float(((31 * meshlet_index) >> 8) % 255) / 255.0,
-        float(((31 * meshlet_index) >> 16) % 255) / 255.0,
-        1.0
-        );
-    // color = float4((0.5 * n + float3_splat(0.5)), 1.0);
-    u32 depth = u32(1.0 / pp.z);
-    if (depth <= imageAtomicMin(out_depth, int2(x, y), depth)) {
+    float4 color = float4_splat(1.0) * (0.5 + 0.5 * dot(n, normalize(float3(1.0, 1.0, 1.0))));
+    if (is_control(CONTROL_DEPTH_ENABLE)) {
+      u32 depth = u32(1.0 / pp.z);
+      if (depth <= imageAtomicMin(out_depth, int2(x, y), depth)) {
+        image_store(out_image, int2(x, y), color);
+      }
+    } else {
       image_store(out_image, int2(x, y), color);
     }
   }
+  
 @(END)
 )"),
                                  NULL, 0);
@@ -1312,7 +1259,7 @@ u32 fetch_index(u32 index) {
   (type WRITE_ONLY)
   (dim 2D)
   (set 0)
-  (binding 0)
+  (binding 1)
   (format RGBA32_FLOAT)
   (name out_image)
 )
@@ -1320,7 +1267,7 @@ u32 fetch_index(u32 index) {
   (type READ_WRITE)
   (dim 2D)
   (set 0)
-  (binding 1)
+  (binding 2)
   (format R32_UINT)
   (name out_depth)
 )
@@ -1371,11 +1318,12 @@ u32 fetch_index(u32 index) {
                           (u32)rd::Image_Usage_Bits::USAGE_SAMPLED;
         output_depth = pc->create_image(info);
       }
-      pc->assign_name(output_image, stref_s("meshlet_render/img0"));
+
+      pc->assign_name(output_image, stref_s("compute_render/img0"));
     }
   }
-  void exec(rd::Imm_Ctx *ctx) {
-    if (g_config.get_bool("enable_meshlets_render_pass") == false) return;
+  void exec(rd::Imm_Ctx *ctx) override {
+    if (g_config.get_bool("enable_compute_render_pass") == false) return;
     ctx->image_barrier(output_image, (u32)rd::Access_Bits::SHADER_WRITE,
                        rd::Image_Layout::SHADER_READ_WRITE_OPTIMAL);
     ctx->image_barrier(output_depth, (u32)rd::Access_Bits::SHADER_WRITE,
@@ -1387,23 +1335,33 @@ u32 fetch_index(u32 index) {
                        (u32)rd::Access_Bits::SHADER_WRITE |
                            (u32)rd::Access_Bits::SHADER_READ,
                        rd::Image_Layout::SHADER_READ_WRITE_OPTIMAL);
-    ctx->bind_rw_image(0, 0, 0, output_image, 0, 1, 0, 1);
-    ctx->bind_rw_image(0, 1, 0, output_depth, 0, 1, 0, 1);
+    ctx->bind_rw_image(0, 1, 0, output_image, 0, 1, 0, 1);
+    ctx->bind_rw_image(0, 2, 0, output_depth, 0, 1, 0, 1);
     ctx->dispatch((g_config.get_u32("g_buffer_width") + 15) / 16,
                   (g_config.get_u32("g_buffer_height") + 15) / 16, 1);
     ctx->CS_set_shader(cs);
-    float4x4 vp = g_camera.viewproj();
-    ctx->push_constants(&vp, 0, sizeof(vp));
     u32 control_flags = 0;
     control_flags |= (g_config.get_bool("enable_compute_depth") ? 1 : 0) << 0;
-    ctx->push_constants(&control_flags, 64, 4);
-    g_scene.gfx_dispatch_meshlets(ctx, 68);
+
+    g_config.get_u32("triangles_per_lane") =
+        MAX(0, MIN(128, g_config.get_u32("triangles_per_lane")));
+    {
+      struct Uniform {
+        float4x4 viewproj;
+        u32      control;
+      };
+      Uniform *ptr  = (Uniform *)ctx->map_buffer(uniform_buffer);
+      ptr->viewproj = g_camera.viewproj();
+      ptr->control  = control_flags;
+      ctx->unmap_buffer(uniform_buffer);
+      ctx->bind_uniform_buffer(0, 0, uniform_buffer, 0, sizeof(Uniform));
+    }
+    g_scene.gfx_dispatch(ctx, 0);
   }
-  void release(rd::IResource_Manager *rm) {
+  string_ref get_name() override { return stref_s("compute_render_pass"); }
+  void       release(rd::IResource_Manager *rm) override {
     rm->release_resource(cs);
-    rm->release_resource(clear_cs);
     rm->release_resource(output_image);
-    rm->release_resource(output_depth);
   }
 };
 
@@ -1412,6 +1370,7 @@ class Meshlet_Compute_Render_Pass : public rd::IPass {
   Resource_ID clear_cs;
   Resource_ID output_image;
   Resource_ID output_depth;
+  Resource_ID uniform_buffer;
 
   public:
   Meshlet_Compute_Render_Pass() {
@@ -1419,13 +1378,35 @@ class Meshlet_Compute_Render_Pass : public rd::IPass {
     clear_cs.reset();
     output_image.reset();
     output_depth.reset();
+    uniform_buffer.reset();
   }
-  void on_end(rd::IResource_Manager *rm) override {}
+  void on_end(rd::IResource_Manager *rm) override {
+    if (uniform_buffer.is_null() == false) {
+      rm->release_resource(uniform_buffer);
+      uniform_buffer.reset();
+    }
+  }
   void on_begin(rd::IResource_Manager *pc) override {
+    {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER;
+      buf_info.size       = 68;
+      uniform_buffer      = pc->create_buffer(buf_info);
+    }
     if (cs.is_null())
       cs = pc->create_shader_raw(rd::Stage_t::COMPUTE, stref_s(R"(
-@(DECLARE_PUSH_CONSTANTS
+
+@(DECLARE_UNIFORM_BUFFER
+  (set 0)
+  (binding 0)
   (add_field (type float4x4)  (name viewproj))
+  (add_field (type u32)       (name control_flags))
+)
+
+@(DECLARE_PUSH_CONSTANTS
+  (add_field (type float4x4)  (name world_transform))
   (add_field (type u32)       (name num_meshlets))
   (add_field (type u32)       (name meshlet_offset))
   (add_field (type u32)       (name index_offset))
@@ -1439,7 +1420,7 @@ class Meshlet_Compute_Render_Pass : public rd::IPass {
   (type WRITE_ONLY)
   (dim 2D)
   (set 0)
-  (binding 0)
+  (binding 1)
   (format RGBA32_FLOAT)
   (name out_image)
 )
@@ -1447,7 +1428,7 @@ class Meshlet_Compute_Render_Pass : public rd::IPass {
   (type READ_WRITE)
   (dim 2D)
   (set 0)
-  (binding 1)
+  (binding 2)
   (format R32_UINT)
   (name out_depth)
 )
@@ -1561,9 +1542,9 @@ u32 fetch_index(u32 index) {
   float3 p1 = buffer_load(position_buffer, vertex_offset + meshlet.vertex_offset + i1);
   float3 p2 = buffer_load(position_buffer, vertex_offset + meshlet.vertex_offset + i2);
 
-  float4 pp0 = mul4(viewproj, float4(p0, 1.0));
-  float4 pp1 = mul4(viewproj, float4(p1, 1.0));
-  float4 pp2 = mul4(viewproj, float4(p2, 1.0));
+  float4 pp0 = mul4(viewproj * world_transform, float4(p0, 1.0));
+  float4 pp1 = mul4(viewproj * world_transform, float4(p1, 1.0));
+  float4 pp2 = mul4(viewproj * world_transform, float4(p2, 1.0));
   pp0.xyz /= pp0.w;
   pp1.xyz /= pp1.w;
   pp2.xyz /= pp2.w;
@@ -1618,7 +1599,7 @@ u32 fetch_index(u32 index) {
   (type WRITE_ONLY)
   (dim 2D)
   (set 0)
-  (binding 0)
+  (binding 1)
   (format RGBA32_FLOAT)
   (name out_image)
 )
@@ -1626,7 +1607,7 @@ u32 fetch_index(u32 index) {
   (type READ_WRITE)
   (dim 2D)
   (set 0)
-  (binding 1)
+  (binding 2)
   (format R32_UINT)
   (name out_depth)
 )
@@ -1693,14 +1674,24 @@ u32 fetch_index(u32 index) {
                        (u32)rd::Access_Bits::SHADER_WRITE |
                            (u32)rd::Access_Bits::SHADER_READ,
                        rd::Image_Layout::SHADER_READ_WRITE_OPTIMAL);
-    ctx->bind_rw_image(0, 0, 0, output_image, 0, 1, 0, 1);
-    ctx->bind_rw_image(0, 1, 0, output_depth, 0, 1, 0, 1);
+    ctx->bind_rw_image(0, 1, 0, output_image, 0, 1, 0, 1);
+    ctx->bind_rw_image(0, 2, 0, output_depth, 0, 1, 0, 1);
     ctx->dispatch((g_config.get_u32("g_buffer_width") + 15) / 16,
                   (g_config.get_u32("g_buffer_height") + 15) / 16, 1);
     ctx->CS_set_shader(cs);
     float4x4 vp = g_camera.viewproj();
-    ctx->push_constants(&vp, 0, sizeof(vp));
-    g_scene.gfx_dispatch_meshlets(ctx, sizeof(vp));
+    {
+      struct Uniform {
+        float4x4 viewproj;
+        u32      control;
+      };
+      Uniform *ptr  = (Uniform *)ctx->map_buffer(uniform_buffer);
+      ptr->viewproj = g_camera.viewproj();
+      ptr->control  = 0;
+      ctx->unmap_buffer(uniform_buffer);
+      ctx->bind_uniform_buffer(0, 0, uniform_buffer, 0, sizeof(Uniform));
+    }
+    g_scene.gfx_dispatch_meshlets(ctx, 0);
   }
   string_ref get_name() override { return stref_s("meshlet_render_pass"); }
   void       release(rd::IResource_Manager *rm) override {
@@ -1915,6 +1906,8 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
   Timer       timer;
   bool        imgui_initialized;
 
+  static constexpr u64 DEPTH_FLAG = 0x8000'0000'0000'0000ull;
+
   public:
   void consume(void *_event) override {
     SDL_Event *event = (SDL_Event *)_event;
@@ -1963,7 +1956,12 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
 @(DECLARE_PUSH_CONSTANTS
   (add_field (type float2)   (name uScale))
   (add_field (type float2)   (name uTranslate))
+  (add_field (type u32)      (name control_flags))
 )
+
+#define CONTROL_DEPTH_ENABLE 1
+#define is_control(flag) (control_flags & flag) != 0
+
 @(DECLARE_IMAGE
   (type SAMPLED)
   (dim 2D)
@@ -2003,9 +2001,17 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
   (location 0)
 )
 @(ENTRY)
-  @(EXPORT_COLOR 0
-    Color * texture(sampler2D(sTexture, sSampler), UV)
-  );
+  if (is_control(CONTROL_DEPTH_ENABLE)) {
+    float depth = texture(sampler2D(sTexture, sSampler), UV).r;
+    depth = pow(depth * 500.0, 1.0 / 2.0);
+    @(EXPORT_COLOR 0
+      float4_splat(depth)
+    );
+  } else {
+    @(EXPORT_COLOR 0
+      Color * texture(sampler2D(sTexture, sSampler), UV)
+    );
+  }
 @(END)
 #endif
 )");
@@ -2101,6 +2107,8 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
                        pc->get_pass_duration(stref_s("compute_render_pass")));
       ImGui::LabelText("meshlet rasterizer", "%f ms",
                        pc->get_pass_duration(stref_s("meshlet_render_pass")));
+      ImGui::LabelText("depth prepass", "%f ms",
+                       pc->get_pass_duration(stref_s("depth_prepass")));
       ImGui::End();
     }
     {
@@ -2173,6 +2181,15 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
         auto        wsize = ImGui::GetWindowSize();
         Resource_ID img   = pc->get_resource(stref_s("meshlet_render/img0"));
         ImGui::Image((ImTextureID)(intptr_t)img.data, ImVec2(wsize.x, wsize.y));
+      }
+
+      ImGui::End();
+      ImGui::Begin("depth prepass");
+      {
+        auto        wsize = ImGui::GetWindowSize();
+        Resource_ID img   = pc->get_resource(stref_s("depth_prepas/ds"));
+        ImGui::Image((ImTextureID)(intptr_t)(img.data | DEPTH_FLAG),
+                     ImVec2(wsize.x, wsize.y));
       }
 
       ImGui::End();
@@ -2295,6 +2312,8 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
       translate[1] = -1.0f - draw_data->DisplayPos.y * scale[1];
       ctx->push_constants(scale, 0, 8);
       ctx->push_constants(translate, 8, 8);
+      u32 control = 0;
+      ctx->push_constants(&control, 16, 4);
     }
     ctx->IA_set_index_buffer(index_buffer, 0, rd::Index_t::UINT16);
     ctx->IA_set_vertex_buffer(0, vertex_buffer, 0, sizeof(ImDrawVert),
@@ -2309,13 +2328,22 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
         clip_rect.z = (pcmd->ClipRect.z - clip_off.x) * clip_scale.x;
         clip_rect.w = (pcmd->ClipRect.w - clip_off.y) * clip_scale.y;
         Resource_ID res_id;
-        res_id.data = (u64)pcmd->TextureId;
+        u64         tex_id = (u64)pcmd->TextureId;
+        res_id.data        = tex_id & (~DEPTH_FLAG);
+        if ((tex_id & DEPTH_FLAG) != 0) {
+          u32 control = 1;
+          ctx->push_constants(&control, 16, 4);
+        }
         ctx->bind_image(0, 0, 0, res_id, 0, 1, 0, 1);
         ctx->set_scissor(clip_rect.x, clip_rect.y, clip_rect.z - clip_rect.x,
                          clip_rect.w - clip_rect.y);
         ctx->draw_indexed(pcmd->ElemCount, 1,
                           pcmd->IdxOffset + global_idx_offset, 0,
                           pcmd->VtxOffset + global_vtx_offset);
+        if ((tex_id & DEPTH_FLAG) != 0) {
+          u32 control = 0;
+          ctx->push_constants(&control, 16, 4);
+        }
       }
       global_idx_offset += cmd_list->IdxBuffer.Size;
       global_vtx_offset += cmd_list->VtxBuffer.Size;
@@ -2340,6 +2368,7 @@ int main(int argc, char *argv[]) {
   GUI_Pass *    gui  = new GUI_Pass;
   rd::Pass_Mng *pmng = rd::Pass_Mng::create(rd::Impl_t::VULKAN);
   pmng->set_event_consumer(gui);
+  pmng->add_pass(rd::Pass_t::RENDER, new Depth_PrePass);
   pmng->add_pass(rd::Pass_t::RENDER, new Opaque_Pass);
   pmng->add_pass(rd::Pass_t::COMPUTE, new Compute_Render_Pass);
   pmng->add_pass(rd::Pass_t::COMPUTE, new Meshlet_Compute_Render_Pass);

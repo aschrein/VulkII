@@ -832,6 +832,30 @@ class Node {
   quat   rotation;
   float3 scale;
 
+  virtual Node *clone() {
+    Node *new_node = create(name.ref());
+    clone_into(new_node);
+    return new_node;
+  }
+
+  void clone_into(Node *new_node) {
+    new_node->transform_cache = this->transform_cache;
+    new_node->aabb_min        = this->aabb_min;
+    new_node->aabb_max        = this->aabb_max;
+    new_node->offset          = this->offset;
+    new_node->rotation        = this->rotation;
+    new_node->scale           = this->scale;
+    ito(children.size) { new_node->add_child(children[i]->clone()); }
+    if (parent != NULL) {
+      parent->add_child(new_node);
+    }
+  }
+
+  Node *translate(float3 dr) {
+    offset += dr;
+    return this;
+  }
+
   Node *rename(string_ref name) {
     this->name.init(name);
     return this;
@@ -854,19 +878,24 @@ class Node {
     children.release();
     delete this;
   }
-  void set_parent(Node *node) { parent = node; }
+  void set_parent(Node *node) {
+    ASSERT_ALWAYS(node != this);
+    parent = node;
+  }
   void add_child(Node *node) {
     children.push(node);
-    node->set_parent(node);
+    node->set_parent(this);
   }
-  void update_cache(float4x4 const &parent = float4x4(1.0f)) {
-    transform_cache = parent * get_transform();
+  void update_transform(float4x4 const &parent = float4x4(1.0f)) {
+    transform_cache = parent * glm::translate(float4x4(1.0f), offset) *
+                      (float4x4)rotation * glm::scale(float4x4(1.0f), scale);
+    ito(children.size) {
+      Node *child = children[i];
+      child->update_transform(transform_cache);
+    }
   }
-  float4x4 get_transform() {
-    return glm::translate(float4x4(1.0f), offset) * (float4x4)rotation *
-           glm::scale(float4x4(1.0f), scale);
-  }
-  float4x4 get_cofactor() {
+  float4x4 const &get_transform() { return transform_cache; }
+  float4x4        get_cofactor() {
     mat4 out{};
     mat4 transform = get_transform();
     cofactor(&transform[0][0], &out[0][0]);
@@ -1066,30 +1095,24 @@ struct Primitive {
   }
 };
 
-class MeshNode : public Node {
-  protected:
-  Array<Primitive> primitives;
-  void             init(string_ref name) {
-    Node::init(name);
+struct Mesh {
+  Array<Primitive>    primitives;
+  inline_string<0x10> name;
+  void                init(string_ref name) {
     primitives.init();
+    if (name.len == 0) {
+      char buf[0x10];
+      snprintf(buf, sizeof(buf), "mesh_%p", this);
+      this->name.init(stref_s(buf));
+    } else
+      this->name.init(name);
   }
-
-  public:
-  static MeshNode *create(string_ref name) {
-    MeshNode *out = new MeshNode;
-    out->init(name);
-    return out;
+  void release() {
+    ito(primitives.size) primitives[i].release();
+    primitives.release();
   }
-  static u64 ID() {
-    static char p;
-    return (u64)(intptr_t)&p;
-  }
-  u64  get_type_id() const override { return ID(); }
   void add_primitive(Raw_Mesh_Opaque &mesh, Raw_Meshlets_Opaque &meshlets,
                      PBR_Material &mat) {
-    if (primitives.size != 0) {
-      ASSERT_ALWAYS(primitives[0].mesh.is_compatible(mesh));
-    }
     Primitive p;
     p.init();
     p.mesh     = mesh;
@@ -1097,12 +1120,39 @@ class MeshNode : public Node {
     p.meshlets = meshlets;
     primitives.push(p);
   }
-  void release() override {
-    ito(primitives.size) primitives[i].release();
-    primitives.release();
-    Node::release();
+};
+
+class MeshNode : public Node {
+  protected:
+  Mesh *mesh;
+
+  void init(string_ref name) {
+    Node::init(name);
+    mesh = NULL;
   }
-  Array<Primitive> const &get_primitives() const { return primitives; }
+
+  public:
+  void             set_mesh(Mesh *mesh) { this->mesh = mesh; }
+  Mesh *           get_mesh() { return mesh; }
+  static MeshNode *create(string_ref name) {
+    MeshNode *out = new MeshNode;
+    out->init(name);
+    return out;
+  }
+  Node *clone() override {
+    MeshNode *new_node = create(name.ref());
+    Node::clone_into(new_node);
+    new_node->mesh = this->mesh;
+    return new_node;
+  }
+
+  static u64 ID() {
+    static char p;
+    return (u64)(intptr_t)&p;
+  }
+  u64 get_type_id() const override { return ID(); }
+
+  void release() override { Node::release(); }
 };
 
 template <typename T> static bool isa(Node *node) {
@@ -1111,9 +1161,10 @@ template <typename T> static bool isa(Node *node) {
 
 class IFactory {
   public:
-  virtual Node *    add_node(string_ref name)  = 0;
-  virtual MeshNode *add_mesh(string_ref name)  = 0;
-  virtual u32       add_image(Image2D_Raw img) = 0;
+  virtual Node *    add_node(string_ref name)      = 0;
+  virtual MeshNode *add_mesh_node(string_ref name) = 0;
+  virtual Mesh *    add_mesh(string_ref name)      = 0;
+  virtual u32       add_image(Image2D_Raw img)     = 0;
 };
 
 Node *      load_gltf_pbr(IFactory *factory, string_ref filename);

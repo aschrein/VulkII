@@ -255,8 +255,8 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
   ASSERT_ALWAYS(
       cgltf_load_buffers(&options, data, stref_to_tmp_cstr(filename)) ==
       cgltf_result_success);
-  Hash_Table<string_ref, i32>          loaded_textures;
-  Hash_Table<cgltf_mesh *, MeshNode *> mesh_table;
+  Hash_Table<string_ref, i32>   loaded_textures;
+  Hash_Table<cgltf_mesh *, Mesh*> mesh_table;
   loaded_textures.init();
   mesh_table.init();
   defer(loaded_textures.release());
@@ -274,9 +274,10 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
   };
   for (u32 mesh_index = 0; mesh_index < data->meshes_count; mesh_index++) {
 
-    cgltf_mesh *mesh  = &data->meshes[mesh_index];
-    MeshNode *  mnode = factory->add_mesh(stref_s(mesh->name));
-    mesh_table.insert(mesh, mnode);
+    cgltf_mesh *mesh = &data->meshes[mesh_index];
+    // MeshNode *  mnode = factory->add_mesh_node(stref_s(mesh->name));
+    Mesh *mymesh = factory->add_mesh(stref_s(mesh->name));
+    mesh_table.insert(mesh, mymesh);
     for (u32 primitive_index = 0; primitive_index < mesh->primitives_count;
          primitive_index++) {
       cgltf_primitive *primitive = &mesh->primitives[primitive_index];
@@ -505,13 +506,10 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
         default: UNIMPLEMENTED;
         }
       }
-
-      char buf[0x100];
-      snprintf(buf, sizeof(buf), "%s_%i", mesh->name, primitive_index);
       opaque_mesh.sort_attributes();
       optimize_mesh(opaque_mesh);
       Raw_Meshlets_Opaque meshlets = build_meshlets(opaque_mesh);
-      mnode->add_primitive(opaque_mesh, meshlets, pbrmat);
+      mymesh->add_primitive(opaque_mesh, meshlets, pbrmat);
     }
   }
   Hash_Table<cgltf_node *, Node *> node_indices;
@@ -521,11 +519,15 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
     if (node_indices.contains(node)) {
       return node_indices.get(node);
     }
-    Node *tnode = factory->add_node(stref_s(node->name));
+    Node *tnode = NULL;
     if (node->mesh != NULL) {
+      MeshNode *mnode = factory->add_mesh_node(stref_s(node->name));
       ASSERT_ALWAYS(mesh_table.contains(node->mesh));
-      MeshNode *mesh_range = mesh_table.get(node->mesh);
-      tnode->add_child(mesh_range);
+      Mesh *mesh= mesh_table.get(node->mesh);
+      mnode->set_mesh(mesh);
+      tnode = mnode;
+    } else {
+      tnode = factory->add_node(stref_s(node->name));  
     }
     if (node->has_translation) {
       tnode->offset = float3(node->translation[0], node->translation[1],
