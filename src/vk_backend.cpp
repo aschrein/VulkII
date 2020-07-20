@@ -740,7 +740,7 @@ static void preprocess_shader(String_Builder &builder, string_ref body) {
 #define image_store(image, coords, data) imageStore(image, ivec2(coords), data)
 #define buffer_load(buffer, index) buffer[index]
 #define buffer_store(buffer, index, data) buffer[index] = data
-#define buffer_atomic_add(buffer, index, num) atomicAdd(buffer.internal_data[index], num)
+#define buffer_atomic_add(buffer, index, num) atomicAdd(buffer[index], num)
 
 )");
   char const *cur       = body.ptr;
@@ -2735,7 +2735,9 @@ class Vk_Ctx : public rd::Imm_Ctx {
     PUSH_CONSTANTS,
     DISPATCH,
     BARRIER,
-    RENDER_RECT
+    RENDER_RECT,
+    BUFFER_FILL,
+    CLEAR_IMAGE
   };
 
   struct Deferred_Push_Constants {
@@ -2807,6 +2809,19 @@ class Vk_Ctx : public rd::Imm_Ctx {
     VkAccessFlags new_access_flags;
     void          init() { memset(this, 0, sizeof(*this)); }
     void          release() {}
+  };
+
+  struct Deferred_Buffer_Fill {
+    ID     buf_id;
+    size_t offset;
+    size_t size;
+    u32    val;
+  };
+
+  struct Deferred_Clear_Image {
+    ID                      img_id;
+    VkClearColorValue       cv;
+    VkImageSubresourceRange r;
   };
 
   struct CPU_Command_Buffer {
@@ -2929,9 +2944,10 @@ class Vk_Ctx : public rd::Imm_Ctx {
         cpu_cmd.read(&dd);
         Graphics_Pipeline_Wrapper &gw = wnd->pipelines[dd.pso];
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gw.pipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                gw.pipeline_layout, 0, dd.sets.size,
-                                &dd.sets[0], 0, NULL);
+        if (dd.sets.size > 0)
+          vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                  gw.pipeline_layout, 0, dd.sets.size,
+                                  &dd.sets[0], 0, NULL);
         jto(dd.vbos.size) {
           vkCmdBindVertexBuffers(cmd, j, 1, &dd.vbos[j].buffer,
                                  &dd.vbos[j].offset);
@@ -3009,14 +3025,28 @@ class Vk_Ctx : public rd::Imm_Ctx {
         cpu_cmd.read(&dpc);
         memcpy(pcs + dpc.offset, cpu_cmd.read(dpc.size), dpc.size);
         pc_dirty_range = dpc.offset + dpc.size;
+      } else if (type == Cmd_t::BUFFER_FILL) {
+        Deferred_Buffer_Fill df;
+        cpu_cmd.read(&df);
+        Buffer &buf = wnd->buffers[df.buf_id];
+        vkCmdFillBuffer(cmd, buf.buffer, df.offset, df.size, df.val);
+      } else if (type == Cmd_t::CLEAR_IMAGE) {
+        Deferred_Clear_Image cl;
+        cpu_cmd.read(&cl);
+        Image &img = wnd->images[cl.img_id];
+        /* img.barrier(cmd, VK_ACCESS_MEMORY_WRITE_BIT,
+                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);*/
+
+        vkCmdClearColorImage(cmd, img.image, img.layout, &cl.cv, 1, &cl.r);
       } else if (type == Cmd_t::DISPATCH) {
         Deferred_Dispatch dd;
         cpu_cmd.read(&dd);
         Compute_Pipeline_Wrapper &gw = wnd->compute_pipelines[dd.pso];
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gw.pipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                gw.pipeline_layout, 0, dd.sets.size,
-                                &dd.sets[0], 0, NULL);
+        if (dd.sets.size > 0)
+          vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                  gw.pipeline_layout, 0, dd.sets.size,
+                                  &dd.sets[0], 0, NULL);
 
         if (pc_dirty_range != 0) {
           vkCmdPushConstants(cmd, gw.pipeline_layout,
@@ -3715,6 +3745,59 @@ class Vk_Ctx : public rd::Imm_Ctx {
     current_dispatch.dispatch.z = dim_z;
     cpu_cmd.write(Cmd_t::DISPATCH, &current_dispatch);
   }
+  void fill_buffer(Resource_ID id, size_t offset, size_t size,
+                   u32 value) override {
+    if (type == rd::Pass_t::COMPUTE) {
+      Deferred_Buffer_Fill bf;
+      MEMZERO(bf);
+      bf.buf_id = id.id;
+      bf.offset = offset;
+      bf.size   = size;
+      bf.val    = value;
+      cpu_cmd.write(Cmd_t::BUFFER_FILL, &bf);
+    } else {
+      Buffer &buf = wnd->buffers[id.id];
+      vkCmdFillBuffer(cmd, buf.buffer, offset, size, value);
+    }
+  }
+  void clear_image(Resource_ID id, u32 layer, u32 num_layers, u32 level,
+                   u32 num_levels, rd::Clear_Value const &cv) override {
+    if (type == rd::Pass_t::COMPUTE) {
+      Deferred_Clear_Image cl;
+      MEMZERO(cl);
+      Image &           img = wnd->images[id.id];
+      VkClearColorValue _cv;
+      MEMZERO(_cv);
+      memcpy(&_cv, &cv, 16);
+      VkImageSubresourceRange r;
+      MEMZERO(r);
+      r.aspectMask     = img.aspect;
+      r.baseArrayLayer = layer;
+      r.layerCount     = num_layers;
+      r.baseMipLevel   = level;
+      r.levelCount     = num_levels;
+      cl.cv            = _cv;
+      cl.r             = r;
+      cl.img_id        = id.id;
+      cpu_cmd.write(Cmd_t::CLEAR_IMAGE, &cl);
+    } else {
+      Image &img = wnd->images[id.id];
+      img.barrier(cmd, VK_ACCESS_MEMORY_WRITE_BIT,
+                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+      VkClearColorValue _cv;
+      MEMZERO(_cv);
+      memcpy(&_cv, &cv, 16);
+      VkImageSubresourceRange r;
+      MEMZERO(r);
+      r.aspectMask     = img.aspect;
+      r.baseArrayLayer = layer;
+      r.layerCount     = num_layers;
+      r.baseMipLevel   = level;
+      r.levelCount     = num_levels;
+      vkCmdClearColorImage(cmd, img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           &_cv, 1, &r);
+    }
+  }
 };
 
 struct String_Pool {
@@ -3731,39 +3814,46 @@ struct String_Pool {
 
 class VkPass_Mng;
 
+struct Get_Or_Create_RT {
+  bool                  is_set;
+  ID                    id;
+  rd::Image_Create_Info create_info;
+  bool                  is_id;
+  u32                   layer;
+  u32                   level;
+  rd::Clear_Color       clear_color;
+  rd::Clear_Depth       clear_depth;
+  string_ref            name;
+
+  ID view_id;
+
+  void reset() { MEMZERO(*this); }
+  bool operator!=(Get_Or_Create_RT const &that) const {
+    if (is_id == that.is_id) {
+      if (is_id) {
+        return id != that.id || layer != that.layer || level != that.level;
+      } else {
+        return memcmp(&create_info, &that.create_info, sizeof(create_info)) !=
+                   0 ||
+               layer != that.layer || level != that.level;
+      }
+    }
+    return false;
+  }
+};
+
+struct Pass_Cache {
+  InlineArray<Get_Or_Create_RT, 0x10> rts;
+  Get_Or_Create_RT                    depth_target;
+};
+
 class VkResource_Manager : public rd::IResource_Manager {
   rd::Pass_t  type;
   Window *    wnd;
   ID          cached_pass;
   rd::IPass * pPass;
   String_Pool string_pool;
-  struct Get_Or_Create_RT {
-    bool                  is_set;
-    ID                    id;
-    rd::Image_Create_Info create_info;
-    bool                  is_id;
-    u32                   layer;
-    u32                   level;
-    rd::Clear_Color       clear_color;
-    rd::Clear_Depth       clear_depth;
-    string_ref            name;
 
-    ID view_id;
-
-    void reset() { MEMZERO(*this); }
-    bool operator!=(Get_Or_Create_RT const &that) const {
-      if (is_id == that.is_id) {
-        if (is_id) {
-          return id != that.id || layer != that.layer || level != that.level;
-        } else {
-          return memcmp(&create_info, &that.create_info, sizeof(create_info)) !=
-                     0 ||
-                 layer != that.layer || level != that.level;
-        }
-      }
-      return false;
-    }
-  };
   InlineArray<Get_Or_Create_RT, 0x10> rts;
   Get_Or_Create_RT                    depth_target;
 

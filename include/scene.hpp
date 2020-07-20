@@ -576,7 +576,7 @@ struct Raw_Mesh_Opaque {
                12);
         break;
       case rd::Attriute_t ::TANGENT:
-        ASSERT_PANIC(attributes[i].format == rd::Format::RGB32_FLOAT);
+        ASSERT_PANIC(attributes[i].format == rd::Format::RGBA32_FLOAT);
         memcpy(&v.tangent,
                attribute_data.at(index * attributes[i].stride +
                                  attributes[i].offset),

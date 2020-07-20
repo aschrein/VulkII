@@ -881,8 +881,8 @@ template <typename T, unsigned int N> struct InlineArray {
   T &          operator[](u32 i) { return elems[i]; }
   T const &    operator[](u32 i) const { return elems[i]; }
   void         push(T const &a) {
+    ASSERT_DEBUG(size < N);
     elems[size++] = a;
-    ASSERT_DEBUG(size <= N);
   }
   void init() { memset(this, 0, sizeof(*this)); }
   void memzero() { memset(elems, 0, sizeof(elems)); }
@@ -896,6 +896,7 @@ template <typename T, unsigned int N> struct InlineArray {
     ASSERT_DEBUG(new_size <= N);
     size = new_size;
   }
+  bool isfull() const { return size == N; }
   void remove(T val) {
     ito(size) {
       if (elems[i] == val) {

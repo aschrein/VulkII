@@ -244,6 +244,20 @@ enum class Image_Layout {
   SHADER_READ_ONLY_OPTIMAL,
 };
 
+struct Clear_Value {
+  union {
+    struct {
+      f32 v_f32[4];
+    };
+    struct {
+      u32 v_u32[4];
+    };
+    struct {
+      i32 v_i32[4];
+    };
+  };
+};
+
 class Imm_Ctx {
   public:
   ////////////////////////////
@@ -270,6 +284,10 @@ class Imm_Ctx {
   virtual void RS_set_state(RS_State const &rs_state)                  = 0;
   virtual void DS_set_state(DS_State const &ds_state)                  = 0;
   virtual void MS_set_state(MS_State const &ds_state)                  = 0;
+  virtual void fill_buffer(Resource_ID id, size_t offset, size_t size,
+                           u32 value)                                  = 0;
+  virtual void clear_image(Resource_ID id, u32 layer, u32 num_layers, u32 level,
+                           u32 num_levels, Clear_Value const &cv) = 0;
   virtual void OM_set_blend_state(u32 rt_index, Blend_State const &bl) = 0;
 
   virtual void bind_uniform_buffer(u32 set, u32 binding, Resource_ID buf_id,
