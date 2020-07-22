@@ -41,8 +41,9 @@ enum class Primitive { TRIANGLE_LIST, LINE_LIST };
 enum class Front_Face { CW, CCW };
 enum class Cull_Mode { NONE, FRONT, BACK };
 enum class Index_t { UINT32, UINT16 };
-enum class Format {
+enum class Format : u32 {
   UNKNOWN = 0,
+  NATIVE  = 1,
   BGRA8_UNORM,
   BGR8_UNORM,
   RGBA8_UNORM,
@@ -60,6 +61,32 @@ enum class Format {
   R32_UINT,
   D32_FLOAT,
 };
+
+static inline char const *format_to_cstr(Format format) {
+  switch (format) {
+    // clang-format off
+      case Format::UNKNOWN     : return "UNKNOWN";
+      case Format::NATIVE      : return "NATIVE";
+      case Format::BGRA8_UNORM : return "BGRA8_UNORM";
+      case Format::BGR8_UNORM  : return "BGR8_UNORM";
+      case Format::RGBA8_UNORM : return "RGBA8_UNORM";
+      case Format::RGBA8_SNORM : return "RGBA8_SNORM";
+      case Format::RGBA8_SRGBA : return "RGBA8_SRGBA";
+      case Format::RGBA8_UINT  : return "RGBA8_UINT";
+      case Format::RGB8_UNORM  : return "RGB8_UNORM";
+      case Format::RGB8_SNORM  : return "RGB8_SNORM";
+      case Format::RGB8_SRGBA  : return "RGB8_SRGBA";
+      case Format::RGB8_UINT   : return "RGB8_UINT";
+      case Format::RGBA32_FLOAT: return "RGBA32_FLOAT";
+      case Format::RGB32_FLOAT : return "RGB32_FLOAT";
+      case Format::RG32_FLOAT  : return "RG32_FLOAT";
+      case Format::R32_FLOAT   : return "R32_FLOAT";
+      case Format::R32_UINT    : return "R32_UINT";
+      case Format::D32_FLOAT   : return "D32_FLOAT";
+  // clang-format on
+  default: TRAP;
+  }
+}
 
 enum class Buffer_Usage_Bits : uint32_t {
   USAGE_VERTEX_BUFFER      = 1,
@@ -112,6 +139,7 @@ struct Image2D_Info {
 
 struct Image_Info {
   Format format;
+  bool   is_depth;
   u32    width, height, depth, levels, layers;
 };
 
@@ -237,11 +265,15 @@ enum class Input_Rate { VERTEX, INSTANCE };
 enum class Access_Bits : u32 {
   SHADER_READ  = 0b00001,
   SHADER_WRITE = 0b00010,
+  MEMORY_WRITE = 0b00100,
+  MEMORY_READ  = 0b01000,
 };
 
 enum class Image_Layout {
   SHADER_READ_WRITE_OPTIMAL,
   SHADER_READ_ONLY_OPTIMAL,
+  TRANSFER_DST_OPTIMAL,
+  TRANSFER_SRC_OPTIMAL,
 };
 
 struct Clear_Value {
@@ -256,6 +288,41 @@ struct Clear_Value {
       i32 v_i32[4];
     };
   };
+};
+
+struct Image_Subresource {
+  u32                      layer;
+  u32                      num_layers;
+  u32                      level;
+  u32                      num_levels;
+  static Image_Subresource top_level() {
+    Image_Subresource out;
+    out.layer      = 0;
+    out.num_layers = 1;
+    out.level      = 0;
+    out.num_levels = 1;
+    return out;
+  }
+};
+
+struct Image_Copy_Dst {
+  u32                   layer;
+  u32                   num_layers;
+  u32                   level;
+  u32                   offset_x;
+  u32                   offset_y;
+  u32                   offset_z;
+  u32                   size_x;
+  u32                   size_y;
+  u32                   size_z;
+  static Image_Copy_Dst top_level() {
+    Image_Copy_Dst out;
+    MEMZERO(out);
+    out.layer      = 0;
+    out.num_layers = 1;
+    out.level      = 0;
+    return out;
+  }
 };
 
 class Imm_Ctx {
@@ -286,8 +353,8 @@ class Imm_Ctx {
   virtual void MS_set_state(MS_State const &ds_state)                  = 0;
   virtual void fill_buffer(Resource_ID id, size_t offset, size_t size,
                            u32 value)                                  = 0;
-  virtual void clear_image(Resource_ID id, u32 layer, u32 num_layers, u32 level,
-                           u32 num_levels, Clear_Value const &cv) = 0;
+  virtual void clear_image(Resource_ID id, Image_Subresource const &range,
+                           Clear_Value const &cv)                      = 0;
   virtual void OM_set_blend_state(u32 rt_index, Blend_State const &bl) = 0;
 
   virtual void bind_uniform_buffer(u32 set, u32 binding, Resource_ID buf_id,
@@ -296,11 +363,10 @@ class Imm_Ctx {
   virtual void bind_storage_buffer(u32 set, u32 binding, Resource_ID buf_id,
                                    size_t offset, size_t size)              = 0;
   virtual void bind_image(u32 set, u32 binding, u32 index, Resource_ID image_id,
-                          u32 layer, u32 num_layers, u32 level,
-                          u32 num_levels)                                   = 0;
+                          Image_Subresource const &range, Format format)    = 0;
   virtual void bind_rw_image(u32 set, u32 binding, u32 index,
-                             Resource_ID image_id, u32 layer, u32 num_layers,
-                             u32 level, u32 num_levels)                     = 0;
+                             Resource_ID              image_id,
+                             Image_Subresource const &range, Format format) = 0;
   virtual void *map_buffer(Resource_ID id)                                  = 0;
   virtual void  unmap_buffer(Resource_ID id)                                = 0;
   virtual void push_constants(void const *data, size_t offset, size_t size) = 0;
@@ -317,12 +383,13 @@ class Imm_Ctx {
   virtual void set_viewport(float x, float y, float width, float height,
                             float mindepth, float maxdepth)                 = 0;
   virtual void set_scissor(u32 x, u32 y, u32 width, u32 height)             = 0;
-  virtual void copy_buffer_to_image(Resource_ID buf_id, size_t offset,
-                                    Resource_ID img_id, u32 dst_layer,
-                                    u32 dst_level)                          = 0;
+  virtual void copy_buffer_to_image(Resource_ID buf_id, size_t buffer_offset,
+                                    Resource_ID           img_id,
+                                    Image_Copy_Dst const &dst_info)         = 0;
   virtual void copy_buffer(Resource_ID src_buf_id, size_t src_offset,
                            Resource_ID dst_buf_id, size_t dst_offset,
                            u32 size)                                        = 0;
+  virtual Image_Info get_image_info(Resource_ID res_id)                     = 0;
 };
 
 struct Clear_Color {

@@ -64,6 +64,10 @@ static_defer({
   fprintf(scene_dump, ")\n");
 });
 
+struct Statistics {
+  u32 sampled_texels = 0;
+} g_statistics;
+
 class Feedback_Pass : public rd::IPass {
   Resource_ID          vs;
   Resource_ID          ps;
@@ -107,14 +111,24 @@ class Feedback_Pass : public rd::IPass {
   void on_begin(rd::IResource_Manager *pc) override {
     g_camera.update();
     g_scene.on_pass_begin(pc);
-    rd::Image2D_Info info = pc->get_swapchain_image_info();
-    if (output_image.is_null()) {
+    rd::Image2D_Info info   = pc->get_swapchain_image_info();
+    bool             change = false;
+    if (width != g_config.get_u32("g_buffer_width")) {
+      change = true;
+    }
+    if (height != g_config.get_u32("g_buffer_height")) {
+      change = true;
+    }
+    width  = g_config.get_u32("g_buffer_width");
+    height = g_config.get_u32("g_buffer_height");
+    if (change) {
+      if (output_image.is_null() == false) pc->release_resource(output_image);
 
       rd::Image_Create_Info info;
       MEMZERO(info);
-      info.format     = rd::Format::RGBA32_FLOAT;
-      info.width      = 1024;
-      info.height     = 1024;
+      info.format     = rd::Format::R32_UINT;
+      info.width      = width;
+      info.height     = height;
       info.depth      = 1;
       info.layers     = 1;
       info.levels     = 1;
@@ -125,8 +139,7 @@ class Feedback_Pass : public rd::IPass {
       output_image = pc->create_image(info);
       pc->assign_name(output_image, stref_s("feedback_pass/img0"));
     }
-    width  = 1024;
-    height = 1024;
+
     {
       rd::Clear_Depth cl;
       cl.clear = true;
@@ -134,8 +147,8 @@ class Feedback_Pass : public rd::IPass {
       rd::Image_Create_Info info;
       MEMZERO(info);
       info.format     = rd::Format::D32_FLOAT;
-      info.width      = 1024;
-      info.height     = 1024;
+      info.width      = width;
+      info.height     = height;
       info.depth      = 1;
       info.layers     = 1;
       info.levels     = 1;
@@ -154,8 +167,8 @@ class Feedback_Pass : public rd::IPass {
       rd::Image_Create_Info rt0_info;
       MEMZERO(rt0_info);
       rt0_info.format     = rd::Format::RGBA32_FLOAT;
-      rt0_info.width      = 1024;
-      rt0_info.height     = 1024;
+      rt0_info.width      = width;
+      rt0_info.height     = height;
       rt0_info.depth      = 1;
       rt0_info.layers     = 1;
       rt0_info.levels     = 1;
@@ -180,11 +193,11 @@ class Feedback_Pass : public rd::IPass {
 )
 
 @(DECLARE_IMAGE
-  (type WRITE_ONLY)
+  (type READ_WRITE)
   (dim 2D)
   (set 0)
   (binding 1)
-  (format RGBA32_FLOAT)
+  (format R32_UINT)
   (name out_image)
 )
 
@@ -217,8 +230,8 @@ class Feedback_Pass : public rd::IPass {
   int2 dim = imageSize(out_image);
   i32 x = i32(0.5 + dim.x * PIXEL_TEXCOORD0.x);
   i32 y = i32(0.5 + dim.y * PIXEL_TEXCOORD0.y + 1.0);
-  image_store(out_image, int2(x, y), float4(1.0, 0.0, 0.0, 1.0));
-  
+  //image_store(out_image, int2(x, y), float4(1.0, 0.0, 0.0, 1.0));
+  imageAtomicAdd(out_image, int2(x, y), 100);
   buffer_atomic_add(out_cnt, 0, 1);
 
   float4 color = float4_splat(1.0) * (0.5 + 0.5 * dot(PIXEL_NORMAL.rgb, normalize(float3(1.0, 1.0, 1.0))));
@@ -274,9 +287,11 @@ class Feedback_Pass : public rd::IPass {
       cv.v_f32[0] = 0.0f;
       cv.v_f32[1] = 0.0f;
       cv.v_f32[2] = 0.0f;
-      cv.v_f32[3] = 1.0f;
-      ctx->clear_image(output_image, 0, 1, 0, 1, cv);
-      ctx->bind_rw_image(0, 1, 0, output_image, 0, 1, 0, 1);
+      cv.v_f32[3] = 0.0f;
+      ctx->clear_image(output_image, rd::Image_Subresource::top_level(), cv);
+      ctx->bind_rw_image(0, 1, 0, output_image,
+                         rd::Image_Subresource::top_level(),
+                         rd::Format::NATIVE);
     }
     {
 
@@ -287,7 +302,9 @@ class Feedback_Pass : public rd::IPass {
           if (feedback_buffer.in_fly &&
               ctx->get_fence_state(feedback_buffer.fence)) {
             u32 *ptr = (u32 *)ctx->map_buffer(feedback_buffer.buffer);
-            fprintf(stdout, "feedback buffer is finished: %i ... \n", ptr[0]);
+            // fprintf(stdout, "feedback buffer is finished: %i ... \n",
+            // ptr[0]);
+            g_statistics.sampled_texels = ptr[0];
             ctx->unmap_buffer(feedback_buffer.buffer);
             feedback_buffer.in_fly = false;
           }
@@ -352,21 +369,20 @@ class GUI_Pass : public IGUI_Pass {
   void on_gui(rd::IResource_Manager *pc) override {
     {
       ImGui::Begin("Config");
+      g_config.on_imgui();
+      ImGui::LabelText("sampled_texels", "%i", g_statistics.sampled_texels);
       ImGui::End();
     }
     {
       ImGui::Begin("postprocess_pass");
       {
-        auto        wsize = ImGui::GetWindowSize();
-        Resource_ID img   = pc->get_resource(stref_s("feedback_pass/rt0"));
-        ImGui::Image((ImTextureID)(intptr_t)img.data, ImVec2(wsize.x, wsize.y));
-        auto  wpos        = ImGui::GetCursorScreenPos();
-        float height_diff = 24;
-        if (wsize.y < height_diff + 2) {
-          wsize.y = 2;
-        } else {
-          wsize.y = wsize.y - height_diff;
-        }
+        auto wsize = get_window_size();
+        ImGui::Image(
+            bind_texture(pc->get_resource(stref_s("feedback_pass/rt0")), 0, 0,
+                         rd::Format::NATIVE),
+            ImVec2(wsize.x, wsize.y));
+        auto wpos = ImGui::GetCursorScreenPos();
+
         ImGuiIO &io = ImGui::GetIO();
         // g_config.get_u32("g_buffer_width")  = wsize.x;
         // g_config.get_u32("g_buffer_height") = wsize.y;
@@ -376,9 +392,9 @@ class GUI_Pass : public IGUI_Pass {
             g_camera.distance += g_camera.distance * 2.e-1 * scroll_y;
             g_camera.distance = clamp(g_camera.distance, 1.0e-3f, 1000.0f);
           }
-          f32 camera_speed = 2.0f;
+          f32 camera_speed = 2.0f * g_camera.distance;
           if (ImGui::GetIO().KeysDown[SDL_SCANCODE_LSHIFT]) {
-            camera_speed = 20.0f;
+            camera_speed = 10.0f * g_camera.distance;
           }
           float3 camera_diff = float3(0.0f, 0.0f, 0.0f);
           if (ImGui::GetIO().KeysDown[SDL_SCANCODE_W]) {
@@ -414,9 +430,11 @@ class GUI_Pass : public IGUI_Pass {
       ImGui::Begin("uv feedback");
 
       {
-        auto        wsize = ImGui::GetWindowSize();
-        Resource_ID img   = pc->get_resource(stref_s("feedback_pass/img0"));
-        ImGui::Image((ImTextureID)(intptr_t)img.data, ImVec2(wsize.x, wsize.y));
+        auto wsize = get_window_size();
+        ImGui::Image(
+            bind_texture(pc->get_resource(stref_s("feedback_pass/img0")), 0, 0,
+                         rd::Format::R32_UINT),
+            ImVec2(wsize.x, wsize.y));
       }
 
       ImGui::End();

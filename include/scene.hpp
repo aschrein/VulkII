@@ -359,6 +359,17 @@ struct Image2D_Raw {
 
     return out;
   }
+  u32 get_num_mip_levels() const {
+    u32 mip_levels = 0;
+    u32 w          = width;
+    u32 h          = height;
+    while (w || h) {
+      w /= 2;
+      h /= 2;
+      mip_levels++;
+    }
+    return MAX(1, mip_levels);
+  }
 };
 
 static inline float3 safe_normalize(float3 v) {

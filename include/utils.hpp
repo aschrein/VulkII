@@ -685,6 +685,16 @@ struct String_Builder {
   void put_char(char c) { tmp_buf.put(&c, 1); }
 };
 
+static inline string_ref tmp_format(char const *fmt, ...) {
+  char *  buf = (char *)tl_alloc_tmp(strlen(fmt) * 2);
+  va_list args;
+  va_start(args, fmt);
+  i32 len = vsprintf(buf, fmt, args);
+  va_end(args);
+  ASSERT_ALWAYS(len < strlen(fmt) * 2);
+  return stref_s(buf);
+}
+
 #if __linux__
 static inline void make_dir_recursive(string_ref path) {
   TMP_STORAGE_SCOPE;

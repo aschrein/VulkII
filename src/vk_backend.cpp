@@ -222,6 +222,12 @@ VkAccessFlags to_vk_access_flags(u32 flags) {
   if (flags & (i32)rd::Access_Bits::SHADER_WRITE) {
     out |= VK_ACCESS_SHADER_WRITE_BIT;
   }
+  if (flags & (i32)rd::Access_Bits::MEMORY_WRITE) {
+    out |= VK_ACCESS_MEMORY_WRITE_BIT;
+  }
+  if (flags & (i32)rd::Access_Bits::MEMORY_READ) {
+    out |= VK_ACCESS_MEMORY_READ_BIT;
+  }
   return out;
 }
 
@@ -230,6 +236,8 @@ VkImageLayout to_vk(rd::Image_Layout layout) {
   switch (layout) {
   case rd::Image_Layout::SHADER_READ_ONLY_OPTIMAL      : return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   case rd::Image_Layout::SHADER_READ_WRITE_OPTIMAL     : return VK_IMAGE_LAYOUT_GENERAL;
+  case rd::Image_Layout::TRANSFER_DST_OPTIMAL          : return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+  case rd::Image_Layout::TRANSFER_SRC_OPTIMAL          : return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
   default: UNIMPLEMENTED;
   }
   // clang-format on
@@ -313,17 +321,17 @@ u32 get_format_size(VkFormat format) {
 }
 
 struct Image : public Ref_Cnt {
-  string             name;
-  ID                 mem_chunk_id;
-  u32                mem_offset;
-  VkImageLayout      layout;
-  VkAccessFlags      access_flags;
-  VkImageAspectFlags aspect;
-  VkImage            image;
-  Image_Info         info;
-  InlineArray<ID, 8> views;
-  u32                getbpp() const { return get_format_size(info.format); }
-  void               init() {
+  string                name;
+  ID                    mem_chunk_id;
+  u32                   mem_offset;
+  VkImageLayout         layout;
+  VkAccessFlags         access_flags;
+  VkImageAspectFlags    aspect;
+  VkImage               image;
+  Image_Info            info;
+  InlineArray<ID, 0x10> views;
+  u32                   getbpp() const { return get_format_size(info.format); }
+  void                  init() {
     memset(this, 0, sizeof(*this));
     views.init();
   }
@@ -498,22 +506,24 @@ static void execute_preprocessor(List *l, char const *list_end,
       while (l != NULL) {
         if (l->child != NULL) {
           exec(l->child);
-        } else if (l->cmp_symbol("location")) {
-          location = l->get(1)->parse_int();
-        } else if (l->cmp_symbol("binding")) {
-          binding = l->get(1)->parse_int();
-        } else if (l->cmp_symbol("array_size")) {
-          array_size = l->get(1)->parse_int();
-        } else if (l->cmp_symbol("set")) {
-          set = l->get(1)->parse_int();
-        } else if (l->cmp_symbol("name")) {
-          name = l->get(1)->symbol;
-        } else if (l->cmp_symbol("type")) {
-          type = l->get(1)->symbol;
-        } else if (l->cmp_symbol("dim")) {
-          dim = l->get(1)->symbol;
-        } else if (l->cmp_symbol("format")) {
-          format = l->get(1)->symbol;
+        } else if (l->next != NULL) {
+          if (l->cmp_symbol("location")) {
+            location = l->get(1)->parse_int();
+          } else if (l->cmp_symbol("binding")) {
+            binding = l->get(1)->parse_int();
+          } else if (l->cmp_symbol("array_size")) {
+            array_size = l->get(1)->parse_int();
+          } else if (l->cmp_symbol("set")) {
+            set = l->get(1)->parse_int();
+          } else if (l->cmp_symbol("name")) {
+            name = l->get(1)->symbol;
+          } else if (l->cmp_symbol("type")) {
+            type = l->get(1)->symbol;
+          } else if (l->cmp_symbol("dim")) {
+            dim = l->get(1)->symbol;
+          } else if (l->cmp_symbol("format")) {
+            format = l->get(1)->symbol;
+          }
         }
         l = l->next;
       }
@@ -523,6 +533,8 @@ static void execute_preprocessor(List *l, char const *list_end,
         return stref_s("rgba32f");
       } else if (format == stref_s("R32_UINT")) {
         return stref_s("r32ui");
+      } else if (format == stref_s("RGBA8_SRGBA")) {
+        return stref_s("rgba8");
       } else {
         UNIMPLEMENTED;
       }
@@ -535,6 +547,9 @@ static void execute_preprocessor(List *l, char const *list_end,
         return stref_s(buf);
       } else if (format == stref_s("R32_UINT")) {
         snprintf(buf, sizeof(buf), "uimage%.*s", STRF(dim));
+        return stref_s(buf);
+      } else if (format == stref_s("RGBA8_SRGBA")) {
+        snprintf(buf, sizeof(buf), "image%.*s", STRF(dim));
         return stref_s(buf);
       } else {
         UNIMPLEMENTED;
@@ -2026,7 +2041,7 @@ struct Window {
   }
 
   Resource_ID create_image_view(ID res_id, u32 base_level, u32 levels,
-                                u32 base_layer, u32 layers) {
+                                u32 base_layer, u32 layers, VkFormat format) {
     Image &   img = images[res_id];
     ImageView img_view;
     MEMZERO(img_view);
@@ -2034,12 +2049,15 @@ struct Window {
     MEMZERO(cinfo);
     cinfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     VkComponentMapping cm;
-    cm.r                                  = VK_COMPONENT_SWIZZLE_R;
-    cm.g                                  = VK_COMPONENT_SWIZZLE_G;
-    cm.b                                  = VK_COMPONENT_SWIZZLE_B;
-    cm.a                                  = VK_COMPONENT_SWIZZLE_A;
-    cinfo.components                      = cm;
-    cinfo.format                          = img.info.format;
+    cm.r             = VK_COMPONENT_SWIZZLE_R;
+    cm.g             = VK_COMPONENT_SWIZZLE_G;
+    cm.b             = VK_COMPONENT_SWIZZLE_B;
+    cm.a             = VK_COMPONENT_SWIZZLE_A;
+    cinfo.components = cm;
+    if (format == VK_FORMAT_UNDEFINED)
+      cinfo.format = img.info.format;
+    else
+      cinfo.format = format;
     cinfo.image                           = img.image;
     cinfo.subresourceRange.aspectMask     = img.aspect;
     cinfo.subresourceRange.baseArrayLayer = base_layer;
@@ -2084,6 +2102,7 @@ struct Window {
     VkImageCreateInfo cinfo;
     {
       MEMZERO(cinfo);
+      cinfo.flags                 = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
       cinfo.sType                 = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
       cinfo.pQueueFamilyIndices   = &graphics_queue_id;
       cinfo.queueFamilyIndexCount = 1;
@@ -2697,11 +2716,9 @@ class Vk_Ctx : public rd::Imm_Ctx {
         size_t size;
       } storage_buffer;
       struct {
-        ID  image_id;
-        u32 layer;
-        u32 num_layers;
-        u32 level;
-        u32 num_levels;
+        ID                      image_id;
+        VkImageSubresourceRange sr;
+        VkFormat                format;
       } image;
       struct {
         ID sampler_id;
@@ -2737,7 +2754,9 @@ class Vk_Ctx : public rd::Imm_Ctx {
     BARRIER,
     RENDER_RECT,
     BUFFER_FILL,
-    CLEAR_IMAGE
+    CLEAR_IMAGE,
+    COPY_BUFFER_IMAGE,
+    COPY_BUFFER
   };
 
   struct Deferred_Push_Constants {
@@ -2823,6 +2842,81 @@ class Vk_Ctx : public rd::Imm_Ctx {
     VkClearColorValue       cv;
     VkImageSubresourceRange r;
   };
+
+  struct Deferred_Copy_Buffer_Image {
+    Resource_ID        buf_id;
+    size_t             offset;
+    Resource_ID        img_id;
+    rd::Image_Copy_Dst dst_info;
+  };
+
+  struct Deferred_Copy_Buffer {
+    Resource_ID src_buf_id;
+    size_t      src_offset;
+    Resource_ID dst_buf_id;
+    size_t      dst_offset;
+    u32         size;
+  };
+
+  void _copy_buffer(Resource_ID src_buf_id, size_t src_offset,
+                    Resource_ID dst_buf_id, size_t dst_offset, u32 size) {
+    Buffer &src_buffer = wnd->buffers[src_buf_id.id];
+    Buffer &dst_buffer = wnd->buffers[dst_buf_id.id];
+
+    src_buffer.barrier(cmd, VK_ACCESS_TRANSFER_READ_BIT);
+    dst_buffer.barrier(cmd, VK_ACCESS_TRANSFER_WRITE_BIT);
+    VkBufferCopy info;
+    MEMZERO(info);
+    info.dstOffset = dst_offset;
+    info.size      = size;
+    info.srcOffset = src_offset;
+    vkCmdCopyBuffer(cmd, src_buffer.buffer, dst_buffer.buffer, 1, &info);
+  }
+
+  void _copy_buffer_image(Resource_ID buf_id, size_t offset, Resource_ID img_id,
+                          rd::Image_Copy_Dst const &dst_info) {
+    Buffer &buffer           = wnd->buffers[buf_id.id];
+    Image & image            = wnd->images[img_id.id];
+    auto    old_access_flags = image.access_flags;
+    auto    old_layout       = image.layout;
+
+    image.barrier(cmd, VK_ACCESS_TRANSFER_WRITE_BIT,
+                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkBufferImageCopy info;
+    MEMZERO(info);
+    info.bufferOffset = offset;
+    // info.bufferRowLength = 0; // image.getbpp() * image.info.extent.width;
+    if (dst_info.size_x == 0)
+      info.imageExtent.width = image.info.extent.width;
+    else
+      info.imageExtent.width = dst_info.size_x;
+
+    if (dst_info.size_y == 0)
+      info.imageExtent.height = image.info.extent.height;
+    else
+      info.imageExtent.height = dst_info.size_y;
+
+    if (dst_info.size_z == 0)
+      info.imageExtent.depth = image.info.extent.depth;
+    else
+      info.imageExtent.depth = dst_info.size_z;
+
+    info.imageOffset = {(i32)dst_info.offset_x, (i32)dst_info.offset_y,
+                        (i32)dst_info.offset_z};
+    VkImageSubresourceLayers subres;
+    MEMZERO(subres);
+    subres.aspectMask     = image.aspect;
+    subres.baseArrayLayer = dst_info.layer;
+    if (dst_info.num_layers == 0)
+      subres.layerCount = 1;
+    else
+      subres.layerCount = dst_info.num_layers;
+    subres.mipLevel        = dst_info.level;
+    info.imageSubresource  = subres;
+    info.bufferImageHeight = image.info.extent.height;
+    vkCmdCopyBufferToImage(cmd, buffer.buffer, image.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &info);
+  }
 
   struct CPU_Command_Buffer {
     Array<u8> data;
@@ -3030,6 +3124,15 @@ class Vk_Ctx : public rd::Imm_Ctx {
         cpu_cmd.read(&df);
         Buffer &buf = wnd->buffers[df.buf_id];
         vkCmdFillBuffer(cmd, buf.buffer, df.offset, df.size, df.val);
+      } else if (type == Cmd_t::COPY_BUFFER_IMAGE) {
+        Deferred_Copy_Buffer_Image dci;
+        cpu_cmd.read(&dci);
+        _copy_buffer_image(dci.buf_id, dci.offset, dci.img_id, dci.dst_info);
+      } else if (type == Cmd_t::COPY_BUFFER) {
+        Deferred_Copy_Buffer dci;
+        cpu_cmd.read(&dci);
+        _copy_buffer(dci.src_buf_id, dci.src_offset, dci.dst_buf_id,
+                     dci.dst_offset, dci.size);
       } else if (type == Cmd_t::CLEAR_IMAGE) {
         Deferred_Clear_Image cl;
         cpu_cmd.read(&cl);
@@ -3208,11 +3311,12 @@ class Vk_Ctx : public rd::Imm_Ctx {
       } else if (rb.type == Binding_t::IMAGE) {
         VkDescriptorImageInfo binfo;
         MEMZERO(binfo);
-        Image &img = wnd->images[rb.image.image_id];
-        ID     view_id =
-            wnd->create_image_view(img.id, rb.image.level, rb.image.num_levels,
-                                   rb.image.layer, rb.image.num_layers)
-                .id;
+        Image &img     = wnd->images[rb.image.image_id];
+        ID     view_id = wnd->create_image_view(
+                            img.id, rb.image.sr.baseMipLevel,
+                            rb.image.sr.levelCount, rb.image.sr.baseArrayLayer,
+                            rb.image.sr.layerCount, rb.image.format)
+                         .id;
         ImageView &view   = wnd->image_views[view_id];
         binfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         binfo.imageView   = view.view;
@@ -3230,11 +3334,12 @@ class Vk_Ctx : public rd::Imm_Ctx {
       } else if (rb.type == Binding_t::STORAGE_IMAGE) {
         VkDescriptorImageInfo binfo;
         MEMZERO(binfo);
-        Image &img = wnd->images[rb.image.image_id];
-        ID     view_id =
-            wnd->create_image_view(img.id, rb.image.level, rb.image.num_levels,
-                                   rb.image.layer, rb.image.num_layers)
-                .id;
+        Image &img     = wnd->images[rb.image.image_id];
+        ID     view_id = wnd->create_image_view(
+                            img.id, rb.image.sr.baseMipLevel,
+                            rb.image.sr.levelCount, rb.image.sr.baseArrayLayer,
+                            rb.image.sr.layerCount, rb.image.format)
+                         .id;
         ImageView &view   = wnd->image_views[view_id];
         binfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         binfo.imageView   = view.view;
@@ -3544,23 +3649,43 @@ class Vk_Ctx : public rd::Imm_Ctx {
     rb.element               = 0;
     rb.storage_buffer.buf_id = buf_id.id;
     rb.storage_buffer.offset = offset;
-    rb.storage_buffer.size   = size;
+    if (size == 0) size = VK_WHOLE_SIZE;
+    rb.storage_buffer.size = size;
     insert_binding(rb);
   }
+  rd::Image_Info get_image_info(Resource_ID res_id) override {
+    rd::Image_Info info;
+    MEMZERO(info);
+    Image &img    = wnd->images[res_id.id];
+    info.format   = from_vk(img.info.format);
+    info.height   = img.info.extent.height;
+    info.depth    = img.info.extent.depth;
+    info.width    = img.info.extent.width;
+    info.layers   = img.info.arrayLayers;
+    info.levels   = img.info.mipLevels;
+    info.is_depth = img.is_depth_image();
+    return info;
+  }
   void bind_image(u32 set, u32 binding, u32 index, Resource_ID image_id,
-                  u32 layer, u32 num_layers, u32 level,
-                  u32 num_levels) override {
+                  rd::Image_Subresource const &range,
+                  rd::Format                   format) override {
+    Image &          image = wnd->images[image_id.id];
     Resource_Binding rb;
     MEMZERO(rb);
-    rb.type             = Binding_t::IMAGE;
-    rb.set              = set;
-    rb.binding          = binding;
-    rb.element          = index;
-    rb.image.image_id   = image_id.id;
-    rb.image.layer      = layer;
-    rb.image.level      = level;
-    rb.image.num_layers = num_layers;
-    rb.image.num_levels = num_levels;
+    rb.type                    = Binding_t::IMAGE;
+    rb.set                     = set;
+    rb.binding                 = binding;
+    rb.element                 = index;
+    rb.image.image_id          = image_id.id;
+    rb.image.sr.aspectMask     = image.aspect;
+    rb.image.sr.baseArrayLayer = range.layer;
+    rb.image.sr.layerCount     = range.num_layers;
+    rb.image.sr.baseMipLevel   = range.level;
+    rb.image.sr.levelCount     = range.num_levels;
+    if (format == rd::Format::NATIVE)
+      rb.image.format = image.info.format;
+    else
+      rb.image.format = to_vk(format);
     insert_binding(rb);
   }
   void bind_sampler(u32 set, u32 binding, Resource_ID sampler_id) override {
@@ -3574,19 +3699,25 @@ class Vk_Ctx : public rd::Imm_Ctx {
     insert_binding(rb);
   }
   void bind_rw_image(u32 set, u32 binding, u32 index, Resource_ID image_id,
-                     u32 layer, u32 num_layers, u32 level,
-                     u32 num_levels) override {
+                     rd::Image_Subresource const &range,
+                     rd::Format                   format) override {
+    Image &          image = wnd->images[image_id.id];
     Resource_Binding rb;
     MEMZERO(rb);
-    rb.type             = Binding_t::STORAGE_IMAGE;
-    rb.set              = set;
-    rb.binding          = binding;
-    rb.element          = index;
-    rb.image.image_id   = image_id.id;
-    rb.image.layer      = layer;
-    rb.image.level      = level;
-    rb.image.num_layers = num_layers;
-    rb.image.num_levels = num_levels;
+    rb.type                    = Binding_t::STORAGE_IMAGE;
+    rb.set                     = set;
+    rb.binding                 = binding;
+    rb.element                 = index;
+    rb.image.image_id          = image_id.id;
+    rb.image.sr.aspectMask     = image.aspect;
+    rb.image.sr.baseArrayLayer = range.layer;
+    rb.image.sr.layerCount     = range.num_layers;
+    rb.image.sr.baseMipLevel   = range.level;
+    rb.image.sr.levelCount     = range.num_levels;
+    if (format == rd::Format::NATIVE)
+      rb.image.format = image.info.format;
+    else
+      rb.image.format = to_vk(format);
     insert_binding(rb);
   }
   void *map_buffer(Resource_ID res_id) override {
@@ -3636,47 +3767,35 @@ class Vk_Ctx : public rd::Imm_Ctx {
     }
   }
   void copy_buffer_to_image(Resource_ID buf_id, size_t offset,
-                            Resource_ID img_id, u32 dst_layer,
-                            u32 dst_level) override {
-    Buffer &buffer           = wnd->buffers[buf_id.id];
-    Image & image            = wnd->images[img_id.id];
-    auto    old_access_flags = image.access_flags;
-    auto    old_layout       = image.layout;
-
-    image.barrier(cmd, VK_ACCESS_TRANSFER_WRITE_BIT,
-                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    VkBufferImageCopy info;
-    MEMZERO(info);
-    info.bufferOffset    = offset;
-    info.bufferRowLength = 0; // image.getbpp() * image.info.extent.width;
-    info.imageExtent     = image.info.extent;
-    info.imageOffset     = VkOffset3D{0, 0, 0};
-    VkImageSubresourceLayers subres;
-    MEMZERO(subres);
-    subres.aspectMask      = image.aspect;
-    subres.baseArrayLayer  = dst_layer;
-    subres.layerCount      = 1;
-    subres.mipLevel        = dst_level;
-    info.imageSubresource  = subres;
-    info.bufferImageHeight = image.info.extent.height;
-    vkCmdCopyBufferToImage(cmd, buffer.buffer, image.image,
-                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &info);
-    // image.barrier(cmd, old_access_flags, old_layout);
+                            Resource_ID               img_id,
+                            rd::Image_Copy_Dst const &dst_info) override {
+    if (type == rd::Pass_t::COMPUTE) {
+      Deferred_Copy_Buffer_Image dci;
+      MEMZERO(dci);
+      dci.buf_id   = buf_id;
+      dci.dst_info = dst_info;
+      dci.offset   = offset;
+      dci.img_id   = img_id;
+      cpu_cmd.write(Cmd_t::COPY_BUFFER_IMAGE, &dci);
+    } else {
+      _copy_buffer_image(buf_id, offset, img_id, dst_info);
+    }
   }
   void copy_buffer(Resource_ID src_buf_id, size_t src_offset,
                    Resource_ID dst_buf_id, size_t dst_offset,
                    u32 size) override {
-    Buffer &src_buffer = wnd->buffers[src_buf_id.id];
-    Buffer &dst_buffer = wnd->buffers[dst_buf_id.id];
-
-    src_buffer.barrier(cmd, VK_ACCESS_TRANSFER_READ_BIT);
-    dst_buffer.barrier(cmd, VK_ACCESS_TRANSFER_WRITE_BIT);
-    VkBufferCopy info;
-    MEMZERO(info);
-    info.dstOffset = dst_offset;
-    info.size      = size;
-    info.srcOffset = src_offset;
-    vkCmdCopyBuffer(cmd, src_buffer.buffer, dst_buffer.buffer, 1, &info);
+    if (type == rd::Pass_t::COMPUTE) {
+      Deferred_Copy_Buffer dci;
+      MEMZERO(dci);
+      dci.src_buf_id = src_buf_id;
+      dci.src_offset = src_offset;
+      dci.dst_buf_id = dst_buf_id;
+      dci.dst_offset = dst_offset;
+      dci.size       = size;
+      cpu_cmd.write(Cmd_t::COPY_BUFFER, &dci);
+    } else {
+      _copy_buffer(src_buf_id, src_offset, dst_buf_id, dst_offset, size);
+    }
   }
   void draw_indexed(u32 index_count, u32 instance_count, u32 first_index,
                     u32 first_instance, i32 vertex_offset) override {
@@ -3752,16 +3871,17 @@ class Vk_Ctx : public rd::Imm_Ctx {
       MEMZERO(bf);
       bf.buf_id = id.id;
       bf.offset = offset;
-      bf.size   = size;
-      bf.val    = value;
+      if (size == 0) size = VK_WHOLE_SIZE;
+      bf.size = size;
+      bf.val  = value;
       cpu_cmd.write(Cmd_t::BUFFER_FILL, &bf);
     } else {
       Buffer &buf = wnd->buffers[id.id];
       vkCmdFillBuffer(cmd, buf.buffer, offset, size, value);
     }
   }
-  void clear_image(Resource_ID id, u32 layer, u32 num_layers, u32 level,
-                   u32 num_levels, rd::Clear_Value const &cv) override {
+  void clear_image(Resource_ID id, rd::Image_Subresource const &range,
+                   rd::Clear_Value const &cv) override {
     if (type == rd::Pass_t::COMPUTE) {
       Deferred_Clear_Image cl;
       MEMZERO(cl);
@@ -3772,10 +3892,10 @@ class Vk_Ctx : public rd::Imm_Ctx {
       VkImageSubresourceRange r;
       MEMZERO(r);
       r.aspectMask     = img.aspect;
-      r.baseArrayLayer = layer;
-      r.layerCount     = num_layers;
-      r.baseMipLevel   = level;
-      r.levelCount     = num_levels;
+      r.baseArrayLayer = range.layer;
+      r.layerCount     = range.num_layers;
+      r.baseMipLevel   = range.level;
+      r.levelCount     = range.num_levels;
       cl.cv            = _cv;
       cl.r             = r;
       cl.img_id        = id.id;
@@ -3790,10 +3910,10 @@ class Vk_Ctx : public rd::Imm_Ctx {
       VkImageSubresourceRange r;
       MEMZERO(r);
       r.aspectMask     = img.aspect;
-      r.baseArrayLayer = layer;
-      r.layerCount     = num_layers;
-      r.baseMipLevel   = level;
-      r.levelCount     = num_levels;
+      r.baseArrayLayer = range.layer;
+      r.layerCount     = range.num_layers;
+      r.baseMipLevel   = range.level;
+      r.levelCount     = range.num_levels;
       vkCmdClearColorImage(cmd, img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                            &_cv, 1, &r);
     }
@@ -3956,13 +4076,15 @@ class VkResource_Manager : public rd::IResource_Manager {
                      rts[i].create_info.usage_bits, rts[i].create_info.mem_bits,
                      rts[i].name)
                   .id;
-          rts[i].view_id = wnd->create_image_view(rts[i].id, rts[i].level, 1,
-                                                  rts[i].layer, 1)
-                               .id;
+          rts[i].view_id =
+              wnd->create_image_view(rts[i].id, rts[i].level, 1, rts[i].layer,
+                                     1, VK_FORMAT_UNDEFINED)
+                  .id;
         } else {
-          rts[i].view_id = wnd->create_image_view(rts[i].id, rts[i].level, 1,
-                                                  rts[i].layer, 1)
-                               .id;
+          rts[i].view_id =
+              wnd->create_image_view(rts[i].id, rts[i].level, 1, rts[i].layer,
+                                     1, VK_FORMAT_UNDEFINED)
+                  .id;
         }
       }
       if (depth_target.is_set) {
@@ -3980,12 +4102,12 @@ class VkResource_Manager : public rd::IResource_Manager {
                   .id;
           depth_target.view_id =
               wnd->create_image_view(depth_target.id, depth_target.level, 1,
-                                     depth_target.layer, 1)
+                                     depth_target.layer, 1, VK_FORMAT_UNDEFINED)
                   .id;
         } else {
           depth_target.view_id =
               wnd->create_image_view(depth_target.id, depth_target.level, 1,
-                                     depth_target.layer, 1)
+                                     depth_target.layer, 1, VK_FORMAT_UNDEFINED)
                   .id;
         }
       }
@@ -4303,13 +4425,14 @@ class VkResource_Manager : public rd::IResource_Manager {
   rd::Image_Info get_image_info(Resource_ID res_id) override {
     rd::Image_Info info;
     MEMZERO(info);
-    Image &img  = wnd->images[res_id.id];
-    info.format = from_vk(img.info.format);
-    info.height = img.info.extent.height;
-    info.depth  = img.info.extent.depth;
-    info.width  = img.info.extent.width;
-    info.layers = img.info.arrayLayers;
-    info.levels = img.info.mipLevels;
+    Image &img    = wnd->images[res_id.id];
+    info.format   = from_vk(img.info.format);
+    info.height   = img.info.extent.height;
+    info.depth    = img.info.extent.depth;
+    info.width    = img.info.extent.width;
+    info.layers   = img.info.arrayLayers;
+    info.levels   = img.info.mipLevels;
+    info.is_depth = img.is_depth_image();
     return info;
   }
 };

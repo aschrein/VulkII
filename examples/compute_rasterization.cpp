@@ -730,8 +730,10 @@ Vertex fetch(u32 index) {
                        (u32)rd::Access_Bits::SHADER_WRITE |
                            (u32)rd::Access_Bits::SHADER_READ,
                        rd::Image_Layout::SHADER_READ_WRITE_OPTIMAL);
-    ctx->bind_rw_image(0, 1, 0, output_image, 0, 1, 0, 1);
-    ctx->bind_rw_image(0, 2, 0, output_depth, 0, 1, 0, 1);
+    ctx->bind_rw_image(0, 1, 0, output_image, rd::Image_Range::top_level(),
+                         rd::Format::NATIVE);
+    ctx->bind_rw_image(0, 2, 0, output_depth, rd::Image_Range::top_level(),
+                         rd::Format::NATIVE);
     ctx->dispatch((g_config.get_u32("g_buffer_width") + 15) / 16,
                   (g_config.get_u32("g_buffer_height") + 15) / 16, 1);
     ctx->CS_set_shader(cs);
@@ -1069,8 +1071,10 @@ u32 fetch_index(u32 index) {
                        (u32)rd::Access_Bits::SHADER_WRITE |
                            (u32)rd::Access_Bits::SHADER_READ,
                        rd::Image_Layout::SHADER_READ_WRITE_OPTIMAL);
-    ctx->bind_rw_image(0, 1, 0, output_image, 0, 1, 0, 1);
-    ctx->bind_rw_image(0, 2, 0, output_depth, 0, 1, 0, 1);
+    ctx->bind_rw_image(0, 1, 0, output_image, rd::Image_Range::top_level(),
+                         rd::Format::NATIVE);
+    ctx->bind_rw_image(0, 2, 0, output_depth, rd::Image_Range::top_level(),
+                         rd::Format::NATIVE);
     ctx->dispatch((g_config.get_u32("g_buffer_width") + 15) / 16,
                   (g_config.get_u32("g_buffer_height") + 15) / 16, 1);
     ctx->CS_set_shader(cs);
@@ -1268,8 +1272,10 @@ float4 op_laplace(int2 coords) {
                        rd::Image_Layout::SHADER_READ_WRITE_OPTIMAL);
     ctx->image_barrier(output_image, (u32)rd::Access_Bits::SHADER_WRITE,
                        rd::Image_Layout::SHADER_READ_WRITE_OPTIMAL);
-    ctx->bind_rw_image(0, 1, 0, input_image, 0, 1, 0, 1);
-    ctx->bind_rw_image(0, 2, 0, output_image, 0, 1, 0, 1);
+    ctx->bind_rw_image(0, 1, 0, input_image, rd::Image_Range::top_level(),
+                         rd::Format::NATIVE);
+    ctx->bind_rw_image(0, 2, 0, output_image, rd::Image_Range::top_level(),
+                         rd::Format::NATIVE);
     // ctx->bind_sampler(0, 2, sampler);
     ctx->dispatch((width + 15) / 16, (height + 15) / 16, 1);
   }
@@ -1375,7 +1381,7 @@ class GUI_Pass : public IGUI_Pass {
       {
         auto        wsize = ImGui::GetWindowSize();
         Resource_ID img   = pc->get_resource(stref_s("depth_prepas/ds"));
-        ImGui::Image((ImTextureID)(intptr_t)(img.data | DEPTH_FLAG),
+        ImGui::Image((ImTextureID)(intptr_t)(img.data),
                      ImVec2(wsize.x, wsize.y));
       }
 

@@ -643,6 +643,13 @@ public:
             ->rename(name));
   }
 
+  u32 load_image(string_ref path, rd::Format format) {
+    images.push(::load_image(path, format));
+    return images.size - 1;
+  }
+
+  Image2D_Raw const &get_image(u32 index) { return images[index]; }
+
   Node *get_node(string_ref name) {
     Node *out = NULL;
     traverse([&](Node *node) {
@@ -735,7 +742,8 @@ public:
         u32 *ptr = (u32 *)ctx->map_buffer(staging_buffer);
         ito(16 * 16) { ptr[i] = 0xff0000ffu; }
         ctx->unmap_buffer(staging_buffer);
-        ctx->copy_buffer_to_image(staging_buffer, 0, dummy_texture, 0, 0);
+        ctx->copy_buffer_to_image(staging_buffer, 0, dummy_texture,
+                                  rd::Image_Copy_Dst::top_level());
       }
       {
         u8 *ptr = (u8 *)ctx->map_buffer(staging_vertex_buffer);
@@ -758,9 +766,11 @@ public:
     }
     ito(gfx_images.size) {
       if (i < texture_streaming_id) {
-        ctx->bind_image(1, 1, i, gfx_images[i], 0, 1, 0, 1);
+        ctx->bind_image(1, 1, i, gfx_images[i],
+                        rd::Image_Subresource::top_level(), rd::Format::NATIVE);
       } else {
-        ctx->bind_image(1, 1, i, dummy_texture, 0, 1, 0, 1);
+        ctx->bind_image(1, 1, i, dummy_texture,
+                        rd::Image_Subresource::top_level(), rd::Format::NATIVE);
       }
     }
   }
@@ -885,6 +895,20 @@ static void setup_default_state(rd::Imm_Ctx *ctx, u32 num_rts = 1) {
   ctx->MS_set_state(ms_state);
 }
 
+struct ImGui_ID {
+  Resource_ID     id;
+  u32             base_level;
+  u32             base_layer;
+  rd::Format      format;
+  static ImGui_ID def(Resource_ID id) {
+    ImGui_ID iid;
+    MEMZERO(iid);
+    iid.id     = id;
+    iid.format = rd::Format::NATIVE;
+    return iid;
+  }
+};
+
 class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
   protected:
   Resource_ID vs;
@@ -897,6 +921,8 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
   Resource_ID font_texture;
   Resource_ID staging_buffer;
 
+  InlineArray<ImGui_ID, 0x100> image_bindings;
+
   unsigned char *font_pixels;
   int            font_width, font_height;
 
@@ -905,8 +931,6 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
   ImDrawData *draw_data;
   Timer       timer;
   bool        imgui_initialized;
-
-  static constexpr u64 DEPTH_FLAG = 0x8000'0000'0000'0000ull;
 
   public:
   virtual void on_gui(rd::IResource_Manager *pc) {}
@@ -921,6 +945,7 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
     }
   }
   IGUI_Pass() {
+    image_bindings.init();
     timer.init();
     imgui_initialized = false;
     draw_data         = NULL;
@@ -943,7 +968,20 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
     vertex_buffer.reset();
     index_buffer.reset();
     staging_buffer.reset();
+    image_bindings.size = 1;
   }
+  ImTextureID bind_texture(Resource_ID id, u32 layer, u32 level,
+                           rd::Format format) {
+    ImGui_ID iid;
+    MEMZERO(iid);
+    iid.id         = id;
+    iid.base_layer = layer;
+    iid.base_level = level;
+    iid.format     = format;
+    image_bindings.push(iid);
+    return (ImTextureID)(size_t)(image_bindings.size - 1);
+  }
+
   void on_begin(rd::IResource_Manager *pc) override {
     rd::Image2D_Info info = pc->get_swapchain_image_info();
     width                 = info.width;
@@ -962,6 +1000,7 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
 )
 
 #define CONTROL_DEPTH_ENABLE 1
+#define CONTROL_AMPLIFY 2
 #define is_control(flag) (control_flags & flag) != 0
 
 @(DECLARE_IMAGE
@@ -1010,8 +1049,13 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
       float4_splat(depth)
     );
   } else {
+    float4 color = Color * texture(sampler2D(sTexture, sSampler), UV);
+    if (is_control(CONTROL_AMPLIFY)) {
+      color *= 10.0;
+      color.a = 1.0;
+    }
     @(EXPORT_COLOR 0
-      Color * texture(sampler2D(sTexture, sSampler), UV)
+      color
     );
   }
 @(END)
@@ -1062,8 +1106,9 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
       info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
       info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_SAMPLED |
                         (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST;
-      font_texture    = pc->create_image(info);
-      io.Fonts->TexID = (ImTextureID)(intptr_t)font_texture.data;
+      font_texture = pc->create_image(info);
+      io.Fonts->TexID =
+          bind_texture(font_texture, 0, 0, rd::Format::RGBA8_UNORM);
 
       rd::Buffer_Create_Info buf_info;
       MEMZERO(buf_info);
@@ -1097,7 +1142,7 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
     ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f),
                      ImGuiDockNodeFlags_PassthruCentralNode);
     ImGui::End();
-    
+
     static bool show_demo_window = true;
     ImGui::ShowDemoWindow(&show_demo_window);
     on_gui(pc);
@@ -1154,7 +1199,8 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
       void *dst = ctx->map_buffer(staging_buffer);
       memcpy(dst, font_pixels, font_width * font_height * 4);
       ctx->unmap_buffer(staging_buffer);
-      ctx->copy_buffer_to_image(staging_buffer, 0, font_texture, 0, 0);
+      ctx->copy_buffer_to_image(staging_buffer, 0, font_texture,
+                                rd::Image_Copy_Dst::top_level());
       font_pixels = NULL;
     }
     setup_default_state(ctx);
@@ -1230,24 +1276,33 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
       for (int cmd_i = 0; cmd_i < cmd_list->CmdBuffer.Size; cmd_i++) {
         const ImDrawCmd *pcmd = &cmd_list->CmdBuffer[cmd_i];
         ImVec4           clip_rect;
-        clip_rect.x = (pcmd->ClipRect.x - clip_off.x) * clip_scale.x;
-        clip_rect.y = (pcmd->ClipRect.y - clip_off.y) * clip_scale.y;
-        clip_rect.z = (pcmd->ClipRect.z - clip_off.x) * clip_scale.x;
-        clip_rect.w = (pcmd->ClipRect.w - clip_off.y) * clip_scale.y;
-        Resource_ID res_id;
-        u64         tex_id = (u64)pcmd->TextureId;
-        res_id.data        = tex_id & (~DEPTH_FLAG);
-        if ((tex_id & DEPTH_FLAG) != 0) {
+        clip_rect.x  = (pcmd->ClipRect.x - clip_off.x) * clip_scale.x;
+        clip_rect.y  = (pcmd->ClipRect.y - clip_off.y) * clip_scale.y;
+        clip_rect.z  = (pcmd->ClipRect.z - clip_off.x) * clip_scale.x;
+        clip_rect.w  = (pcmd->ClipRect.w - clip_off.y) * clip_scale.y;
+        ImGui_ID img = image_bindings[(size_t)pcmd->TextureId];
+        if (img.format == rd::Format::D32_FLOAT) {
           u32 control = 1;
           ctx->push_constants(&control, 16, 4);
         }
-        ctx->bind_image(0, 0, 0, res_id, 0, 1, 0, 1);
+        if (img.format == rd::Format::R32_UINT) {
+          u32 control = 2;
+          ctx->push_constants(&control, 16, 4);
+          img.format = rd::Format::RGBA8_UNORM;
+        }
+        rd::Image_Subresource range;
+        range.layer      = img.base_layer;
+        range.level      = img.base_level;
+        range.num_layers = 1;
+        range.num_levels = 1;
+        ctx->bind_image(0, 0, 0, img.id, range, img.format);
         ctx->set_scissor(clip_rect.x, clip_rect.y, clip_rect.z - clip_rect.x,
                          clip_rect.w - clip_rect.y);
         ctx->draw_indexed(pcmd->ElemCount, 1,
                           pcmd->IdxOffset + global_idx_offset, 0,
                           pcmd->VtxOffset + global_vtx_offset);
-        if ((tex_id & DEPTH_FLAG) != 0) {
+        if (img.format == rd::Format::R32_UINT ||
+            img.format == rd::Format::R32_UINT) {
           u32 control = 0;
           ctx->push_constants(&control, 16, 4);
         }
@@ -1258,6 +1313,16 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
 
     ImGuiIO &io = ImGui::GetIO();
   }
+  ImVec2 get_window_size() {
+    auto  wsize       = ImGui::GetWindowSize();
+    float height_diff = 42;
+    if (wsize.y < height_diff + 2) {
+      wsize.y = 2;
+    } else {
+      wsize.y = wsize.y - height_diff;
+    }
+    return wsize;
+  }
   string_ref get_name() override { return stref_s("simple_pass"); }
   void       release(rd::IResource_Manager *rm) override {
     ImGui_ImplSDL2_Shutdown();
@@ -1265,6 +1330,275 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
     rm->release_resource(vs);
     rm->release_resource(ps);
     delete this;
+  }
+};
+
+struct Mip_Builder {
+  Resource_ID cs;
+  Resource_ID staging_buffer;
+  bool        is_initialized;
+
+  static Resource_ID create_image(rd::IResource_Manager *pc,
+                                  Image2D_Raw const &    image, bool mips) {
+    Resource_ID           output_image;
+    rd::Image_Create_Info info;
+    MEMZERO(info);
+    info.format     = image.format;
+    info.width      = image.width;
+    info.height     = image.height;
+    info.depth      = 1;
+    info.layers     = 1;
+    info.levels     = image.get_num_mip_levels();
+    info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
+    info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST |
+                      (u32)rd::Image_Usage_Bits::USAGE_SAMPLED;
+    output_image = pc->create_image(info);
+    return output_image;
+  }
+
+  void init(rd::IResource_Manager *pc) {
+    if (!is_initialized) {
+      is_initialized = true;
+      if (staging_buffer.is_null() == false)
+        pc->release_resource(staging_buffer);
+
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC |
+                            (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST |
+                            (u32)rd::Buffer_Usage_Bits::USAGE_UAV;
+      buf_info.size  = 1 << 26;
+      staging_buffer = pc->create_buffer(buf_info);
+
+      if (cs.is_null()) {
+        TMP_STORAGE_SCOPE;
+        cs = pc->create_shader_raw(rd::Stage_t::COMPUTE, stref_s(R"(
+@(DECLARE_PUSH_CONSTANTS
+  (add_field (type u32)  (name src_offset))
+  (add_field (type u32)  (name src_width))
+  (add_field (type u32)  (name src_height))
+  (add_field (type u32)  (name dst_offset))
+  (add_field (type u32)  (name dst_width))
+  (add_field (type u32)  (name dst_height))
+  (add_field (type u32)  (name format))
+  (add_field (type u32)  (name op))
+)
+
+#define RGBA8_SRGBA    0
+#define RGBA8_UNORM    1
+#define RGB32_FLOAT    2
+#define R32_FLOAT      3
+#define RGBA32_FLOAT   4
+
+#define OP_AVG 0
+#define OP_MAX 1
+#define OP_MIN 2
+#define OP_SUM 3
+
+@(DECLARE_BUFFER
+  (type READ_WRITE)
+  (set 0)
+  (binding 0)
+  (type float)
+  (name data_f32)
+)
+
+@(DECLARE_BUFFER
+  (type READ_WRITE)
+  (set 0)
+  (binding 1)
+  (type uint)
+  (name data_u32)
+)
+
+float4 load(int2 coord) {
+  if (coord.x >= src_width) coord.x = int(src_width) - 1;
+  if (coord.y >= src_height) coord.y = int(src_height) - 1;
+  if (coord.x < 0) coord.x = 0;
+  if (coord.y < 0) coord.y = 0;
+  if (format == RGBA8_SRGBA) {
+    uint pixel = data_u32[coord.x + coord.y * src_width + src_offset];
+    float4 o =
+        float4(
+              float((pixel >> 0u ) & 0xffu) / 255.0,
+              float((pixel >> 8u ) & 0xffu) / 255.0,
+              float((pixel >> 16u) & 0xffu) / 255.0,
+              float((pixel >> 24u) & 0xffu) / 255.0);
+    return pow(o, float4(2.2));
+  } else if (format == RGBA8_UNORM) {
+    uint pixel = data_u32[coord.x + coord.y * src_width + src_offset];
+    float4 o =
+        float4(
+              float((pixel >> 0u ) & 0xffu) / 255.0,
+              float((pixel >> 8u ) & 0xffu) / 255.0,
+              float((pixel >> 16u) & 0xffu) / 255.0,
+              float((pixel >> 24u) & 0xffu) / 255.0);
+    return o;
+  } else if (format == RGB32_FLOAT) {
+    float v_0 = data_f32[(coord.x + coord.y * src_width + src_offset) * 3 + 0];
+    float v_1 = data_f32[(coord.x + coord.y * src_width + src_offset) * 3 + 1];
+    float v_2 = data_f32[(coord.x + coord.y * src_width + src_offset) * 3 + 2];
+    return float4(v_0, v_1, v_2, 1.0f);
+  } else if (format == RGBA32_FLOAT) {
+    float v_0 = data_f32[(coord.x + coord.y * src_width + src_offset) * 4 + 0];
+    float v_1 = data_f32[(coord.x + coord.y * src_width + src_offset) * 4 + 1];
+    float v_2 = data_f32[(coord.x + coord.y * src_width + src_offset) * 4 + 2];
+    float v_3 = data_f32[(coord.x + coord.y * src_width + src_offset) * 4 + 3];
+    return float4(v_0, v_1, v_2, v_3);
+  } else if (format == R32_FLOAT) {
+    float v_0 = data_f32[(coord.x + coord.y * src_width + src_offset)];
+    return float4(v_0, 0.0f, 0.0f, 0.0f);
+  }
+  return float4(1.0, 0.0, 0.0, 1.0);
+}
+
+void store(ivec2 coord, float4 val) {
+  if (format == RGBA8_SRGBA) {
+    val = pow(val, float4(1.0/2.2));
+    uint r = uint(clamp(val.x * 255.0f, 0.0f, 255.0f));
+    uint g = uint(clamp(val.y * 255.0f, 0.0f, 255.0f));
+    uint b = uint(clamp(val.z * 255.0f, 0.0f, 255.0f));
+    uint a = uint(clamp(val.w * 255.0f, 0.0f, 255.0f));
+    data_u32[coord.x + coord.y * dst_width + dst_offset] = ((r&0xffu)  |
+                                                   ((g&0xffu)  << 8u)  |
+                                                   ((b&0xffu)  << 16u) |
+                                                   ((a&0xffu)  << 24u));
+  } else if (format == RGBA8_UNORM) {
+    uint r = uint(clamp(val.x * 255.0f, 0.0f, 255.0f));
+    uint g = uint(clamp(val.y * 255.0f, 0.0f, 255.0f));
+    uint b = uint(clamp(val.z * 255.0f, 0.0f, 255.0f));
+    uint a = uint(clamp(val.w * 255.0f, 0.0f, 255.0f));
+    data_u32[coord.x + coord.y * dst_width + dst_offset] = ((r & 0xffu)  |
+                                                   ((g & 0xffu)  << 8u)  |
+                                                   ((b & 0xffu)  << 16u) |
+                                                   ((a & 0xffu)  << 24u));
+  } else if (format == RGB32_FLOAT) {
+    data_f32[(coord.x + coord.y * dst_width + dst_offset) * 3] = val.x;
+    data_f32[(coord.x + coord.y * dst_width + dst_offset) * 3 + 1] = val.y;
+    data_f32[(coord.x + coord.y * dst_width + dst_offset) * 3 + 2] = val.z;
+  } else if (format == RGBA32_FLOAT) {
+    data_f32[(coord.x + coord.y * dst_width + dst_offset) * 4] = val.x;
+    data_f32[(coord.x + coord.y * dst_width + dst_offset) * 4 + 1] = val.y;
+    data_f32[(coord.x + coord.y * dst_width + dst_offset) * 4 + 2] = val.z;
+    data_f32[(coord.x + coord.y * dst_width + dst_offset) * 4 + 3] = val.w;
+  } else if (format == R32_FLOAT) {
+    data_f32[(coord.x + coord.y * dst_width + dst_offset)] = val.x;
+  }
+}
+
+@(GROUP_SIZE 16 16 1)
+@(ENTRY)
+    if (GLOBAL_THREAD_INDEX.x >= dst_width || GLOBAL_THREAD_INDEX.y >= dst_height)
+      return;
+
+    ivec2 xy = int2(GLOBAL_THREAD_INDEX.xy);
+
+    float4 val_0 = load(xy * 2);
+    float4 val_1 = load(xy * 2 + ivec2(1, 0));
+    float4 val_2 = load(xy * 2 + ivec2(0, 1));
+    float4 val_3 = load(xy * 2 + ivec2(1, 1));
+    float4 result = float4_splat(0.0);
+
+    if (op == OP_AVG)
+      result = (val_0 + val_1 + val_2 + val_3) / 4.0;
+    else if (op == OP_MAX)
+      result = max(val_0, max(val_1, max(val_2, val_3)));
+    else if (op == OP_MIN)
+      result = min(val_0, min(val_1, min(val_2, val_3)));
+    else if (op == OP_SUM)
+      result = val_0 + val_1 + val_2 + val_3;
+    store(int2(GLOBAL_THREAD_INDEX.xy), result);
+@(END)
+
+)"),
+                                   NULL, 0);
+      }
+    }
+  }
+  void compute(rd::Imm_Ctx *ctx, Image2D_Raw const &image,
+               Resource_ID output_image) {
+    void *ptr = ctx->map_buffer(staging_buffer);
+    memcpy(ptr, image.data, image.get_size_in_bytes());
+    ctx->unmap_buffer(staging_buffer);
+    struct Push_Constants {
+      u32 src_offset;
+      u32 src_width;
+      u32 src_height;
+      u32 dst_offset;
+      u32 dst_width;
+      u32 dst_height;
+      u32 format;
+      u32 op;
+    } pc;
+    MEMZERO(pc);
+    pc.op = 0;
+    switch (image.format) {
+      // clang-format off
+      case rd::Format::RGBA8_SRGBA:  {  pc.format = 0; } break;
+      case rd::Format::RGBA8_UNORM:  {  pc.format = 1; } break;
+      case rd::Format::RGB32_FLOAT:  {  pc.format = 2; } break;
+      case rd::Format::R32_FLOAT:    {  pc.format = 3; } break;
+      case rd::Format::RGBA32_FLOAT: {  pc.format = 4; } break;
+      // clang-format on
+    default: TRAP;
+    }
+    ctx->bind_storage_buffer(0, 0, staging_buffer, 0, 0);
+    ctx->bind_storage_buffer(0, 1, staging_buffer, 0, 0);
+    ctx->CS_set_shader(cs);
+
+    InlineArray<u32, 0x10>  mip_offsets;
+    InlineArray<int2, 0x10> mip_sizes;
+    mip_offsets.init();
+    mip_sizes.init();
+    u32 w          = image.width;
+    u32 h          = image.height;
+    u32 mip_offset = 0;
+    while (w || h) {
+      mip_offsets.push(mip_offset);
+      w = MAX(1, w);
+      h = MAX(1, h);
+      mip_sizes.push({w, h});
+      mip_offset += w * h * image.get_bpp();
+      w = w >> 1;
+      h = h >> 1;
+    }
+
+    for (u32 i = 0; i < mip_offsets.size - 1; i++) {
+      pc.src_offset = mip_offsets[i] / 4;
+      pc.src_width  = mip_sizes[i].x;
+      pc.src_height = mip_sizes[i].y;
+      pc.dst_offset = mip_offsets[i + 1] / 4;
+      pc.dst_width  = mip_sizes[i + 1].x;
+      pc.dst_height = mip_sizes[i + 1].y;
+      ctx->push_constants(&pc, 0, sizeof(pc));
+      ctx->buffer_barrier(staging_buffer,
+                          (u32)rd::Access_Bits::SHADER_READ |
+                              (u32)rd::Access_Bits::SHADER_WRITE);
+      ctx->dispatch((mip_sizes[i + 1].x + 15) / 16,
+                    (mip_sizes[i + 1].y + 15) / 16, 1);
+    }
+    ito(mip_offsets.size) {
+      rd::Image_Copy_Dst dst_info;
+      MEMZERO(dst_info);
+      dst_info.level      = i;
+      dst_info.num_layers = 1;
+      dst_info.size_x     = mip_sizes[i].x;
+      dst_info.size_y     = mip_sizes[i].y;
+      dst_info.size_z     = 1;
+      ctx->image_barrier(output_image, (u32)rd::Access_Bits::MEMORY_WRITE,
+                         rd::Image_Layout::TRANSFER_DST_OPTIMAL);
+      ctx->copy_buffer_to_image(staging_buffer, mip_offsets[i], output_image,
+                                dst_info);
+    }
+  }
+
+  void release(rd::IResource_Manager *rm) {
+    rm->release_resource(cs);
+    if (staging_buffer.is_null() == false) {
+      rm->release_resource(staging_buffer);
+      staging_buffer.reset();
+    }
   }
 };
 
