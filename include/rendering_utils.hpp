@@ -1542,7 +1542,7 @@ void store(ivec2 coord, float4 val) {
     MEMZERO(pc);
     pc.op = 0;
     switch (image.format) {
-    // clang-format off
+      // clang-format off
       case rd::Format::RGBA8_SRGBA:  {  pc.format = 0; } break;
       case rd::Format::RGBA8_UNORM:  {  pc.format = 1; } break;
       case rd::Format::RGB32_FLOAT:  {  pc.format = 2; } break;
@@ -1659,9 +1659,10 @@ class Gizmo_Layer {
     afloat4 position;
   };
   struct Gizmo_Line_Vertex {
-    afloat3 position;
-    afloat4 color;
+    float3 position;
+    float3 color;
   };
+  static_assert(sizeof(Gizmo_Line_Vertex) == 24, "");
   struct Gizmo_Instance_Data_CPU {
     afloat4x4 transform;
     afloat3   color;
@@ -1681,6 +1682,8 @@ class Gizmo_Layer {
 
   Resource_ID gizmo_vs;
   Resource_ID gizmo_ps;
+  Resource_ID gizmo_lines_vs;
+  Resource_ID gizmo_lines_ps;
 
   public:
   void init(rd::IPass_Context *rm) {
@@ -1755,6 +1758,44 @@ class Gizmo_Layer {
         rm->create_shader_raw(rd::Stage_t::VERTEX, shader, &defines[0], 1);
     gizmo_ps =
         rm->create_shader_raw(rd::Stage_t::PIXEL, shader, &defines[1], 1);
+    static string_ref shader_lines = stref_s(R"(
+@(DECLARE_PUSH_CONSTANTS
+  (add_field (type float4x4)   (name viewproj))
+)
+
+#ifdef VERTEX
+
+@(DECLARE_INPUT (location 0) (type float3) (name in_position))
+@(DECLARE_INPUT (location 1) (type float3) (name in_color))
+
+@(DECLARE_OUTPUT (location 0) (type float3) (name pixel_color))
+
+@(ENTRY)
+  pixel_color = in_color;
+  @(EXPORT_POSITION
+      viewproj *
+      float4(in_position, 1.0)
+  );
+@(END)
+#endif
+#ifdef PIXEL
+
+@(DECLARE_INPUT (location 0) (type float3) (name color))
+
+@(DECLARE_RENDER_TARGET
+  (location 0)
+)
+@(ENTRY)
+  @(EXPORT_COLOR 0
+    float4(color.xyz, 1.0)
+  );
+@(END)
+#endif
+)");
+    gizmo_lines_vs = rm->create_shader_raw(rd::Stage_t::VERTEX, shader_lines,
+                                           &defines[0], 1);
+    gizmo_lines_ps =
+        rm->create_shader_raw(rd::Stage_t::PIXEL, shader_lines, &defines[1], 1);
   }
   void release(rd::IPass_Context *rm) {
     cylinder_draw_cmds.release();
@@ -1818,10 +1859,14 @@ class Gizmo_Layer {
     // clang-format on
     Gizmo_Instance_Data_CPU cmd;
     MEMZERO(cmd);
-    cmd.color     = color;
-    cmd.transform = tranform *
-                    glm::scale(float4x4(1.0f), float3(radius, radius, 1.0f));
+    cmd.color = color;
+    cmd.transform =
+        tranform * glm::scale(float4x4(1.0f), float3(radius, radius, 1.0f));
     cone_draw_cmds.push(cmd);
+  }
+  void draw_line(float3 p0, float3 p1, float3 color) {
+    line_segments.push({p0, color});
+    line_segments.push({p1, color});
   }
   bool on_mouse_down(float3 ray_origin, float3 ray_dir) {}
   void on_mouse_up(float3 ray_origin, float3 ray_dir) {}
@@ -1830,78 +1875,129 @@ class Gizmo_Layer {
   void on_pass_end(rd::IPass_Context *rm) {}
   void render(rd::Imm_Ctx *ctx, float4x4 const &viewproj) {
     if (cylinder_draw_cmds.size == 0 && sphere_draw_cmds.size == 0 &&
-        cone_draw_cmds.size == 0)
+        cone_draw_cmds.size == 0 && line_segments.size == 0)
       return;
-    ctx->push_state();
-    defer(ctx->pop_state());
-    rd::RS_State rs_state;
-    MEMZERO(rs_state);
-    rs_state.polygon_mode = rd::Polygon_Mode::FILL;
-    rs_state.front_face   = rd::Front_Face::CW;
-    rs_state.cull_mode    = rd::Cull_Mode::NONE;
-    rs_state.line_width   = 1.0f;
-    rs_state.depth_bias   = 0.0f;
-    ctx->RS_set_state(rs_state);
-    u32                    cylinder_offset = 0;
-    u32                    num_cylinders   = cylinder_draw_cmds.size;
-    u32                    sphere_offset   = num_cylinders;
-    u32                    num_spheres     = sphere_draw_cmds.size;
-    u32                    cone_offset     = num_cylinders + num_spheres;
-    u32                    num_cones       = cone_draw_cmds.size;
-    rd::Buffer_Create_Info buf_info;
-    MEMZERO(buf_info);
-    buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
-    buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
-    buf_info.size       = (cylinder_draw_cmds.size + sphere_draw_cmds.size +
-                     cone_draw_cmds.size) *
-                    sizeof(Gizmo_Instance_Data_CPU);
-    Resource_ID gizmo_instance_buffer = ctx->create_buffer(buf_info);
-    void *      ptr                   = ctx->map_buffer(gizmo_instance_buffer);
-    if (cylinder_draw_cmds.size > 0)
-      memcpy((u8 *)ptr + cylinder_offset * sizeof(Gizmo_Instance_Data_CPU),
-             &cylinder_draw_cmds[0],
-             num_cylinders * sizeof(Gizmo_Instance_Data_CPU));
-    if (sphere_draw_cmds.size > 0)
-      memcpy((u8 *)ptr + sphere_offset * sizeof(Gizmo_Instance_Data_CPU),
-             &sphere_draw_cmds[0],
-             num_spheres * sizeof(Gizmo_Instance_Data_CPU));
-    if (cone_draw_cmds.size > 0)
-      memcpy((u8 *)ptr + cone_offset * sizeof(Gizmo_Instance_Data_CPU),
-             &cone_draw_cmds[0], num_cones * sizeof(Gizmo_Instance_Data_CPU));
+    if (cylinder_draw_cmds.size != 0 || sphere_draw_cmds.size != 0 ||
+        cone_draw_cmds.size != 0) {
+      ctx->push_state();
+      defer(ctx->pop_state());
+      rd::RS_State rs_state;
+      MEMZERO(rs_state);
+      rs_state.polygon_mode = rd::Polygon_Mode::FILL;
+      rs_state.front_face   = rd::Front_Face::CW;
+      rs_state.cull_mode    = rd::Cull_Mode::NONE;
+      rs_state.line_width   = 1.0f;
+      rs_state.depth_bias   = 0.0f;
+      ctx->RS_set_state(rs_state);
+      u32                    cylinder_offset = 0;
+      u32                    num_cylinders   = cylinder_draw_cmds.size;
+      u32                    sphere_offset   = num_cylinders;
+      u32                    num_spheres     = sphere_draw_cmds.size;
+      u32                    cone_offset     = num_cylinders + num_spheres;
+      u32                    num_cones       = cone_draw_cmds.size;
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
+      buf_info.size       = (cylinder_draw_cmds.size + sphere_draw_cmds.size +
+                       cone_draw_cmds.size) *
+                      sizeof(Gizmo_Instance_Data_CPU);
+      Resource_ID gizmo_instance_buffer = ctx->create_buffer(buf_info);
+      void *      ptr = ctx->map_buffer(gizmo_instance_buffer);
+      if (cylinder_draw_cmds.size > 0)
+        memcpy((u8 *)ptr + cylinder_offset * sizeof(Gizmo_Instance_Data_CPU),
+               &cylinder_draw_cmds[0],
+               num_cylinders * sizeof(Gizmo_Instance_Data_CPU));
+      if (sphere_draw_cmds.size > 0)
+        memcpy((u8 *)ptr + sphere_offset * sizeof(Gizmo_Instance_Data_CPU),
+               &sphere_draw_cmds[0],
+               num_spheres * sizeof(Gizmo_Instance_Data_CPU));
+      if (cone_draw_cmds.size > 0)
+        memcpy((u8 *)ptr + cone_offset * sizeof(Gizmo_Instance_Data_CPU),
+               &cone_draw_cmds[0], num_cones * sizeof(Gizmo_Instance_Data_CPU));
 
-    num_cylinders = cylinder_draw_cmds.size;
-    ctx->unmap_buffer(gizmo_instance_buffer);
-    cylinder_draw_cmds.reset();
-    cone_draw_cmds.reset();
-    sphere_draw_cmds.reset();
-    defer(ctx->release_resource(gizmo_instance_buffer));
-    ctx->PS_set_shader(gizmo_ps);
-    ctx->VS_set_shader(gizmo_vs);
-    ctx->push_constants(&viewproj, 0, sizeof(viewproj));
-    ctx->IA_set_vertex_buffer(1, gizmo_instance_buffer, 0,
-                              sizeof(Gizmo_Instance_Data_CPU),
-                              rd::Input_Rate::INSTANCE);
-    rd::Attribute_Info info;
-    MEMZERO(info);
-    info.binding  = 0;
-    info.format   = rd::Format::RGB32_FLOAT;
-    info.location = 0;
-    info.offset   = 0;
-    info.type     = rd::Attriute_t::POSITION;
-    ctx->IA_set_attribute(info);
-    ito(5) {
+      num_cylinders = cylinder_draw_cmds.size;
+      ctx->unmap_buffer(gizmo_instance_buffer);
+      cylinder_draw_cmds.reset();
+      cone_draw_cmds.reset();
+      sphere_draw_cmds.reset();
+      defer(ctx->release_resource(gizmo_instance_buffer));
+      ctx->PS_set_shader(gizmo_ps);
+      ctx->VS_set_shader(gizmo_vs);
+      ctx->push_constants(&viewproj, 0, sizeof(viewproj));
+      ctx->IA_set_vertex_buffer(1, gizmo_instance_buffer, 0,
+                                sizeof(Gizmo_Instance_Data_CPU),
+                                rd::Input_Rate::INSTANCE);
+      rd::Attribute_Info info;
       MEMZERO(info);
-      info.binding  = 1;
-      info.format   = rd::Format::RGBA32_FLOAT;
-      info.location = 1 + i;
-      info.offset   = 16 * i;
-      info.type     = (rd::Attriute_t)((u32)rd::Attriute_t::TEXCOORD0 + i);
+      info.binding  = 0;
+      info.format   = rd::Format::RGB32_FLOAT;
+      info.location = 0;
+      info.offset   = 0;
+      info.type     = rd::Attriute_t::POSITION;
       ctx->IA_set_attribute(info);
+      ito(5) {
+        MEMZERO(info);
+        info.binding  = 1;
+        info.format   = rd::Format::RGBA32_FLOAT;
+        info.location = 1 + i;
+        info.offset   = 16 * i;
+        info.type     = (rd::Attriute_t)((u32)rd::Attriute_t::TEXCOORD0 + i);
+        ctx->IA_set_attribute(info);
+      }
+      ctx->IA_set_topology(rd::Primitive::TRIANGLE_LIST);
+      cylinder_wrapper.draw(ctx, num_cylinders, cylinder_offset);
+      icosahedron_wrapper.draw(ctx, num_spheres, sphere_offset);
+      cone_wrapper.draw(ctx, num_cones, cone_offset);
     }
-    ctx->IA_set_topology(rd::Primitive::TRIANGLE_LIST);
-    cylinder_wrapper.draw(ctx, num_cylinders, cylinder_offset);
-    icosahedron_wrapper.draw(ctx, num_spheres, sphere_offset);
-    cone_wrapper.draw(ctx, num_cones, cone_offset);
+    if (line_segments.size != 0) {
+      ctx->push_state();
+      defer(ctx->pop_state());
+      rd::RS_State rs_state;
+      MEMZERO(rs_state);
+      rs_state.polygon_mode = rd::Polygon_Mode::FILL;
+      rs_state.front_face   = rd::Front_Face::CW;
+      rs_state.cull_mode    = rd::Cull_Mode::NONE;
+      rs_state.line_width   = 2.0f;
+      rs_state.depth_bias   = 0.0f;
+      ctx->RS_set_state(rs_state);
+
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
+      buf_info.size       = (line_segments.size) * sizeof(Gizmo_Line_Vertex);
+      Resource_ID gizmo_instance_buffer = ctx->create_buffer(buf_info);
+      void *      ptr = ctx->map_buffer(gizmo_instance_buffer);
+      memcpy((u8 *)ptr, &line_segments[0],
+             line_segments.size * sizeof(Gizmo_Instance_Data_CPU));
+      ctx->unmap_buffer(gizmo_instance_buffer);
+      defer(ctx->release_resource(gizmo_instance_buffer));
+      ctx->IA_set_topology(rd::Primitive::LINE_LIST);
+      ctx->IA_set_vertex_buffer(0, gizmo_instance_buffer, 0,
+                                sizeof(Gizmo_Line_Vertex),
+                                rd::Input_Rate::VERTEX);
+      rd::Attribute_Info info;
+      MEMZERO(info);
+      info.binding  = 0;
+      info.format   = rd::Format::RGB32_FLOAT;
+      info.location = 0;
+      info.offset   = 0;
+      info.type     = rd::Attriute_t::POSITION;
+      ctx->IA_set_attribute(info);
+      MEMZERO(info);
+      info.binding  = 0;
+      info.format   = rd::Format::RGB32_FLOAT;
+      info.location = 1;
+      info.offset   = 12;
+      info.type     = rd::Attriute_t::TEXCOORD0;
+      ctx->IA_set_attribute(info);
+      ctx->PS_set_shader(gizmo_lines_ps);
+      ctx->VS_set_shader(gizmo_lines_vs);
+      ctx->push_constants(&viewproj, 0, sizeof(viewproj));
+      ctx->draw(line_segments.size, 1, 0, 0);
+      line_segments.reset();
+    }
   }
 };
 
