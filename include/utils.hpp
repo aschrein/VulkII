@@ -481,7 +481,14 @@ static inline uint64_t hash_of(uint64_t u) {
   return v;
 }
 
+template <typename T> static void swap(T &a, T &b) {
+  T c = a;
+  a   = b;
+  b   = c;
+}
+
 static inline uint64_t hash_of(uint32_t u) { return hash_of((uint64_t)u); }
+static inline uint64_t hash_of(uint16_t u) { return hash_of((uint64_t)u); }
 
 template <typename T> static uint64_t hash_of(T *ptr) {
   return hash_of((size_t)ptr);
@@ -1029,7 +1036,8 @@ struct Array {
     ASSERT_DEBUG(ptr != NULL);
     return ptr[i];
   }
-  T *at(size_t i) { return ptr + i; }
+  T *      at(size_t i) { return ptr + i; }
+  T const *at(size_t i) const { return ptr + i; }
 };
 
 template <typename T, size_t grow_k = 0x10,

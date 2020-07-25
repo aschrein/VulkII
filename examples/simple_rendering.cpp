@@ -91,7 +91,6 @@ class Event_Consumer : public rd::IEvent_Consumer {
 
 class Init_Pass : public rd::IPass {
   bool mip_built;
-
   public:
   Init_Pass() { mip_built = false; }
   void on_end(rd::IResource_Manager *rm) override {}

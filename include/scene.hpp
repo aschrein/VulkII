@@ -177,7 +177,7 @@ class Random_Factory {
     float cosTheta = std::sqrt(1.0 - xi.x);
     float sinTheta = std::sqrt(1.0 - cosTheta * cosTheta);
 
-    return vec3(std::cos(phi) * sinTheta, std::sin(phi) * sinTheta, cosTheta);
+    return float3(std::cos(phi) * sinTheta, std::sin(phi) * sinTheta, cosTheta);
   }
 
   private:
@@ -412,6 +412,149 @@ struct Vertex_Full {
     return out;
   }
 };
+
+struct u16_face {
+  union {
+    struct {
+      uint16_t v0, v1, v2;
+    };
+    struct {
+      uint16_t arr[3];
+    };
+  };
+  uint16_t  operator[](size_t i) const { return arr[i]; }
+  uint16_t &operator[](size_t i) { return arr[i]; }
+};
+struct Raw_Mesh_3p16i {
+  Array<float3>   positions;
+  Array<u16_face> indices;
+  void            init() {
+    positions.init();
+    indices.init();
+  }
+  void release() {
+    positions.release();
+    indices.release();
+  }
+};
+
+static Raw_Mesh_3p16i subdivide_cylinder(uint32_t level, float radius,
+                                         float length) {
+  Raw_Mesh_3p16i out;
+  out.init();
+  level += 4;
+  float step = PI * 2.0f / level;
+  out.positions.resize(level * 2);
+  for (u32 i = 0; i < level; i++) {
+    float angle      = step * i;
+    out.positions[i] = {radius * std::cos(angle), radius * std::sin(angle),
+                        0.0f};
+    out.positions[i + level] = {radius * std::cos(angle),
+                                radius * std::sin(angle), length};
+  }
+  for (u32 i = 0; i < level; i++) {
+    out.indices.push(u16_face{(u16)i, (u16)(i + level), (u16)((i + 1) % level)});
+    out.indices.push(
+        u16_face{(u16)((i + 1) % level), (u16)(i + level), (u16)(((i + 1) % level) + level)});
+  }
+  return out;
+}
+
+static Raw_Mesh_3p16i subdivide_icosahedron(uint32_t level) {
+  Raw_Mesh_3p16i out;
+  out.init();
+  static float const  X                           = 0.5257311f;
+  static float const  Z                           = 0.8506508f;
+  static float3 const g_icosahedron_positions[12] = {
+      {-X, 0.0, Z}, {X, 0.0, Z},  {-X, 0.0, -Z}, {X, 0.0, -Z},
+      {0.0, Z, X},  {0.0, Z, -X}, {0.0, -Z, X},  {0.0, -Z, -X},
+      {Z, X, 0.0},  {-Z, X, 0.0}, {Z, -X, 0.0},  {-Z, -X, 0.0}};
+  static u16_face const g_icosahedron_indices[20] = {
+      {1, 4, 0},  {4, 9, 0},  {4, 5, 9},  {8, 5, 4},  {1, 8, 4},
+      {1, 10, 8}, {10, 3, 8}, {8, 3, 5},  {3, 2, 5},  {3, 7, 2},
+      {3, 10, 7}, {10, 6, 7}, {6, 11, 7}, {6, 0, 11}, {6, 1, 0},
+      {10, 1, 6}, {11, 0, 9}, {2, 11, 9}, {5, 2, 9},  {11, 2, 7}};
+  for (auto p : g_icosahedron_positions) {
+    out.positions.push(p);
+  }
+  for (auto i : g_icosahedron_indices) {
+    out.indices.push(i);
+  }
+  auto subdivide = [](Raw_Mesh_3p16i const &in) {
+    Raw_Mesh_3p16i out;
+    out.init();
+    Hash_Table<Pair<uint16_t, uint16_t>, uint16_t> lookup;
+    lookup.init();
+    defer(lookup.release());
+    auto get_or_insert = [&](uint16_t i0, uint16_t i1) {
+      Pair<uint16_t, uint16_t> key{i0, i1};
+      if (key.first > key.second) swap(key.first, key.second);
+
+      if (!lookup.contains(key)) {
+        lookup.insert(key, out.positions.size);
+        auto v0_x = out.positions[i0].x;
+        auto v1_x = out.positions[i1].x;
+        auto v0_y = out.positions[i0].y;
+        auto v1_y = out.positions[i1].y;
+        auto v0_z = out.positions[i0].z;
+        auto v1_z = out.positions[i1].z;
+
+        auto mid_point  = float3{(v0_x + v1_x) / 2.0f, (v0_y + v1_y) / 2.0f,
+                                (v0_z + v1_z) / 2.0f};
+        auto add_vertex = [&](float3 p) {
+          float length = std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
+          out.positions.push(float3{p.x / length, p.y / length, p.z / length});
+        };
+        add_vertex(mid_point);
+      }
+
+      return lookup.get(key);
+    };
+    out.positions = in.positions;
+    ito(in.indices.size) {
+      auto &   face = in.indices[i];
+      u16_face mid;
+
+      for (size_t edge = 0; edge < 3; ++edge) {
+        mid[edge] = get_or_insert(face[edge], face[(edge + 1) % 3]);
+      }
+
+      out.indices.push(u16_face{face[0], mid[0], mid[2]});
+      out.indices.push(u16_face{face[1], mid[1], mid[0]});
+      out.indices.push(u16_face{face[2], mid[2], mid[1]});
+      out.indices.push(u16_face{mid[0], mid[1], mid[2]});
+    }
+    return out;
+  };
+  for (uint i = 0; i < level; i++) {
+    out = subdivide(out);
+  }
+  return out;
+}
+
+static Raw_Mesh_3p16i subdivide_cone(uint32_t level, float radius,
+                                     float length) {
+  Raw_Mesh_3p16i out;
+  out.init();
+  level += 4;
+  float step = PI * 2.0f / level;
+  out.positions.resize(level * 2 + 2);
+  out.positions[0] = {0.0f, 0.0f, 0.0f};
+  out.positions[1] = {0.0f, 0.0f, length};
+  for (u32 i = 0; i < level; i++) {
+    float angle      = step * i;
+    out.positions[i + 2] = {radius * std::cos(angle), radius * std::sin(angle),
+                        0.0f};
+  }
+  for (u32 i = 0; i < level; i++) {
+    out.indices.push(
+        u16_face{(u16)(i + 2), (u16)(2 + (i + 1) % level), (u16)0});
+    out.indices.push(
+        u16_face{(u16)(i + 2), (u16)(2 + (i + 1) % level), (u16)1});
+  }
+  return out;
+}
+
 struct Tri_Index {
   u32 i0, i1, i2;
 };
@@ -533,23 +676,19 @@ struct Raw_Mesh_Opaque {
     attribute_data.release();
     index_data.release();
   }
-
   Attribute get_attribute(rd::Attriute_t type) {
     ito(attributes.size) {
       if (attributes[i].type == type) return attributes[i];
     }
     TRAP;
   }
-
   u8 *get_attribute_data(u32 attrib_index, u32 vertex_index) {
     return &attribute_data[attributes[attrib_index].offset +
                            attributes[attrib_index].stride * vertex_index];
   }
-
   u32 get_attribute_size(u32 index) const {
     return attributes[index].size * num_vertices;
   }
-
   float3 fetch_position(u32 index) {
     ito(attributes.size) {
       switch (attributes[i].type) {
@@ -567,7 +706,7 @@ struct Raw_Mesh_Opaque {
     }
     TRAP;
   }
-  Vertex_Full fetch_vertex(u32 index) {
+  Vertex_Full fetch_vertex(u32 index) const {
     Vertex_Full v;
     MEMZERO(v);
     ito(attributes.size) {
@@ -634,7 +773,7 @@ struct Raw_Mesh_Opaque {
     return v;
   }
 
-  Tri_Index get_tri_index(u32 id) {
+  Tri_Index get_tri_index(u32 id) const {
     Tri_Index o;
     if (index_type == rd::Index_t::UINT16) {
       o.i0 = (u32) * (u16 *)index_data.at(2 * (id * 3 + 0));
@@ -656,7 +795,7 @@ struct Raw_Mesh_Opaque {
       TRAP;
     }
   }
-  Triangle_Full fetch_triangle(u32 id) {
+  Triangle_Full fetch_triangle(u32 id) const {
     Tri_Index   tind = get_tri_index(id);
     Vertex_Full v0   = fetch_vertex(tind.i0);
     Vertex_Full v1   = fetch_vertex(tind.i1);
@@ -1092,18 +1231,13 @@ template <typename T> struct BVH {
 };
 
 struct Primitive {
-  Raw_Mesh_Opaque     mesh;
-  Raw_Meshlets_Opaque meshlets;
-  PBR_Material        material;
-  void                init() {
+  Raw_Mesh_Opaque mesh;
+  PBR_Material    material;
+  void            init() {
     mesh.init();
     material.init();
-    meshlets.init();
   }
-  void release() {
-    mesh.release();
-    meshlets.release();
-  }
+  void release() { mesh.release(); }
 };
 
 struct Mesh {
@@ -1122,13 +1256,11 @@ struct Mesh {
     ito(primitives.size) primitives[i].release();
     primitives.release();
   }
-  void add_primitive(Raw_Mesh_Opaque &mesh, Raw_Meshlets_Opaque &meshlets,
-                     PBR_Material &mat) {
+  void add_primitive(Raw_Mesh_Opaque &mesh, PBR_Material &mat) {
     Primitive p;
     p.init();
     p.mesh     = mesh;
     p.material = mat;
-    p.meshlets = meshlets;
     primitives.push(p);
   }
 };
@@ -1136,8 +1268,7 @@ struct Mesh {
 class MeshNode : public Node {
   protected:
   Mesh *mesh;
-
-  void init(string_ref name) {
+  void  init(string_ref name) {
     Node::init(name);
     mesh = NULL;
   }
@@ -1156,13 +1287,11 @@ class MeshNode : public Node {
     new_node->mesh = this->mesh;
     return new_node;
   }
-
   static u64 ID() {
     static char p;
     return (u64)(intptr_t)&p;
   }
-  u64 get_type_id() const override { return ID(); }
-
+  u64  get_type_id() const override { return ID(); }
   void release() override { Node::release(); }
 };
 
@@ -1178,7 +1307,10 @@ class IFactory {
   virtual u32       add_image(Image2D_Raw img)     = 0;
 };
 
-Node *      load_gltf_pbr(IFactory *factory, string_ref filename);
-Image2D_Raw load_image(string_ref filename,
-                       rd::Format format = rd::Format::RGBA8_SRGBA);
+Node *              load_gltf_pbr(IFactory *factory, string_ref filename);
+Raw_Mesh_Opaque     optimize_mesh(Raw_Mesh_Opaque const &opaque_mesh);
+Raw_Mesh_Opaque     simplify_mesh(Raw_Mesh_Opaque const &opaque_mesh);
+Raw_Meshlets_Opaque build_meshlets(Raw_Mesh_Opaque &opaque_mesh);
+Image2D_Raw         load_image(string_ref filename,
+                               rd::Format format = rd::Format::RGBA8_SRGBA);
 #endif // SCENE

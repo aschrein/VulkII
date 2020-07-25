@@ -262,6 +262,7 @@ VkFormat to_vk(rd::Format format) {
   case rd::Format::R32_FLOAT       : return VK_FORMAT_R32_SFLOAT          ;
   case rd::Format::D32_FLOAT       : return VK_FORMAT_D32_SFLOAT          ;
   case rd::Format::R32_UINT        : return VK_FORMAT_R32_UINT            ;
+  case rd::Format::R16_UINT        : return VK_FORMAT_R16_UINT            ;
   default: UNIMPLEMENTED;
   }
   // clang-format on
@@ -289,6 +290,7 @@ rd::Format from_vk(VkFormat format) {
   case VK_FORMAT_R32_SFLOAT          : return rd::Format::R32_FLOAT       ;
   case VK_FORMAT_D32_SFLOAT          : return rd::Format::D32_FLOAT       ;
   case VK_FORMAT_R32_UINT            : return rd::Format::R32_UINT        ;
+  case VK_FORMAT_R16_UINT            : return rd::Format::R16_UINT        ;
   default: UNIMPLEMENTED;
   }
   // clang-format on
@@ -2165,6 +2167,98 @@ struct Window {
     return res_id;
   }
 
+  Resource_ID create_shader_raw(rd::Stage_t type, string_ref body,
+                                Pair<string_ref, string_ref> *defines,
+                                size_t                        num_defines) {
+    u64 shader_hash = hash_of(body);
+    ito(num_defines) {
+      shader_hash ^= hash_of(defines[0].first) ^ hash_of(defines[0].second);
+    }
+    if (shader_cache.contains(shader_hash)) {
+      return {shader_cache.get(shader_hash), (u32)Resource_Type::SHADER};
+    }
+
+    String_Builder sb;
+    sb.init();
+    defer(sb.release());
+    sb.reset();
+    preprocess_shader(sb, body);
+    string_ref text = sb.get_str();
+
+    Shader_Info         si;
+    shaderc_shader_kind kind;
+    if (type == rd::Stage_t::VERTEX)
+      kind = shaderc_vertex_shader;
+    else if (type == rd::Stage_t::COMPUTE)
+      kind = shaderc_compute_shader;
+    else if (type == rd::Stage_t::PIXEL)
+      kind = shaderc_fragment_shader;
+    else
+      UNIMPLEMENTED;
+
+    si.init(type, shader_hash,
+            compile_glsl(device, text, kind, defines, num_defines));
+
+    ID shid = shaders.push(si);
+    shader_cache.insert(shader_hash, shid);
+    return {shid, (u32)Resource_Type::SHADER};
+  }
+  Resource_ID create_sampler(rd::Sampler_Create_Info const &info) {
+    Sampler sm;
+    sm.create_info = info;
+    VkSamplerCreateInfo cinfo;
+    MEMZERO(cinfo);
+    cinfo.sType                   = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    cinfo.addressModeU            = to_vk(info.address_mode_u);
+    cinfo.addressModeV            = to_vk(info.address_mode_v);
+    cinfo.addressModeW            = to_vk(info.address_mode_w);
+    cinfo.anisotropyEnable        = to_vk(info.anisotropy);
+    cinfo.compareEnable           = to_vk(info.cmp);
+    cinfo.compareOp               = to_vk(info.cmp_op);
+    cinfo.magFilter               = to_vk(info.mag_filter);
+    cinfo.minFilter               = to_vk(info.min_filter);
+    cinfo.maxAnisotropy           = info.max_anisotropy;
+    cinfo.minLod                  = info.min_lod;
+    cinfo.maxLod                  = info.max_lod;
+    cinfo.unnormalizedCoordinates = to_vk(info.unnormalized_coordiantes);
+    cinfo.mipLodBias              = info.mip_lod_bias;
+    cinfo.mipmapMode              = info.mip_mode == rd::Filter::LINEAR
+                           ? VK_SAMPLER_MIPMAP_MODE_LINEAR
+                           : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    VK_ASSERT_OK(vkCreateSampler(device, &cinfo, NULL, &sm.sampler));
+    ID id = samplers.push(sm);
+    return {id, (u32)Resource_Type::SAMPLER};
+  }
+  Resource_ID get_resource(string_ref res_name) {
+    if (named_resources.contains(res_name)) {
+      return named_resources.get(res_name);
+    }
+    return Resource_ID{0, 0};
+  }
+  rd::Image2D_Info get_swapchain_image_info() {
+    rd::Image2D_Info info;
+    MEMZERO(info);
+    Image &img  = images[sc_images[image_index]];
+    info.format = from_vk(img.info.format);
+    info.height = img.info.extent.height;
+    info.width  = img.info.extent.width;
+    info.layers = img.info.arrayLayers;
+    info.levels = img.info.mipLevels;
+    return info;
+  }
+  rd::Image_Info get_image_info(Resource_ID res_id) {
+    rd::Image_Info info;
+    MEMZERO(info);
+    Image &img    = images[res_id.id];
+    info.format   = from_vk(img.info.format);
+    info.height   = img.info.extent.height;
+    info.depth    = img.info.extent.depth;
+    info.width    = img.info.extent.width;
+    info.layers   = img.info.arrayLayers;
+    info.levels   = img.info.mipLevels;
+    info.is_depth = img.is_depth_image();
+    return info;
+  }
   void assign_name(Resource_ID res_id, string_ref name) {
     if (res_id.type == (u32)Resource_Type::IMAGE) {
       Image &img = images[res_id.id];
@@ -2273,8 +2367,8 @@ struct Window {
     VkPresentModeKHR present_mode_of_choice =
         VK_PRESENT_MODE_FIFO_KHR; // always supported.
     ito(num_present_modes) {
-      if (present_modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) { // prefer mailbox
-        present_mode_of_choice = VK_PRESENT_MODE_MAILBOX_KHR;
+      if (present_modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR) { // prefer mailbox
+        present_mode_of_choice = VK_PRESENT_MODE_IMMEDIATE_KHR;
         break;
       }
     }
@@ -3653,19 +3747,6 @@ class Vk_Ctx : public rd::Imm_Ctx {
     rb.storage_buffer.size = size;
     insert_binding(rb);
   }
-  rd::Image_Info get_image_info(Resource_ID res_id) override {
-    rd::Image_Info info;
-    MEMZERO(info);
-    Image &img    = wnd->images[res_id.id];
-    info.format   = from_vk(img.info.format);
-    info.height   = img.info.extent.height;
-    info.depth    = img.info.extent.depth;
-    info.width    = img.info.extent.width;
-    info.layers   = img.info.arrayLayers;
-    info.levels   = img.info.mipLevels;
-    info.is_depth = img.is_depth_image();
-    return info;
-  }
   void bind_image(u32 set, u32 binding, u32 index, Resource_ID image_id,
                   rd::Image_Subresource const &range,
                   rd::Format                   format) override {
@@ -3720,10 +3801,6 @@ class Vk_Ctx : public rd::Imm_Ctx {
       rb.image.format = to_vk(format);
     insert_binding(rb);
   }
-  void *map_buffer(Resource_ID res_id) override {
-    return wnd->map_buffer(res_id);
-  }
-  void unmap_buffer(Resource_ID res_id) override { wnd->unmap_buffer(res_id); }
   void push_constants(void const *data, size_t offset, size_t size) override {
     Deferred_Push_Constants pc;
     pc.offset = offset;
@@ -3918,6 +3995,45 @@ class Vk_Ctx : public rd::Imm_Ctx {
                            &_cv, 1, &r);
     }
   }
+  // IFactory methods
+  Resource_ID create_image(rd::Image_Create_Info info) override {
+    return wnd->create_image(info.width, info.height, info.depth, info.layers,
+                             info.levels, to_vk(info.format), info.usage_bits,
+                             info.mem_bits);
+  }
+  Resource_ID create_buffer(rd::Buffer_Create_Info info) override {
+    return wnd->create_buffer(info);
+  }
+  Resource_ID create_shader_raw(rd::Stage_t type, string_ref body,
+                                Pair<string_ref, string_ref> *defines,
+                                size_t num_defines) override {
+
+    return wnd->create_shader_raw(type, body, defines, num_defines);
+  }
+  void *map_buffer(Resource_ID res_id) override {
+    return wnd->map_buffer(res_id);
+  }
+  void unmap_buffer(Resource_ID res_id) override { wnd->unmap_buffer(res_id); }
+  Resource_ID create_sampler(rd::Sampler_Create_Info const &info) override {
+    return wnd->create_sampler(info);
+  }
+  void release_resource(Resource_ID id) override { wnd->release_resource(id); }
+  Resource_ID get_resource(string_ref res_name) override {
+    return wnd->get_resource(res_name);
+  }
+  void assign_name(Resource_ID res_id, string_ref name) override {
+    wnd->assign_name(res_id, name);
+  }
+  Resource_ID get_swapchain_image() override {
+    return {wnd->sc_images[wnd->image_index], (u32)Resource_Type::IMAGE};
+  }
+  rd::Image2D_Info get_swapchain_image_info() override {
+
+    return wnd->get_swapchain_image_info();
+  }
+  rd::Image_Info get_image_info(Resource_ID res_id) override {
+    return wnd->get_image_info(res_id);
+  }
 };
 
 struct String_Pool {
@@ -3967,7 +4083,7 @@ struct Pass_Cache {
   Get_Or_Create_RT                    depth_target;
 };
 
-class VkResource_Manager : public rd::IResource_Manager {
+class VkResource_Manager : public rd::IPass_Context {
   rd::Pass_t  type;
   Window *    wnd;
   ID          cached_pass;
@@ -4262,50 +4378,7 @@ class VkResource_Manager : public rd::IResource_Manager {
     }
     return cached_pass;
   }
-  Resource_ID create_image(rd::Image_Create_Info info) override {
-    return wnd->create_image(info.width, info.height, info.depth, info.layers,
-                             info.levels, to_vk(info.format), info.usage_bits,
-                             info.mem_bits);
-  }
-  Resource_ID create_buffer(rd::Buffer_Create_Info info) override {
-    return wnd->create_buffer(info);
-  }
-  Resource_ID create_shader_raw(rd::Stage_t type, string_ref body,
-                                Pair<string_ref, string_ref> *defines,
-                                size_t num_defines) override {
-    u64 shader_hash = hash_of(body);
-    ito(num_defines) {
-      shader_hash ^= hash_of(defines[0].first) ^ hash_of(defines[0].second);
-    }
-    if (wnd->shader_cache.contains(shader_hash)) {
-      return {wnd->shader_cache.get(shader_hash), (u32)Resource_Type::SHADER};
-    }
 
-    String_Builder sb;
-    sb.init();
-    defer(sb.release());
-    sb.reset();
-    preprocess_shader(sb, body);
-    string_ref text = sb.get_str();
-
-    Shader_Info         si;
-    shaderc_shader_kind kind;
-    if (type == rd::Stage_t::VERTEX)
-      kind = shaderc_vertex_shader;
-    else if (type == rd::Stage_t::COMPUTE)
-      kind = shaderc_compute_shader;
-    else if (type == rd::Stage_t::PIXEL)
-      kind = shaderc_fragment_shader;
-    else
-      UNIMPLEMENTED;
-
-    si.init(type, shader_hash,
-            compile_glsl(wnd->device, text, kind, defines, num_defines));
-
-    ID shid = wnd->shaders.push(si);
-    wnd->shader_cache.insert(shader_hash, shid);
-    return {shid, (u32)Resource_Type::SHADER};
-  }
   void *      get_window_handle() override { return (void *)wnd->window; }
   Resource_ID get_fence(rd::Fence_Position position) override {
     if (position == rd::Fence_Position::PASS_FINISED) {
@@ -4314,33 +4387,7 @@ class VkResource_Manager : public rd::IResource_Manager {
       UNIMPLEMENTED;
     }
   }
-  Resource_ID create_sampler(rd::Sampler_Create_Info const &info) override {
-    Sampler sm;
-    sm.create_info = info;
-    VkSamplerCreateInfo cinfo;
-    MEMZERO(cinfo);
-    cinfo.sType                   = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    cinfo.addressModeU            = to_vk(info.address_mode_u);
-    cinfo.addressModeV            = to_vk(info.address_mode_v);
-    cinfo.addressModeW            = to_vk(info.address_mode_w);
-    cinfo.anisotropyEnable        = to_vk(info.anisotropy);
-    cinfo.compareEnable           = to_vk(info.cmp);
-    cinfo.compareOp               = to_vk(info.cmp_op);
-    cinfo.magFilter               = to_vk(info.mag_filter);
-    cinfo.minFilter               = to_vk(info.min_filter);
-    cinfo.maxAnisotropy           = info.max_anisotropy;
-    cinfo.minLod                  = info.min_lod;
-    cinfo.maxLod                  = info.max_lod;
-    cinfo.unnormalizedCoordinates = to_vk(info.unnormalized_coordiantes);
-    cinfo.mipLodBias              = info.mip_lod_bias;
-    cinfo.mipmapMode              = info.mip_mode == rd::Filter::LINEAR
-                           ? VK_SAMPLER_MIPMAP_MODE_LINEAR
-                           : VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    VK_ASSERT_OK(vkCreateSampler(wnd->device, &cinfo, NULL, &sm.sampler));
-    ID id = wnd->samplers.push(sm);
-    return {id, (u32)Resource_Type::SAMPLER};
-  }
-  void release_resource(Resource_ID id) override { wnd->release_resource(id); }
+
   void add_render_target(string_ref name, rd::Image_Create_Info const &info,
                          u32 layer, u32 level,
                          rd::Clear_Color const &cl) override {
@@ -4399,11 +4446,30 @@ class VkResource_Manager : public rd::IResource_Manager {
     gorc.is_id       = true;
     depth_target     = gorc;
   }
+  Resource_ID create_image(rd::Image_Create_Info info) override {
+    return wnd->create_image(info.width, info.height, info.depth, info.layers,
+                             info.levels, to_vk(info.format), info.usage_bits,
+                             info.mem_bits);
+  }
+  Resource_ID create_buffer(rd::Buffer_Create_Info info) override {
+    return wnd->create_buffer(info);
+  }
+  Resource_ID create_shader_raw(rd::Stage_t type, string_ref body,
+                                Pair<string_ref, string_ref> *defines,
+                                size_t num_defines) override {
+
+    return wnd->create_shader_raw(type, body, defines, num_defines);
+  }
+  void *map_buffer(Resource_ID res_id) override {
+    return wnd->map_buffer(res_id);
+  }
+  void unmap_buffer(Resource_ID res_id) override { wnd->unmap_buffer(res_id); }
+  Resource_ID create_sampler(rd::Sampler_Create_Info const &info) override {
+    return wnd->create_sampler(info);
+  }
+  void release_resource(Resource_ID id) override { wnd->release_resource(id); }
   Resource_ID get_resource(string_ref res_name) override {
-    if (wnd->named_resources.contains(res_name)) {
-      return wnd->named_resources.get(res_name);
-    }
-    return Resource_ID{0, 0};
+    return wnd->get_resource(res_name);
   }
   void assign_name(Resource_ID res_id, string_ref name) override {
     wnd->assign_name(res_id, name);
@@ -4412,28 +4478,11 @@ class VkResource_Manager : public rd::IResource_Manager {
     return {wnd->sc_images[wnd->image_index], (u32)Resource_Type::IMAGE};
   }
   rd::Image2D_Info get_swapchain_image_info() override {
-    rd::Image2D_Info info;
-    MEMZERO(info);
-    Image &img  = wnd->images[wnd->sc_images[wnd->image_index]];
-    info.format = from_vk(img.info.format);
-    info.height = img.info.extent.height;
-    info.width  = img.info.extent.width;
-    info.layers = img.info.arrayLayers;
-    info.levels = img.info.mipLevels;
-    return info;
+
+    return wnd->get_swapchain_image_info();
   }
   rd::Image_Info get_image_info(Resource_ID res_id) override {
-    rd::Image_Info info;
-    MEMZERO(info);
-    Image &img    = wnd->images[res_id.id];
-    info.format   = from_vk(img.info.format);
-    info.height   = img.info.extent.height;
-    info.depth    = img.info.extent.depth;
-    info.width    = img.info.extent.width;
-    info.layers   = img.info.arrayLayers;
-    info.levels   = img.info.mipLevels;
-    info.is_depth = img.is_depth_image();
-    return info;
+    return wnd->get_image_info(res_id);
   }
 };
 

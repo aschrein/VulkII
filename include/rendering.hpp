@@ -59,6 +59,7 @@ enum class Format : u32 {
   RG32_FLOAT,
   R32_FLOAT,
   R32_UINT,
+  R16_UINT,
   D32_FLOAT,
 };
 
@@ -82,6 +83,7 @@ static inline char const *format_to_cstr(Format format) {
       case Format::RG32_FLOAT  : return "RG32_FLOAT";
       case Format::R32_FLOAT   : return "R32_FLOAT";
       case Format::R32_UINT    : return "R32_UINT";
+      case Format::R16_UINT    : return "R16_UINT";
       case Format::D32_FLOAT   : return "D32_FLOAT";
   // clang-format on
   default: TRAP;
@@ -241,6 +243,10 @@ enum class Attriute_t {
   TEXCOORD1,
   TEXCOORD2,
   TEXCOORD3,
+  TEXCOORD4,
+  TEXCOORD5,
+  TEXCOORD6,
+  TEXCOORD7,
 };
 
 struct Attribute_Info {
@@ -325,7 +331,25 @@ struct Image_Copy_Dst {
   }
 };
 
-class Imm_Ctx {
+class IFactory {
+  public:
+  virtual Resource_ID  create_image(Image_Create_Info info)             = 0;
+  virtual Resource_ID  create_buffer(Buffer_Create_Info info)           = 0;
+  virtual Resource_ID  create_shader_raw(Stage_t type, string_ref text,
+                                         Pair<string_ref, string_ref> *defines,
+                                         size_t num_defines)            = 0;
+  virtual Resource_ID  create_sampler(Sampler_Create_Info const &info)  = 0;
+  virtual void         release_resource(Resource_ID id)                 = 0;
+  virtual Resource_ID  get_resource(string_ref res_name)                = 0;
+  virtual void         assign_name(Resource_ID res_id, string_ref name) = 0;
+  virtual Resource_ID  get_swapchain_image()                            = 0;
+  virtual Image2D_Info get_swapchain_image_info()                       = 0;
+  virtual Image_Info   get_image_info(Resource_ID res_id)               = 0;
+  virtual void *       map_buffer(Resource_ID id)                       = 0;
+  virtual void         unmap_buffer(Resource_ID id)                     = 0;
+};
+
+class Imm_Ctx : public IFactory {
   public:
   ////////////////////////////
   // Immediate mode context //
@@ -367,8 +391,6 @@ class Imm_Ctx {
   virtual void bind_rw_image(u32 set, u32 binding, u32 index,
                              Resource_ID              image_id,
                              Image_Subresource const &range, Format format) = 0;
-  virtual void *map_buffer(Resource_ID id)                                  = 0;
-  virtual void  unmap_buffer(Resource_ID id)                                = 0;
   virtual void push_constants(void const *data, size_t offset, size_t size) = 0;
   virtual void draw_indexed(u32 indices, u32 instances, u32 first_index,
                             u32 first_instance, i32 vertex_offset)          = 0;
@@ -406,7 +428,7 @@ enum class Fence_Position { PASS_FINISED };
 
 class IPass;
 
-class IResource_Manager {
+class IPass_Context : public IFactory {
   public:
   static constexpr u32 BUFFER_ALIGNMENT = 0x100;
   static size_t        align_up(size_t size) {
@@ -415,43 +437,32 @@ class IResource_Manager {
   static size_t align_down(size_t size) {
     return (size) & ~(BUFFER_ALIGNMENT - 1);
   }
-  virtual IPass *     get_pass(string_ref name)                         = 0;
-  virtual double      get_pass_duration(string_ref name)                = 0;
-  virtual Resource_ID create_image(Image_Create_Info info)              = 0;
-  virtual Resource_ID create_buffer(Buffer_Create_Info info)            = 0;
-  virtual Resource_ID create_shader_raw(Stage_t type, string_ref text,
-                                        Pair<string_ref, string_ref> *defines,
-                                        size_t num_defines)             = 0;
-  virtual Resource_ID create_sampler(Sampler_Create_Info const &info)   = 0;
-  virtual void        release_resource(Resource_ID id)                  = 0;
   virtual void add_render_target(string_ref name, Image_Create_Info const &info,
                                  u32 layer, u32 level,
-                                 Clear_Color const &cl)                 = 0;
+                                 Clear_Color const &cl) = 0;
   virtual void add_render_target(Resource_ID id, u32 layer, u32 level,
-                                 Clear_Color const &cl)                 = 0;
+                                 Clear_Color const &cl) = 0;
   virtual void add_depth_target(string_ref name, Image_Create_Info const &info,
                                 u32 layer, u32 level,
-                                Clear_Depth const &cl)                  = 0;
+                                Clear_Depth const &cl)  = 0;
   virtual void add_depth_target(Resource_ID id, u32 layer, u32 level,
-                                Clear_Depth const &cl)                  = 0;
-  virtual Resource_ID  get_resource(string_ref res_name)                = 0;
-  virtual void         assign_name(Resource_ID res_id, string_ref name) = 0;
-  virtual Resource_ID  get_swapchain_image()                            = 0;
-  virtual Resource_ID  get_fence(Fence_Position position)               = 0;
-  virtual Image2D_Info get_swapchain_image_info()                       = 0;
-  virtual Image_Info   get_image_info(Resource_ID res_id)               = 0;
-  virtual void *       get_window_handle()                              = 0;
+                                Clear_Depth const &cl)  = 0;
+
+  virtual Resource_ID get_fence(Fence_Position position) = 0;
+  virtual void *      get_window_handle()                = 0;
+  virtual IPass *     get_pass(string_ref name)          = 0;
+  virtual double      get_pass_duration(string_ref name) = 0;
 };
 
 enum class Pass_t { COMPUTE, RENDER };
 
 class IPass {
   public:
-  virtual void       on_begin(IResource_Manager *rm) = 0;
-  virtual void       exec(rd::Imm_Ctx *ctx)          = 0;
-  virtual void       on_end(IResource_Manager *rm)   = 0;
-  virtual void       release(IResource_Manager *rm)  = 0;
-  virtual string_ref get_name()                      = 0;
+  virtual void       on_begin(IPass_Context *rm) = 0;
+  virtual void       exec(rd::Imm_Ctx *ctx)      = 0;
+  virtual void       on_end(IPass_Context *rm)   = 0;
+  virtual void       release(IPass_Context *rm)  = 0;
+  virtual string_ref get_name()                  = 0;
 };
 
 class IEvent_Consumer {

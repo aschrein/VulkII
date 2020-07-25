@@ -10,7 +10,9 @@
 
 #include <meshoptimizer.h>
 
-void optimize_mesh(Raw_Mesh_Opaque &opaque_mesh) {
+Raw_Mesh_Opaque optimize_mesh(Raw_Mesh_Opaque const &opaque_mesh) {
+  Raw_Mesh_Opaque out;
+  out.init();
   // ASSERT_ALWAYS(opaque_mesh.index_type == rd::Index_t::UINT32);
   u32        index_count = opaque_mesh.num_indices;
   Array<u32> indices;
@@ -52,13 +54,11 @@ void optimize_mesh(Raw_Mesh_Opaque &opaque_mesh) {
   meshopt_optimizeVertexFetch(&vertices[0], &indices[0], index_count,
                               &vertices[0], vertex_count, sizeof(Vertex_Full));
 
-  opaque_mesh.attribute_data.release();
-  opaque_mesh.index_type = rd::Index_t::UINT32;
-  opaque_mesh.index_data.release();
-  opaque_mesh.index_data.resize(indices.size * 4);
+  out.index_type = rd::Index_t::UINT32;
+  out.index_data.resize(indices.size * 4);
   ito(indices.size) {
     u32 index = indices[i];
-    memcpy(&opaque_mesh.index_data[i * 4], &index, 4);
+    memcpy(&out.index_data[i * 4], &index, 4);
   }
   InlineArray<size_t, 16> attribute_offsets;
   InlineArray<size_t, 16> attribute_sizes;
@@ -75,7 +75,7 @@ void optimize_mesh(Raw_Mesh_Opaque &opaque_mesh) {
     jto(i) attribute_offsets[i] += attribute_sizes[j];
     total_mem = attribute_offsets[i] + attribute_sizes[i];
   }
-  opaque_mesh.attribute_data.resize(total_mem);
+  out.attribute_data.resize(total_mem);
   ito(vertices.size) {
     Vertex_Full v = vertices[i];
     jto(opaque_mesh.attributes.size) {
@@ -87,10 +87,33 @@ void optimize_mesh(Raw_Mesh_Opaque &opaque_mesh) {
     }
   }
   ito(opaque_mesh.attributes.size) {
-    opaque_mesh.attributes[i].offset = attribute_offsets[i];
+    out.attributes[i].offset = attribute_offsets[i];
   }
-  opaque_mesh.num_indices  = indices.size;
-  opaque_mesh.num_vertices = vertices.size;
+  out.num_indices  = indices.size;
+  out.num_vertices = vertices.size;
+  return out;
+}
+
+Raw_Mesh_Opaque simplify_mesh(Raw_Mesh_Opaque const &opaque_mesh) {
+  Raw_Mesh_Opaque out;
+  out.init();
+  u32        index_count = opaque_mesh.num_indices;
+  Array<u32> indices;
+  indices.init();
+  defer(indices.release());
+  indices.resize(opaque_mesh.num_indices);
+  Array<u32> remap;
+  remap.init();
+  remap.resize(opaque_mesh.num_indices);
+  defer(remap.release());
+  Array<u8> vertex_blob;
+  vertex_blob.init();
+  vertex_blob.resize(opaque_mesh.num_indices * sizeof(Vertex_Full));
+
+  defer(vertex_blob.release());
+
+  //meshopt_simplify(&indices[0], &opaque_mesh.index_data[0]
+  return out;
 }
 
 Raw_Meshlets_Opaque build_meshlets(Raw_Mesh_Opaque &opaque_mesh) {
@@ -255,8 +278,8 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
   ASSERT_ALWAYS(
       cgltf_load_buffers(&options, data, stref_to_tmp_cstr(filename)) ==
       cgltf_result_success);
-  Hash_Table<string_ref, i32>   loaded_textures;
-  Hash_Table<cgltf_mesh *, Mesh*> mesh_table;
+  Hash_Table<string_ref, i32>      loaded_textures;
+  Hash_Table<cgltf_mesh *, Mesh *> mesh_table;
   loaded_textures.init();
   mesh_table.init();
   defer(loaded_textures.release());
@@ -414,8 +437,8 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
           ito(attribute->data->count) {
             float pos[3];
             cgltf_accessor_read_float(attribute->data, i, pos, 3);
-            pos[0] *= -0.04f;
-            pos[1] *= -0.04f;
+            pos[0] *= 0.04f;
+            pos[1] *= 0.04f;
             pos[2] *= 0.04f;
             opaque_mesh.max.x = MAX(opaque_mesh.max.x, pos[0]);
             opaque_mesh.max.y = MAX(opaque_mesh.max.y, pos[1]);
@@ -507,9 +530,7 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
         }
       }
       opaque_mesh.sort_attributes();
-      optimize_mesh(opaque_mesh);
-      Raw_Meshlets_Opaque meshlets = build_meshlets(opaque_mesh);
-      mymesh->add_primitive(opaque_mesh, meshlets, pbrmat);
+      mymesh->add_primitive(opaque_mesh, pbrmat);
     }
   }
   Hash_Table<cgltf_node *, Node *> node_indices;
@@ -523,11 +544,11 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
     if (node->mesh != NULL) {
       MeshNode *mnode = factory->add_mesh_node(stref_s(node->name));
       ASSERT_ALWAYS(mesh_table.contains(node->mesh));
-      Mesh *mesh= mesh_table.get(node->mesh);
+      Mesh *mesh = mesh_table.get(node->mesh);
       mnode->set_mesh(mesh);
       tnode = mnode;
     } else {
-      tnode = factory->add_node(stref_s(node->name));  
+      tnode = factory->add_node(stref_s(node->name));
     }
     if (node->has_translation) {
       tnode->offset = float3(node->translation[0], node->translation[1],
