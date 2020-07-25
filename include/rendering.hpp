@@ -182,8 +182,6 @@ struct RS_State {
   Polygon_Mode polygon_mode;
   Front_Face   front_face;
   Cull_Mode    cull_mode;
-  float        line_width;
-  float        depth_bias;
 };
 
 struct DS_State {
@@ -362,6 +360,8 @@ class Imm_Ctx : public IFactory {
                              Image_Layout layout)                      = 0;
   virtual void buffer_barrier(Resource_ID buf_id, u32 access_flags)    = 0;
   virtual bool get_fence_state(Resource_ID fence_id)                   = 0;
+  virtual void RS_set_line_width(float width)                          = 0;
+  virtual void RS_set_depth_bias(float b)                              = 0;
   virtual void IA_set_topology(Primitive topology)                     = 0;
   virtual void IA_set_index_buffer(Resource_ID id, u32 offset,
                                    Index_t format)                     = 0;

@@ -481,6 +481,10 @@ static inline uint64_t hash_of(uint64_t u) {
   return v;
 }
 
+template <> inline u64 hash_of(Pair<u32, u32> const &item) {
+  return hash_of((u64)item.first | ((u64)item.second << 32ull));
+}
+
 template <typename T> static void swap(T &a, T &b) {
   T c = a;
   a   = b;
@@ -1108,15 +1112,16 @@ struct Hash_Set {
     if (item_count == 0) return -1;
     uint64_t key_hash = hash_of(key);
     uint64_t hash     = key_hash;
-    uint64_t size     = arr.capacity;
+    ASSERT_DEBUG(hash != 0);
+    uint64_t size = arr.capacity;
     if (size == 0) return -1;
     uint32_t attempt_id = 0;
     for (; attempt_id < MAX_ATTEMPTS; ++attempt_id) {
-      uint64_t id = hash % size;
-      if (hash != 0) {
-        if (arr.ptr[id].hash == key_hash && arr.ptr[id].key == key) {
-          return (i32)id;
-        }
+      uint64_t id = (hash) % size;
+      /*if (arr.ptr[id].hash == 0)
+        return -1;*/
+      if (arr.ptr[id].hash == key_hash && arr.ptr[id].key == key) {
+        return (i32)id;
       }
       hash = hash_of(hash);
     }
@@ -1126,7 +1131,8 @@ struct Hash_Set {
   bool try_insert(K key) {
     uint64_t key_hash = hash_of(key);
     uint64_t hash     = key_hash;
-    uint64_t size     = arr.capacity;
+    ASSERT_DEBUG(hash != 0);
+    uint64_t size = arr.capacity;
     if (size == 0) {
       arr.resize(grow_k);
       arr.memzero();
@@ -1136,20 +1142,19 @@ struct Hash_Set {
     pair.key  = key;
     pair.hash = key_hash;
     for (uint32_t attempt_id = 0; attempt_id < MAX_ATTEMPTS; ++attempt_id) {
-      uint64_t id = hash % size;
-      if (hash != 0) {
-        if (arr.ptr[id].hash == 0) { // Empty slot
-          arr.ptr[id] = pair;
-          item_count += 1;
-          return true;
-        } else if (arr.ptr[id].hash == key_hash &&
-                   arr.ptr[id].key == key) { // Override
-          arr.ptr[id] = pair;
-          return true;
-        } else { // collision
-          (void)0;
-        }
+      uint64_t id = (hash) % size;
+      if (arr.ptr[id].hash == 0) { // Empty slot
+        arr.ptr[id] = pair;
+        item_count += 1;
+        return true;
+      } else if (arr.ptr[id].hash == key_hash &&
+                 arr.ptr[id].key == key) { // Override
+        arr.ptr[id] = pair;
+        return true;
+      } else { // collision
+        (void)0;
       }
+
       hash = hash_of(hash);
     }
     return false;

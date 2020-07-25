@@ -1080,12 +1080,11 @@ struct Graphics_Pipeline_State {
     MEMZERO(rs_create_info);
     rs_create_info.sType =
         VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-    rs_create_info.cullMode                = to_vk(rs_state.cull_mode);
-    rs_create_info.frontFace               = to_vk(rs_state.front_face);
-    rs_create_info.lineWidth               = rs_state.line_width;
-    rs_create_info.polygonMode             = to_vk(rs_state.polygon_mode);
-    rs_create_info.depthBiasEnable         = rs_state.depth_bias != 0.0f;
-    rs_create_info.depthBiasConstantFactor = rs_state.depth_bias;
+    rs_create_info.cullMode        = to_vk(rs_state.cull_mode);
+    rs_create_info.frontFace       = to_vk(rs_state.front_face);
+    rs_create_info.lineWidth       = 1.0f;
+    rs_create_info.polygonMode     = to_vk(rs_state.polygon_mode);
+    rs_create_info.depthBiasEnable = true;
     return rs_create_info;
   }
   VkPipelineMultisampleStateCreateInfo get_ms_create_info() {
@@ -1442,6 +1441,8 @@ struct Graphics_Pipeline_Wrapper : public Slot {
       VkDynamicState dynamic_states[] = {
           VK_DYNAMIC_STATE_VIEWPORT,
           VK_DYNAMIC_STATE_SCISSOR,
+          VK_DYNAMIC_STATE_DEPTH_BIAS,
+          VK_DYNAMIC_STATE_LINE_WIDTH,
       };
       VkPipelineDynamicStateCreateInfo dy_create_info;
       MEMZERO(dy_create_info);
@@ -2878,6 +2879,8 @@ class Vk_Ctx : public rd::Imm_Ctx {
     InlineArray<VBO_Binding, 8>     vbos;
     IBO_Binding                     ibo;
     Type                            type;
+    float                           depth_bias;
+    float                           line_width;
     union {
       struct {
         u32 index_count;
@@ -2901,7 +2904,10 @@ class Vk_Ctx : public rd::Imm_Ctx {
         u32 stride;
       } multi_draw_indexed_indirect;
     };
-    void reset() { memset(this, 0, sizeof(*this)); }
+    void reset() {
+      memset(this, 0, sizeof(*this));
+      line_width = 1.0f;
+    }
   };
 
   struct Deferred_Dispatch {
@@ -3110,8 +3116,12 @@ class Vk_Ctx : public rd::Imm_Ctx {
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                         wnd->query_pool, timestamp_begin_id);
     vkCmdBeginRenderPass(cmd, &binfo, VK_SUBPASS_CONTENTS_INLINE);
-    u8  pcs[128];
-    u32 pc_dirty_range = 0;
+    u8    pcs[128];
+    u32   pc_dirty_range = 0;
+    float line_width     = 1.0f;
+    float depth_bias     = 0.0f;
+    vkCmdSetDepthBias(cmd, depth_bias, 0.0f, 0.0f);
+    vkCmdSetLineWidth(cmd, line_width);
     while (cpu_cmd.has_data()) {
       Cmd_t type = cpu_cmd.read_cmd_type();
       if (type == Cmd_t::PUSH_CONSTANTS) {
@@ -3136,6 +3146,14 @@ class Vk_Ctx : public rd::Imm_Ctx {
           vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                   gw.pipeline_layout, 0, dd.sets.size,
                                   &dd.sets[0], 0, NULL);
+        if (depth_bias != dd.depth_bias) {
+          vkCmdSetDepthBias(cmd, dd.depth_bias, 1.0f, 0.0f);
+          depth_bias = dd.depth_bias;
+        }
+        if (line_width != 0.0f && line_width != dd.line_width) {
+          vkCmdSetLineWidth(cmd, dd.line_width);
+          line_width = dd.line_width;
+        }
         jto(dd.vbos.size) {
           vkCmdBindVertexBuffers(cmd, j, 1, &dd.vbos[j].buffer,
                                  &dd.vbos[j].offset);
@@ -3686,6 +3704,10 @@ class Vk_Ctx : public rd::Imm_Ctx {
     ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
     graphics_state.ms_state = ms_state;
   }
+  void RS_set_line_width(float width) override {
+    current_draw.line_width = width;
+  }
+  void RS_set_depth_bias(float b) override { current_draw.depth_bias = b; }
   void OM_set_blend_state(u32 rt_index, rd::Blend_State const &bl) override {
     ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
     graphics_state.num_rts = MAX(graphics_state.num_rts, rt_index + 1);

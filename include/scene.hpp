@@ -453,9 +453,10 @@ static Raw_Mesh_3p16i subdivide_cylinder(uint32_t level, float radius,
                                 radius * std::sin(angle), length};
   }
   for (u32 i = 0; i < level; i++) {
-    out.indices.push(u16_face{(u16)i, (u16)(i + level), (u16)((i + 1) % level)});
     out.indices.push(
-        u16_face{(u16)((i + 1) % level), (u16)(i + level), (u16)(((i + 1) % level) + level)});
+        u16_face{(u16)i, (u16)(i + level), (u16)((i + 1) % level)});
+    out.indices.push(u16_face{(u16)((i + 1) % level), (u16)(i + level),
+                              (u16)(((i + 1) % level) + level)});
   }
   return out;
 }
@@ -542,9 +543,9 @@ static Raw_Mesh_3p16i subdivide_cone(uint32_t level, float radius,
   out.positions[0] = {0.0f, 0.0f, 0.0f};
   out.positions[1] = {0.0f, 0.0f, length};
   for (u32 i = 0; i < level; i++) {
-    float angle      = step * i;
+    float angle          = step * i;
     out.positions[i + 2] = {radius * std::cos(angle), radius * std::sin(angle),
-                        0.0f};
+                            0.0f};
   }
   for (u32 i = 0; i < level; i++) {
     out.indices.push(
@@ -644,7 +645,35 @@ struct Raw_Mesh_Opaque {
   u32                        num_indices;
   float3                     min;
   float3                     max;
-  bool                       is_compatible(Raw_Mesh_Opaque const &that) const {
+  u32                        id;
+
+  static u32 gen_id() {
+    static u32 _id = 1;
+    return _id++;
+  }
+  u32 get_vertex_size() const {
+    u32 size = 0;
+    ito(attributes.size) { size += attributes[i].size; }
+    return size;
+  }
+  void write_vertex(void *dst, u32 index) const {
+    u32 offset = 0;
+    ito(attributes.size) {
+      memcpy((u8 *)dst + offset,
+             &attribute_data[0] + attributes[i].offset +
+                 attributes[i].stride * index,
+             attributes[i].size);
+      offset += attributes[i].size;
+    }
+  }
+  void flatten(void *dst) {
+    u32 vertex_stride = get_vertex_size();
+    ito(num_indices) {
+      u32 index = fetch_index(i);
+      write_vertex((u8 *)dst + vertex_stride * i, index);
+    }
+  }
+  bool is_compatible(Raw_Mesh_Opaque const &that) const {
     if (attributes.size != that.attributes.size ||
         index_type != that.index_type)
       return false;
@@ -670,6 +699,7 @@ struct Raw_Mesh_Opaque {
     attributes.init();
     attribute_data.init();
     index_data.init();
+    id = gen_id();
   }
   void release() {
     attributes.release();
@@ -689,7 +719,7 @@ struct Raw_Mesh_Opaque {
   u32 get_attribute_size(u32 index) const {
     return attributes[index].size * num_vertices;
   }
-  float3 fetch_position(u32 index) {
+  float3 fetch_position(u32 index) const {
     ito(attributes.size) {
       switch (attributes[i].type) {
 
@@ -771,6 +801,14 @@ struct Raw_Mesh_Opaque {
       }
     }
     return v;
+  }
+
+  u32 fetch_index(u32 index) {
+    if (index_type == rd::Index_t::UINT16) {
+      return (u32) * (u16 *)index_data.at(2 * index);
+    } else {
+      return (u32) * (u32 *)index_data.at(4 * index);
+    }
   }
 
   Tri_Index get_tri_index(u32 id) const {
@@ -1261,6 +1299,7 @@ struct Mesh {
     p.init();
     p.mesh     = mesh;
     p.material = mat;
+
     primitives.push(p);
   }
 };

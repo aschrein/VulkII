@@ -79,7 +79,7 @@ Raw_Mesh_Opaque optimize_mesh(Raw_Mesh_Opaque const &opaque_mesh) {
   ito(vertices.size) {
     Vertex_Full v = vertices[i];
     jto(opaque_mesh.attributes.size) {
-      memcpy(opaque_mesh.attribute_data.ptr + attribute_offsets[j] +
+      memcpy(out.attribute_data.ptr + attribute_offsets[j] +
                  attribute_cursors[j],
              v.get_attribute(opaque_mesh.attributes[j].type),
              opaque_mesh.attributes[j].size);
@@ -87,10 +87,15 @@ Raw_Mesh_Opaque optimize_mesh(Raw_Mesh_Opaque const &opaque_mesh) {
     }
   }
   ito(opaque_mesh.attributes.size) {
+    out.attributes.push(opaque_mesh.attributes[i]);
+  }
+  ito(opaque_mesh.attributes.size) {
     out.attributes[i].offset = attribute_offsets[i];
   }
   out.num_indices  = indices.size;
   out.num_vertices = vertices.size;
+  out.min = opaque_mesh.min;
+  out.max = opaque_mesh.max;
   return out;
 }
 
@@ -310,8 +315,10 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
       // Load material
       PBR_Material pbrmat;
       pbrmat.init();
-      {
+      do {
         cgltf_material *material = primitive->material;
+        if (material == NULL)
+          break;
         ASSERT_ALWAYS(material->extensions_count == 0);
 
         if (material->has_pbr_metallic_roughness) {
@@ -358,7 +365,7 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
           pbrmat.normal_id =
               load_texture(material->normal_texture.texture->image->uri,
                            rd::Format::RGBA8_UNORM);
-      }
+      } while(0);
       Raw_Mesh_Opaque opaque_mesh;
       opaque_mesh.init();
       // Read indices

@@ -645,7 +645,7 @@ public:
   void load_mesh(string_ref name, string_ref path) {
     SceneFactory sf(this);
     root->add_child(
-        load_gltf_pbr(&sf, path) // stref_s("models/light/scene_low.gltf"))
+        load_gltf_pbr(&sf, path)
             ->rename(name));
   }
 
@@ -887,8 +887,6 @@ static void setup_default_state(rd::Imm_Ctx *ctx, u32 num_rts = 1) {
   rs_state.polygon_mode = rd::Polygon_Mode::FILL;
   rs_state.front_face   = rd::Front_Face::CW;
   rs_state.cull_mode    = rd::Cull_Mode::NONE;
-  rs_state.line_width   = 1.0f;
-  rs_state.depth_bias   = 0.0f;
   ctx->RS_set_state(rs_state);
   rd::DS_State ds_state;
   MEMZERO(ds_state);
@@ -1886,8 +1884,6 @@ class Gizmo_Layer {
       rs_state.polygon_mode = rd::Polygon_Mode::FILL;
       rs_state.front_face   = rd::Front_Face::CW;
       rs_state.cull_mode    = rd::Cull_Mode::NONE;
-      rs_state.line_width   = 1.0f;
-      rs_state.depth_bias   = 0.0f;
       ctx->RS_set_state(rs_state);
       u32                    cylinder_offset = 0;
       u32                    num_cylinders   = cylinder_draw_cmds.size;
@@ -1953,14 +1949,8 @@ class Gizmo_Layer {
     if (line_segments.size != 0) {
       ctx->push_state();
       defer(ctx->pop_state());
-      rd::RS_State rs_state;
-      MEMZERO(rs_state);
-      rs_state.polygon_mode = rd::Polygon_Mode::FILL;
-      rs_state.front_face   = rd::Front_Face::CW;
-      rs_state.cull_mode    = rd::Cull_Mode::NONE;
-      rs_state.line_width   = 2.0f;
-      rs_state.depth_bias   = 0.0f;
-      ctx->RS_set_state(rs_state);
+      ctx->RS_set_line_width(4.2f);
+      ctx->RS_set_depth_bias(-30.0f);
 
       rd::Buffer_Create_Info buf_info;
       MEMZERO(buf_info);
