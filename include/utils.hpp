@@ -623,9 +623,16 @@ template <int N> struct inline_string {
 };
 
 template <int N>
-static inline bool operator==(inline_string<N> a, inline_string<N> b) {
+static inline bool operator==(inline_string<N> const &a,
+                              inline_string<N> const &b) {
   if (a.len() != b.len()) return false;
   return strncmp(a.buf, b.buf, a.len()) == 0 ? true : false;
+}
+
+template <int N>
+static inline bool operator!=(inline_string<N> const &a,
+                              inline_string<N> const &b) {
+  return !(a == b);
 }
 
 struct string {

@@ -140,7 +140,7 @@ u64 hash_of(BufferView_Flags const &state) {
   return hash_of(string_ref{(char const *)&state, sizeof(state)});
 }
 
-struct Buffer : public Ref_Cnt {
+struct Buffer : public Slot {
   string             name;
   ID                 mem_chunk_id;
   u32                mem_offset;
@@ -322,7 +322,7 @@ u32 get_format_size(VkFormat format) {
   // clang-format on
 }
 
-struct Image : public Ref_Cnt {
+struct Image : public Slot {
   string                name;
   ID                    mem_chunk_id;
   u32                   mem_offset;
@@ -832,6 +832,69 @@ struct Shader_Info : public Slot {
   }
 };
 
+struct Get_Or_Create_RT {
+  bool                  is_set;
+  ID                    id;
+  rd::Image_Create_Info create_info;
+  bool                  is_id;
+  u32                   layer;
+  u32                   level;
+  rd::Clear_Color       clear_color;
+  rd::Clear_Depth       clear_depth;
+  string_ref            name;
+
+  ID view_id;
+
+  void reset() { MEMZERO(*this); }
+  bool operator!=(Get_Or_Create_RT const &that) const {
+    if (is_id == that.is_id) {
+      if (is_id) {
+        return id != that.id || layer != that.layer || level != that.level;
+      } else {
+        return memcmp(&create_info, &that.create_info, sizeof(create_info)) !=
+                   0 ||
+               layer != that.layer || level != that.level;
+      }
+    }
+    return false;
+  }
+};
+
+u64 hash_of(Get_Or_Create_RT const &pc) {
+  if (pc.is_id) {
+    return hash_of(pc.id) ^ hash_of(pc.layer) ^ hash_of(pc.level);
+  } else {
+    return hash_of(
+               string_ref{(char *)&pc.create_info, sizeof(pc.create_info)}) ^
+           hash_of(pc.layer) ^ hash_of(pc.level);
+  }
+}
+
+struct Pass_Cache {
+  inline_string<0x20>                 pass_name;
+  InlineArray<Get_Or_Create_RT, 0x10> rts;
+  Get_Or_Create_RT                    depth_target;
+  void                                init() { memset(this, 0, sizeof(*this)); }
+  void                                release() {}
+  bool                                operator==(Pass_Cache const &that) const {
+    if (pass_name != that.pass_name || rts.size != that.rts.size ||
+        depth_target != that.depth_target)
+      return false;
+    ito(rts.size) {
+      if (rts[i] != that.rts[i]) return false;
+    }
+    return true;
+  }
+};
+
+u64 hash_of(Pass_Cache const &pc) {
+  u64 hash = 0;
+  ito(pc.rts.size) hash ^= hash_of(pc.rts[i]);
+  hash ^= hash_of(pc.depth_target);
+  hash ^= hash_of(pc.pass_name);
+  return hash;
+}
+
 struct Render_Pass : public Slot {
   string                       name;
   VkRenderPass                 pass;
@@ -840,14 +903,17 @@ struct Render_Pass : public Slot {
   InlineArray<ID, 8>           rts;
   ID                           depth_target;
   InlineArray<VkClearValue, 9> clear_values;
+  Pass_Cache                   create_info;
   void                         init() {
     memset(this, 0, sizeof(*this));
     rts.init();
     clear_values.init();
+    create_info.init();
   }
 
   void release(VkDevice device) {
     rts.release();
+    create_info.release();
     clear_values.release();
     name.release();
     vkDestroyRenderPass(device, pass, NULL);
@@ -1747,7 +1813,7 @@ struct Window {
     Window *                    wnd    = NULL;
     void                        release_item(BufferView &buf) {
       vkDestroyBufferView(wnd->device, buf.view, NULL);
-      wnd->buffers[buf.buf_id].rem_reference();
+      // wnd->buffers[buf.buf_id].rem_reference();
       MEMZERO(buf);
     }
     void init(Window *wnd) {
@@ -1760,7 +1826,7 @@ struct Window {
     Window *                    wnd    = NULL;
     void                        release_item(ImageView &img) {
       vkDestroyImageView(wnd->device, img.view, NULL);
-      wnd->images[img.img_id].rem_reference();
+      // wnd->images[img.img_id].rem_reference();
       MEMZERO(img);
     }
     void init(Window *wnd) {
@@ -1841,6 +1907,7 @@ struct Window {
   Hash_Table<Graphics_Pipeline_State, ID> pipeline_cache;
   Hash_Table<ID, ID>                      compute_pipeline_cache;
   Hash_Table<u64, ID>                     shader_cache;
+  Hash_Table<Pass_Cache, ID>              pass_cache;
 
   void init_ds() {
     named_resources.init();
@@ -1989,7 +2056,7 @@ struct Window {
     new_buf.buffer       = buf;
     new_buf.access_flags = 0;
     new_buf.create_info  = cinfo;
-    new_buf.ref_cnt      = 1;
+    // new_buf.ref_cnt      = 1;
 
     u32 chunk_index      = find_mem_chunk(prop_flags, reqs.memoryTypeBits,
                                      reqs.alignment, reqs.size);
@@ -2091,7 +2158,7 @@ struct Window {
 
     VK_ASSERT_OK(vkCreateImageView(device, &cinfo, NULL, &img_view.view));
     img_view.img_id = res_id;
-    img.add_reference();
+    // img.add_reference();
     ID view_id = image_views.push(img_view);
     img.views.push(view_id);
     return {view_id, (i32)Resource_Type::IMAGE_VIEW};
@@ -2149,7 +2216,7 @@ struct Window {
     new_image.info.tiling        = cinfo.tiling;
     new_image.info.usage         = cinfo.usage;
     new_image.layout             = VK_IMAGE_LAYOUT_UNDEFINED;
-    new_image.ref_cnt            = 1;
+    // new_image.ref_cnt            = 1;
     if (usage_flags & (u32)rd::Image_Usage_Bits::USAGE_DT)
       new_image.aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
     else
@@ -2287,10 +2354,13 @@ struct Window {
       Render_Pass &pass = render_passes[res_id.id];
       named_render_passes.remove(pass.name.ref());
       render_passes.remove(res_id.id, 3);
+      if (pass_cache.contains(pass.create_info))
+        pass_cache.remove(pass.create_info);
     } else if (res_id.type == (u32)Resource_Type::BUFFER) {
       Buffer &buf = buffers[res_id.id];
-      buf.rem_reference();
+      // buf.rem_reference();
       ito(buf.views.size) buffer_views.remove(buf.views[i], 3);
+      buffers.remove(res_id.id, 6);
     } else if (res_id.type == (u32)Resource_Type::BUFFER_VIEW) {
       BufferView &view = buffer_views[res_id.id];
       Buffer &    buf  = buffers[view.buf_id];
@@ -2306,7 +2376,8 @@ struct Window {
       if (img.name.nonempty()) {
         named_resources.remove(img.name.ref());
       }
-      img.rem_reference();
+      images.remove(res_id.id, 6);
+      // img.rem_reference();
       ito(img.views.size) image_views.remove(img.views[i], 3);
     } else if (res_id.type == (u32)Resource_Type::SHADER) {
       shaders.remove(res_id.id, 3);
@@ -2323,10 +2394,10 @@ struct Window {
     }
     ito(sc_image_count) {
       Image &img = images[sc_images[i]];
-      img.rem_reference();
+      // img.rem_reference();
+      jto(img.views.size) { image_views.remove(img.views[j], 3); }
+      images.remove(sc_images[i], 3);
       sc_images[i] = ID{0};
-      // jto(img.views.size) { image_views.remove(img.views[i], 0); }
-      // images.free_slot(sc_images[i]);
     }
   }
 
@@ -2429,8 +2500,8 @@ struct Window {
       image.info.tiling        = VK_IMAGE_TILING_OPTIMAL;
       image.info.usage         = sc_create_info.imageUsage;
       image.aspect             = VK_IMAGE_ASPECT_COLOR_BIT;
-      image.ref_cnt            = 1;
-      sc_images[i]             = images.push(image);
+      // image.ref_cnt            = 1;
+      sc_images[i] = images.push(image);
     }
   }
 
@@ -2672,12 +2743,12 @@ struct Window {
     pipelines.tick();
     compute_pipelines.tick();
     fences.tick();
-    images.for_each([this](Image &image) {
-      if (!image.is_referenced()) images.remove(image.get_id(), 3);
-    });
-    buffers.for_each([this](Buffer &buf) {
-      if (!buf.is_referenced()) buffers.remove(buf.get_id(), 3);
-    });
+    /* images.for_each([this](Image &image) {
+       if (!image.is_referenced()) images.remove(image.get_id(), 3);
+     });
+     buffers.for_each([this](Buffer &buf) {
+       if (!buf.is_referenced()) buffers.remove(buf.get_id(), 3);
+     });*/
   restart:
     update_surface_size();
     if (window_width != (i32)sc_extent.width ||
@@ -4072,45 +4143,15 @@ struct String_Pool {
 
 class VkPass_Mng;
 
-struct Get_Or_Create_RT {
-  bool                  is_set;
-  ID                    id;
-  rd::Image_Create_Info create_info;
-  bool                  is_id;
-  u32                   layer;
-  u32                   level;
-  rd::Clear_Color       clear_color;
-  rd::Clear_Depth       clear_depth;
-  string_ref            name;
-
-  ID view_id;
-
-  void reset() { MEMZERO(*this); }
-  bool operator!=(Get_Or_Create_RT const &that) const {
-    if (is_id == that.is_id) {
-      if (is_id) {
-        return id != that.id || layer != that.layer || level != that.level;
-      } else {
-        return memcmp(&create_info, &that.create_info, sizeof(create_info)) !=
-                   0 ||
-               layer != that.layer || level != that.level;
-      }
-    }
-    return false;
-  }
-};
-
-struct Pass_Cache {
-  InlineArray<Get_Or_Create_RT, 0x10> rts;
-  Get_Or_Create_RT                    depth_target;
-};
-
 class VkResource_Manager : public rd::IPass_Context {
   rd::Pass_t  type;
   Window *    wnd;
   ID          cached_pass;
   rd::IPass * pPass;
   String_Pool string_pool;
+
+  // Pass_Cache cur_info;
+  // Pass_Cache cached_info;
 
   InlineArray<Get_Or_Create_RT, 0x10> rts;
   Get_Or_Create_RT                    depth_target;

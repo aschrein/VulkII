@@ -1960,7 +1960,7 @@ class Gizmo_Layer {
       Resource_ID gizmo_instance_buffer = ctx->create_buffer(buf_info);
       void *      ptr = ctx->map_buffer(gizmo_instance_buffer);
       memcpy((u8 *)ptr, &line_segments[0],
-             line_segments.size * sizeof(Gizmo_Instance_Data_CPU));
+             line_segments.size * sizeof(Gizmo_Line_Vertex));
       ctx->unmap_buffer(gizmo_instance_buffer);
       defer(ctx->release_resource(gizmo_instance_buffer));
       ctx->IA_set_topology(rd::Primitive::LINE_LIST);
