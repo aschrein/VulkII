@@ -746,6 +746,24 @@ static inline char *read_file_tmp(char const *filename) {
   return data;
 }
 
+static inline void ATTR_USED write_image_rgba32_float_pfm(const char *file_name,
+                                                          void *      data,
+                                                          uint32_t    width,
+                                                          uint32_t    height) {
+  FILE *file = fopen(file_name, "wb");
+  ASSERT_ALWAYS(file);
+  fprintf(file, "PF\n%d %d\n%lf\n", width, height, -1.0f);
+  ito(height) {
+    jto(width) {
+      float *src = &((float *)data)[width * i * 4 + j * 4];
+      fwrite((void *)(src + 0), 1, 4, file);
+      fwrite((void *)(src + 1), 1, 4, file);
+      fwrite((void *)(src + 2), 1, 4, file);
+    }
+  }
+  fclose(file);
+}
+
 static inline void ATTR_USED write_image_2d_i32_ppm(const char *file_name,
                                                     void *data, uint32_t pitch,
                                                     uint32_t width,
@@ -1262,6 +1280,8 @@ struct Hash_Table {
   void init() { set.init(); }
 
   i32 find(K key) { return set.find(Map_Pair<K, V>{key, {}}); }
+
+  void reserve(size_t size) { set.arr.resize(size); }
 
   V get(K key) {
     i32 id = set.find(Map_Pair<K, V>{key, {}});

@@ -2922,6 +2922,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
     BUFFER_FILL,
     CLEAR_IMAGE,
     COPY_BUFFER_IMAGE,
+    COPY_IMAGE_BUFFER,
     COPY_BUFFER
   };
 
@@ -3015,10 +3016,10 @@ class Vk_Ctx : public rd::Imm_Ctx {
   };
 
   struct Deferred_Copy_Buffer_Image {
-    Resource_ID        buf_id;
-    size_t             offset;
-    Resource_ID        img_id;
-    rd::Image_Copy_Dst dst_info;
+    Resource_ID    buf_id;
+    size_t         offset;
+    Resource_ID    img_id;
+    rd::Image_Copy dst_info;
   };
 
   struct Deferred_Copy_Buffer {
@@ -3044,8 +3045,54 @@ class Vk_Ctx : public rd::Imm_Ctx {
     vkCmdCopyBuffer(cmd, src_buffer.buffer, dst_buffer.buffer, 1, &info);
   }
 
+  void _copy_image_buffer(Resource_ID buf_id, size_t offset, Resource_ID img_id,
+                          rd::Image_Copy const &dst_info) {
+    Buffer &buffer           = wnd->buffers[buf_id.id];
+    Image & image            = wnd->images[img_id.id];
+    auto    old_access_flags = image.access_flags;
+    auto    old_layout       = image.layout;
+
+    image.barrier(cmd, VK_ACCESS_TRANSFER_READ_BIT,
+                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    VkBufferImageCopy info;
+    MEMZERO(info);
+    info.bufferOffset = offset;
+    // info.bufferRowLength = 0; // image.getbpp() * image.info.extent.width;
+    if (dst_info.size_x == 0)
+      info.imageExtent.width = image.info.extent.width;
+    else
+      info.imageExtent.width = dst_info.size_x;
+
+    if (dst_info.size_y == 0)
+      info.imageExtent.height = image.info.extent.height;
+    else
+      info.imageExtent.height = dst_info.size_y;
+
+    if (dst_info.size_z == 0)
+      info.imageExtent.depth = image.info.extent.depth;
+    else
+      info.imageExtent.depth = dst_info.size_z;
+
+    info.imageOffset = {(i32)dst_info.offset_x, (i32)dst_info.offset_y,
+                        (i32)dst_info.offset_z};
+    VkImageSubresourceLayers subres;
+    MEMZERO(subres);
+    subres.aspectMask     = image.aspect;
+    subres.baseArrayLayer = dst_info.layer;
+    if (dst_info.num_layers == 0)
+      subres.layerCount = 1;
+    else
+      subres.layerCount = dst_info.num_layers;
+    subres.mipLevel        = dst_info.level;
+    info.imageSubresource  = subres;
+    info.bufferImageHeight = image.info.extent.height;
+    vkCmdCopyImageToBuffer(cmd, image.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer.buffer,
+                           1, &info);
+  }
+
   void _copy_buffer_image(Resource_ID buf_id, size_t offset, Resource_ID img_id,
-                          rd::Image_Copy_Dst const &dst_info) {
+                          rd::Image_Copy const &dst_info) {
     Buffer &buffer           = wnd->buffers[buf_id.id];
     Image & image            = wnd->images[img_id.id];
     auto    old_access_flags = image.access_flags;
@@ -3311,6 +3358,10 @@ class Vk_Ctx : public rd::Imm_Ctx {
         Deferred_Copy_Buffer_Image dci;
         cpu_cmd.read(&dci);
         _copy_buffer_image(dci.buf_id, dci.offset, dci.img_id, dci.dst_info);
+      } else if (type == Cmd_t::COPY_IMAGE_BUFFER) {
+        Deferred_Copy_Buffer_Image dci;
+        cpu_cmd.read(&dci);
+        _copy_image_buffer(dci.buf_id, dci.offset, dci.img_id, dci.dst_info);
       } else if (type == Cmd_t::COPY_BUFFER) {
         Deferred_Copy_Buffer dci;
         cpu_cmd.read(&dci);
@@ -3609,11 +3660,11 @@ class Vk_Ctx : public rd::Imm_Ctx {
   }
 
   void submit(VkFence finish_fence, VkSemaphore *wait_sem) {
-    if (type == rd::Pass_t::COMPUTE)
+    if (type == rd::Pass_t::COMPUTE) {
       flush_compute_pass();
-    else if (type == rd::Pass_t::RENDER)
-      flush_render_pass();
-    else {
+    } else if (type == rd::Pass_t::RENDER) {
+      if (cur_pass.is_null() == false) flush_render_pass();
+    } else {
       UNIMPLEMENTED;
     }
     vkEndCommandBuffer(cmd);
@@ -3936,9 +3987,24 @@ class Vk_Ctx : public rd::Imm_Ctx {
       }
     }
   }
+  void copy_image_to_buffer(Resource_ID buf_id, size_t offset,
+                            Resource_ID           img_id,
+                            rd::Image_Copy const &dst_info) override {
+    if (type == rd::Pass_t::COMPUTE) {
+      Deferred_Copy_Buffer_Image dci;
+      MEMZERO(dci);
+      dci.buf_id   = buf_id;
+      dci.dst_info = dst_info;
+      dci.offset   = offset;
+      dci.img_id   = img_id;
+      cpu_cmd.write(Cmd_t::COPY_IMAGE_BUFFER, &dci);
+    } else {
+      _copy_image_buffer(buf_id, offset, img_id, dst_info);
+    }
+  }
   void copy_buffer_to_image(Resource_ID buf_id, size_t offset,
-                            Resource_ID               img_id,
-                            rd::Image_Copy_Dst const &dst_info) override {
+                            Resource_ID           img_id,
+                            rd::Image_Copy const &dst_info) override {
     if (type == rd::Pass_t::COMPUTE) {
       Deferred_Copy_Buffer_Image dci;
       MEMZERO(dci);
@@ -4242,6 +4308,7 @@ class VkResource_Manager : public rd::IPass_Context {
         }
       }
       // allocate new resources
+      if (rts.size == 0 && depth_target.is_set == false) return ID{0};
       u32 depth_attachment_id = 0;
       ito(rts.size) {
         Image *img = NULL;

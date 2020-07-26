@@ -644,9 +644,7 @@ public:
 
   void load_mesh(string_ref name, string_ref path) {
     SceneFactory sf(this);
-    root->add_child(
-        load_gltf_pbr(&sf, path)
-            ->rename(name));
+    root->add_child(load_gltf_pbr(&sf, path)->rename(name));
   }
 
   u32 load_image(string_ref path, rd::Format format) {
@@ -749,7 +747,7 @@ public:
         ito(16 * 16) { ptr[i] = 0xff0000ffu; }
         ctx->unmap_buffer(staging_buffer);
         ctx->copy_buffer_to_image(staging_buffer, 0, dummy_texture,
-                                  rd::Image_Copy_Dst::top_level());
+                                  rd::Image_Copy::top_level());
       }
       {
         u8 *ptr = (u8 *)ctx->map_buffer(staging_vertex_buffer);
@@ -1206,7 +1204,7 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
       memcpy(dst, font_pixels, font_width * font_height * 4);
       ctx->unmap_buffer(staging_buffer);
       ctx->copy_buffer_to_image(staging_buffer, 0, font_texture,
-                                rd::Image_Copy_Dst::top_level());
+                                rd::Image_Copy::top_level());
       font_pixels = NULL;
     }
     setup_default_state(ctx);
@@ -1277,6 +1275,8 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
     ctx->IA_set_index_buffer(index_buffer, 0, rd::Index_t::UINT16);
     ctx->IA_set_vertex_buffer(0, vertex_buffer, 0, sizeof(ImDrawVert),
                               rd::Input_Rate::VERTEX);
+    u32 control = 0;
+    ctx->push_constants(&control, 16, 4);
     for (int n = 0; n < draw_data->CmdListsCount; n++) {
       const ImDrawList *cmd_list = draw_data->CmdLists[n];
       for (int cmd_i = 0; cmd_i < cmd_list->CmdBuffer.Size; cmd_i++) {
@@ -1288,13 +1288,14 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
         clip_rect.w  = (pcmd->ClipRect.w - clip_off.y) * clip_scale.y;
         ImGui_ID img = image_bindings[(size_t)pcmd->TextureId];
         if (img.format == rd::Format::D32_FLOAT) {
-          u32 control = 1;
-          ctx->push_constants(&control, 16, 4);
+          control = 1;
         }
         if (img.format == rd::Format::R32_UINT) {
-          u32 control = 2;
-          ctx->push_constants(&control, 16, 4);
+          control    = 2;
           img.format = rd::Format::RGBA8_UNORM;
+        }
+        if (control != 0) {
+          ctx->push_constants(&control, 16, 4);
         }
         rd::Image_Subresource range;
         range.layer      = img.base_layer;
@@ -1307,9 +1308,8 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
         ctx->draw_indexed(pcmd->ElemCount, 1,
                           pcmd->IdxOffset + global_idx_offset, 0,
                           pcmd->VtxOffset + global_vtx_offset);
-        if (img.format == rd::Format::R32_UINT ||
-            img.format == rd::Format::R32_UINT) {
-          u32 control = 0;
+        if (control != 0) {
+          control = 0;
           ctx->push_constants(&control, 16, 4);
         }
       }
@@ -1329,7 +1329,7 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
     }
     return wsize;
   }
-  string_ref get_name() override { return stref_s("simple_pass"); }
+  string_ref get_name() override { return stref_s("IGUI_Pass"); }
   void       release(rd::IPass_Context *rm) override {
     ImGui_ImplSDL2_Shutdown();
     ImGui::DestroyContext();
@@ -1540,7 +1540,7 @@ void store(ivec2 coord, float4 val) {
     MEMZERO(pc);
     pc.op = 0;
     switch (image.format) {
-      // clang-format off
+    // clang-format off
       case rd::Format::RGBA8_SRGBA:  {  pc.format = 0; } break;
       case rd::Format::RGBA8_UNORM:  {  pc.format = 1; } break;
       case rd::Format::RGB32_FLOAT:  {  pc.format = 2; } break;
@@ -1585,7 +1585,7 @@ void store(ivec2 coord, float4 val) {
                     (mip_sizes[i + 1].y + 15) / 16, 1);
     }
     ito(mip_offsets.size) {
-      rd::Image_Copy_Dst dst_info;
+      rd::Image_Copy dst_info;
       MEMZERO(dst_info);
       dst_info.level      = i;
       dst_info.num_layers = 1;
@@ -1669,10 +1669,10 @@ class Gizmo_Layer {
   struct Gizmo_Push_Constants {
     afloat4x4 viewproj;
   };
-  Array<Gizmo_Instance_Data_CPU> cylinder_draw_cmds;
-  Array<Gizmo_Instance_Data_CPU> sphere_draw_cmds;
-  Array<Gizmo_Instance_Data_CPU> cone_draw_cmds;
-  Array<Gizmo_Line_Vertex>       line_segments;
+  Array<Gizmo_Instance_Data_CPU>   cylinder_draw_cmds;
+  Array<Gizmo_Instance_Data_CPU>   sphere_draw_cmds;
+  Array<Gizmo_Instance_Data_CPU>   cone_draw_cmds;
+  Array<Gizmo_Line_Vertex, 0x1000> line_segments;
 
   Raw_Mesh_3p16i_Wrapper icosahedron_wrapper;
   Raw_Mesh_3p16i_Wrapper cylinder_wrapper;

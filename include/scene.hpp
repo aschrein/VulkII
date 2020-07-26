@@ -666,12 +666,69 @@ struct Raw_Mesh_Opaque {
       offset += attributes[i].size;
     }
   }
-  void flatten(void *dst) {
+  u32 write_attribute(void *dst, u32 vertex_index, u32 attribute_index) const {
+    memcpy((u8 *)dst,
+           &attribute_data[0] + attributes[attribute_index].offset +
+               attributes[attribute_index].stride * vertex_index,
+           attributes[attribute_index].size);
+    return attributes[attribute_index].size;
+  }
+  void flatten(void *dst) const {
     u32 vertex_stride = get_vertex_size();
     ito(num_indices) {
       u32 index = fetch_index(i);
       write_vertex((u8 *)dst + vertex_stride * i, index);
     }
+  }
+  void interleave(void *dst) const {
+    u32 vertex_stride = get_vertex_size();
+    ito(num_vertices) { write_vertex((u8 *)dst + vertex_stride * i, i); }
+  }
+  void interleave() {
+    Array<u8> dst;
+    dst.init();
+    dst.resize(attribute_data.size);
+    interleave(dst.ptr);
+    attribute_data.release();
+    attribute_data  = dst;
+    u32 offset      = 0;
+    u32 vertex_size = get_vertex_size();
+    ito(attributes.size) {
+      attributes[i].stride = vertex_size;
+      attributes[i].offset = offset;
+      offset += attributes[i].size;
+    }
+  }
+  void deinterleave() {
+    Array<u8> dst;
+    dst.init();
+    dst.resize(attribute_data.size);
+    InlineArray<size_t, 16> attribute_offsets;
+    InlineArray<size_t, 16> attribute_sizes;
+    InlineArray<size_t, 16> attribute_cursors;
+    attribute_offsets.init();
+    attribute_sizes.init();
+    attribute_cursors.init();
+    ito(attributes.size) {
+      attribute_sizes[i] = num_vertices * attributes[i].size;
+    }
+    u32 total_mem = 0;
+    ito(attributes.size) {
+      jto(i) attribute_offsets[i] += attribute_sizes[j];
+      total_mem = attribute_offsets[i] + attribute_sizes[i];
+    }
+    ito(num_vertices) {
+      jto(attributes.size) {
+        attribute_cursors[j] += write_attribute(
+            dst.ptr + attribute_offsets[j] + attribute_cursors[j], i, j);
+      }
+    }
+    ito(attributes.size) {
+      attributes[i].stride = attributes[i].size;
+      attributes[i].offset = attribute_offsets[i];
+    }
+    attribute_data.release();
+    attribute_data = dst;
   }
   bool is_compatible(Raw_Mesh_Opaque const &that) const {
     if (attributes.size != that.attributes.size ||
@@ -803,7 +860,7 @@ struct Raw_Mesh_Opaque {
     return v;
   }
 
-  u32 fetch_index(u32 index) {
+  u32 fetch_index(u32 index) const {
     if (index_type == rd::Index_t::UINT16) {
       return (u32) * (u16 *)index_data.at(2 * index);
     } else {
@@ -1346,7 +1403,7 @@ class IFactory {
   virtual u32       add_image(Image2D_Raw img)     = 0;
 };
 
-Node *              load_gltf_pbr(IFactory *factory, string_ref filename);
+Node *load_gltf_pbr(IFactory *factory, string_ref filename);
 Raw_Mesh_Opaque     optimize_mesh(Raw_Mesh_Opaque const &opaque_mesh);
 Raw_Mesh_Opaque     simplify_mesh(Raw_Mesh_Opaque const &opaque_mesh);
 Raw_Meshlets_Opaque build_meshlets(Raw_Mesh_Opaque &opaque_mesh);

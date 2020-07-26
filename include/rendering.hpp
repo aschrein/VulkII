@@ -21,9 +21,10 @@ struct Resource_ID {
     };
     u64 data;
   };
-  u32  index() { return id.index(); }
-  bool is_null() { return id.is_null(); }
-  void reset() { memset(this, 0, sizeof(*this)); }
+  static Resource_ID null() { return {0, 0}; }
+  u32                index() { return id.index(); }
+  bool               is_null() { return id.is_null(); }
+  void               reset() { memset(this, 0, sizeof(*this)); }
 };
 
 static_assert(sizeof(Resource_ID) == 8, "blimey!");
@@ -309,18 +310,18 @@ struct Image_Subresource {
   }
 };
 
-struct Image_Copy_Dst {
-  u32                   layer;
-  u32                   num_layers;
-  u32                   level;
-  u32                   offset_x;
-  u32                   offset_y;
-  u32                   offset_z;
-  u32                   size_x;
-  u32                   size_y;
-  u32                   size_z;
-  static Image_Copy_Dst top_level() {
-    Image_Copy_Dst out;
+struct Image_Copy {
+  u32               layer;
+  u32               num_layers;
+  u32               level;
+  u32               offset_x;
+  u32               offset_y;
+  u32               offset_z;
+  u32               size_x;
+  u32               size_y;
+  u32               size_z;
+  static Image_Copy top_level() {
+    Image_Copy out;
     MEMZERO(out);
     out.layer      = 0;
     out.num_layers = 1;
@@ -406,8 +407,11 @@ class Imm_Ctx : public IFactory {
                             float mindepth, float maxdepth)                 = 0;
   virtual void set_scissor(u32 x, u32 y, u32 width, u32 height)             = 0;
   virtual void copy_buffer_to_image(Resource_ID buf_id, size_t buffer_offset,
-                                    Resource_ID           img_id,
-                                    Image_Copy_Dst const &dst_info)         = 0;
+                                    Resource_ID       img_id,
+                                    Image_Copy const &dst_info)             = 0;
+  virtual void copy_image_to_buffer(Resource_ID buf_id, size_t buffer_offset,
+                                    Resource_ID       img_id,
+                                    Image_Copy const &dst_info)             = 0;
   virtual void copy_buffer(Resource_ID src_buf_id, size_t src_offset,
                            Resource_ID dst_buf_id, size_t dst_offset,
                            u32 size)                                        = 0;

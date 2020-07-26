@@ -25,34 +25,24 @@ Raw_Mesh_Opaque optimize_mesh(Raw_Mesh_Opaque const &opaque_mesh) {
   defer(remap.release());
   Array<u8> vertex_blob;
   vertex_blob.init();
-  vertex_blob.resize(opaque_mesh.num_indices * sizeof(Vertex_Full));
-
+  vertex_blob.resize(opaque_mesh.num_indices * opaque_mesh.get_vertex_size());
+  u32 vertex_size = opaque_mesh.get_vertex_size();
   defer(vertex_blob.release());
-
-  ito(opaque_mesh.num_indices / 3) {
-    Triangle_Full tri = opaque_mesh.fetch_triangle(i);
-    memcpy(&vertex_blob[(i * 3 + 0) * sizeof(Vertex_Full)], &tri.v0,
-           sizeof(Vertex_Full));
-    memcpy(&vertex_blob[(i * 3 + 1) * sizeof(Vertex_Full)], &tri.v1,
-           sizeof(Vertex_Full));
-    memcpy(&vertex_blob[(i * 3 + 2) * sizeof(Vertex_Full)], &tri.v2,
-           sizeof(Vertex_Full));
-  }
+  opaque_mesh.flatten(vertex_blob.ptr);
   size_t vertex_count =
       meshopt_generateVertexRemap(&remap[0], NULL, index_count, &vertex_blob[0],
-                                  opaque_mesh.num_indices, sizeof(Vertex_Full));
+                                  opaque_mesh.num_indices, vertex_size);
   meshopt_remapIndexBuffer(&indices[0], NULL, opaque_mesh.num_indices,
                            &remap[0]);
-  Array<Vertex_Full> vertices;
-  vertices.init();
-  vertices.resize(vertex_count);
-  defer(vertices.release());
-  meshopt_remapVertexBuffer(&vertices[0], &vertex_blob[0], index_count,
-                            sizeof(Vertex_Full), &remap[0]);
+
+  out.attribute_data.resize(vertex_count * vertex_size);
+  meshopt_remapVertexBuffer(&out.attribute_data[0], &vertex_blob[0],
+                            index_count, vertex_size, &remap[0]);
   meshopt_optimizeVertexCache(&indices[0], &indices[0], index_count,
                               vertex_count);
-  meshopt_optimizeVertexFetch(&vertices[0], &indices[0], index_count,
-                              &vertices[0], vertex_count, sizeof(Vertex_Full));
+  meshopt_optimizeVertexFetch(&out.attribute_data[0], &indices[0], index_count,
+                              &out.attribute_data[0], vertex_count,
+                              vertex_size);
 
   out.index_type = rd::Index_t::UINT32;
   out.index_data.resize(indices.size * 4);
@@ -60,42 +50,20 @@ Raw_Mesh_Opaque optimize_mesh(Raw_Mesh_Opaque const &opaque_mesh) {
     u32 index = indices[i];
     memcpy(&out.index_data[i * 4], &index, 4);
   }
-  InlineArray<size_t, 16> attribute_offsets;
-  InlineArray<size_t, 16> attribute_sizes;
-  InlineArray<size_t, 16> attribute_cursors;
-  attribute_offsets.init();
-  attribute_sizes.init();
-  attribute_cursors.init();
-
-  ito(opaque_mesh.attributes.size) {
-    attribute_sizes[i] = vertices.size * opaque_mesh.attributes[i].size;
-  }
-  u32 total_mem = 0;
-  ito(opaque_mesh.attributes.size) {
-    jto(i) attribute_offsets[i] += attribute_sizes[j];
-    total_mem = attribute_offsets[i] + attribute_sizes[i];
-  }
-  out.attribute_data.resize(total_mem);
-  ito(vertices.size) {
-    Vertex_Full v = vertices[i];
-    jto(opaque_mesh.attributes.size) {
-      memcpy(out.attribute_data.ptr + attribute_offsets[j] +
-                 attribute_cursors[j],
-             v.get_attribute(opaque_mesh.attributes[j].type),
-             opaque_mesh.attributes[j].size);
-      attribute_cursors[j] += opaque_mesh.attributes[j].size;
-    }
-  }
   ito(opaque_mesh.attributes.size) {
     out.attributes.push(opaque_mesh.attributes[i]);
   }
-  ito(opaque_mesh.attributes.size) {
-    out.attributes[i].offset = attribute_offsets[i];
+  u32 offset = 0;
+  ito(out.attributes.size) {
+    out.attributes[i].stride = vertex_size;
+    out.attributes[i].offset = offset;
+    offset += out.attributes[i].size;
   }
   out.num_indices  = indices.size;
-  out.num_vertices = vertices.size;
-  out.min = opaque_mesh.min;
-  out.max = opaque_mesh.max;
+  out.num_vertices = vertex_count;
+  out.min          = opaque_mesh.min;
+  out.max          = opaque_mesh.max;
+  out.deinterleave();
   return out;
 }
 
@@ -117,7 +85,7 @@ Raw_Mesh_Opaque simplify_mesh(Raw_Mesh_Opaque const &opaque_mesh) {
 
   defer(vertex_blob.release());
 
-  //meshopt_simplify(&indices[0], &opaque_mesh.index_data[0]
+  // meshopt_simplify(&indices[0], &opaque_mesh.index_data[0]
   return out;
 }
 
@@ -237,6 +205,70 @@ Raw_Meshlets_Opaque build_meshlets(Raw_Mesh_Opaque &opaque_mesh) {
   return result;
 }
 
+void save_image(string_ref filename, Image2D_Raw const &image) {
+  if (image.format == rd::Format::RGBA8_UNORM ||
+      image.format == rd::Format::RGB8_UNORM ||
+      image.format == rd::Format::RGB8_SRGBA ||
+      image.format == rd::Format::RGBA8_SRGBA) {
+    Array<u8> data;
+    data.init();
+    defer(data.release());
+    data.resize(image.width * image.height * 4);
+    switch (image.format) {
+    case rd::Format::RGB8_UNORM:
+    case rd::Format::RGB8_SRGBA: {
+      ito(image.height) {
+        jto(image.width) {
+          u8 *dst = &data[i * image.width * 4 + j * 4];
+          u8  r   = image.data[i * image.width * 3 + j * 3 + 0];
+          u8  g   = image.data[i * image.width * 3 + j * 3 + 1];
+          u8  b   = image.data[i * image.width * 3 + j * 3 + 2];
+          u8  a   = 255u;
+          dst[0]  = r;
+          dst[1]  = g;
+          dst[2]  = b;
+          dst[3]  = a;
+        }
+      }
+    } break;
+    case rd::Format::RGBA8_UNORM:
+    case rd::Format::RGBA8_SRGBA: {
+      memcpy(data.ptr, image.data, data.size);
+    } break;
+    default: ASSERT_PANIC(false && "Unsupported format");
+    }
+    TMP_STORAGE_SCOPE;
+    stbi_write_png(stref_to_tmp_cstr(filename), image.width, image.height,
+                   STBI_rgb_alpha, &data[0], image.width * 4);
+  } else if (image.format == rd::Format::RGBA32_FLOAT) {
+    Array<float> data;
+    data.init();
+    defer(data.release());
+    data.resize(image.width * image.height * 4);
+    switch (image.format) {
+    case rd::Format::RGB32_FLOAT: {
+      ito(image.height) {
+        jto(image.width) {
+          vec3   src = *(vec3 *)&image.data[i * image.width * 12 + j * 12];
+          float *dst = &data[i * image.width * 4 + j * 4];
+          dst[0]     = src.x;
+          dst[1]     = src.y;
+          dst[2]     = src.z;
+          dst[3]     = 1.0f;
+        }
+      }
+    } break;
+    case rd::Format::RGBA32_FLOAT: {
+      memcpy(data.ptr, image.data, data.size * 4);
+    } break;
+    default: ASSERT_PANIC(false && "Unsupported format");
+    }
+    TMP_STORAGE_SCOPE;
+    stbi_write_tga(stref_to_tmp_cstr(filename), image.width, image.height,
+                   STBI_rgb_alpha, &data[0]);
+  }
+}
+
 Image2D_Raw load_image(string_ref filename, rd::Format format) {
   TMP_STORAGE_SCOPE;
   if (stref_find(filename, stref_s(".hdr")) != -1) {
@@ -317,8 +349,7 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
       pbrmat.init();
       do {
         cgltf_material *material = primitive->material;
-        if (material == NULL)
-          break;
+        if (material == NULL) break;
         ASSERT_ALWAYS(material->extensions_count == 0);
 
         if (material->has_pbr_metallic_roughness) {
@@ -365,7 +396,7 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
           pbrmat.normal_id =
               load_texture(material->normal_texture.texture->image->uri,
                            rd::Format::RGBA8_UNORM);
-      } while(0);
+      } while (0);
       Raw_Mesh_Opaque opaque_mesh;
       opaque_mesh.init();
       // Read indices
@@ -409,15 +440,15 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
       auto write_attribute_data = [&](u8 *src, size_t size) {
         ito(size) opaque_mesh.attribute_data.push(src[i]);
       };
-      auto align_attribute_data = [&]() {
-        while ((opaque_mesh.attribute_data.size & 0xff) != 0)
-          opaque_mesh.attribute_data.push(0);
-      };
+      // auto align_attribute_data = [&]() {
+      //  while ((opaque_mesh.attribute_data.size & 0xff) != 0)
+      //    opaque_mesh.attribute_data.push(0);
+      //};
 
       for (u32 attribute_index = 0;
            attribute_index < primitive->attributes_count; attribute_index++) {
         cgltf_attribute *attribute = &primitive->attributes[attribute_index];
-        align_attribute_data();
+        // align_attribute_data();
         if (opaque_mesh.num_vertices == 0)
           opaque_mesh.num_vertices = attribute->data->count;
         else {
