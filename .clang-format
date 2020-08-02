@@ -13,4 +13,5 @@ AllowShortIfStatementsOnASingleLine: 'true'
 AllowShortLoopsOnASingleLine: 'true'
 BinPackArguments: 'true'
 BinPackParameters: 'true'
-ColumnLimit: '80'
+ColumnLimit: '100'
+IndentPPDirectives: AfterHash

@@ -8,9 +8,9 @@
 #include <imgui.h>
 
 #ifdef __linux__
-#include <SDL2/SDL.h>
+#  include <SDL2/SDL.h>
 #else
-#include <SDL.h>
+#  include <SDL.h>
 #endif
 
 #include <imgui.h>
@@ -68,12 +68,10 @@ struct Config {
           traverse(l->next);
         } else {
           if (l->cmp_symbol("min")) {
-            if (parse_decimal_int(l->get(1)->symbol.ptr, l->get(1)->symbol.len,
-                                  &imin) == false)
+            if (parse_decimal_int(l->get(1)->symbol.ptr, l->get(1)->symbol.len, &imin) == false)
               parse_float(l->get(1)->symbol.ptr, l->get(1)->symbol.len, &fmin);
           } else if (l->cmp_symbol("max")) {
-            if (parse_decimal_int(l->get(1)->symbol.ptr, l->get(1)->symbol.len,
-                                  &imax) == false)
+            if (parse_decimal_int(l->get(1)->symbol.ptr, l->get(1)->symbol.len, &imax) == false)
               parse_float(l->get(1)->symbol.ptr, l->get(1)->symbol.len, &fmax);
           }
         }
@@ -128,15 +126,13 @@ struct Config {
       snprintf(buf, sizeof(buf), "%.*s", STRF(name.ref()));
       if (item.type == Config_Item::U32) {
         if (item.v_u32_min != item.v_u32_max) {
-          ImGui::SliderInt(buf, (int *)&item.v_u32, item.v_u32_min,
-                           item.v_u32_max);
+          ImGui::SliderInt(buf, (int *)&item.v_u32, item.v_u32_min, item.v_u32_max);
         } else {
           ImGui::InputInt(buf, (int *)&item.v_u32);
         }
       } else if (item.type == Config_Item::F32) {
         if (item.v_f32_min != item.v_f32_max) {
-          ImGui::SliderFloat(buf, (float *)&item.v_f32, item.v_f32_min,
-                             item.v_f32_max);
+          ImGui::SliderFloat(buf, (float *)&item.v_f32, item.v_f32_min, item.v_f32_max);
         } else {
           ImGui::InputFloat(buf, (float *)&item.v_f32);
         }
@@ -174,19 +170,18 @@ struct Config {
     items.iter_pairs([&](string_t const &name, Config_Item const &item) {
       if (item.type == Config_Item::U32) {
         if (item.v_u32_min != item.v_u32_max)
-          fprintf(file, " (add u32 %.*s %i (min %i) (max %i))\n",
-                  STRF(name.ref()), item.v_u32, item.v_u32_min, item.v_u32_max);
+          fprintf(file, " (add u32 %.*s %i (min %i) (max %i))\n", STRF(name.ref()), item.v_u32,
+                  item.v_u32_min, item.v_u32_max);
         else
           fprintf(file, " (add u32 %.*s %i)\n", STRF(name.ref()), item.v_u32);
       } else if (item.type == Config_Item::F32) {
         if (item.v_f32_min != item.v_f32_max)
-          fprintf(file, " (add f32 %.*s %f (min %f) (max %f))\n",
-                  STRF(name.ref()), item.v_f32, item.v_f32_min, item.v_f32_max);
+          fprintf(file, " (add f32 %.*s %f (min %f) (max %f))\n", STRF(name.ref()), item.v_f32,
+                  item.v_f32_min, item.v_f32_max);
         else
           fprintf(file, " (add f32 %.*s %f)\n", STRF(name.ref()), item.v_f32);
       } else if (item.type == Config_Item::BOOL) {
-        fprintf(file, " (add bool %.*s %i)\n", STRF(name.ref()),
-                item.v_bool ? 1 : 0);
+        fprintf(file, " (add bool %.*s %i)\n", STRF(name.ref()), item.v_bool ? 1 : 0);
       } else {
         TRAP;
       }
@@ -267,9 +262,7 @@ struct Camera {
   void release() {}
 
   void update(float2 jitter = float2(0.0f, 0.0f)) {
-    pos = float3(sinf(theta) * cosf(phi), cos(theta), sinf(theta) * sinf(phi)) *
-              distance +
-          look_at;
+    pos = float3(sinf(theta) * cosf(phi), cos(theta), sinf(theta) * sinf(phi)) * distance + look_at;
     look              = normalize(look_at - pos);
     right             = normalize(cross(look, float3(0.0f, 1.0f, 0.0f)));
     up                = normalize(cross(right, look));
@@ -288,7 +281,7 @@ struct Camera {
   }
   float4x4 viewproj() { return proj * view; }
 };
-
+#if 0
 struct GfxMesh : public Mesh {
   InlineArray<size_t, 16>    attribute_offsets;
   InlineArray<size_t, 16>    meshlet_attribute_offsets;
@@ -358,7 +351,7 @@ struct GfxMesh : public Mesh {
         attribute_sizes.push(0);
       }
       ito(primitives.size) {
-        attribute_sizes[i] += rd::IPass_Context::BUFFER_ALIGNMENT;
+        attribute_sizes[i] += rd::IFactory::BUFFER_ALIGNMENT;
         jto(primitives[i].mesh.attributes.size) {
           attribute_sizes[j] += primitives[i].mesh.get_attribute_size(j);
         }
@@ -366,21 +359,21 @@ struct GfxMesh : public Mesh {
       ito(attributes.size) {
         jto(i) { attribute_offsets[i] += attribute_sizes[j]; }
         attribute_offsets[i] =
-            rd::IPass_Context::align_up(attribute_offsets[i]);
+            rd::IFactory::align_up(attribute_offsets[i]);
         total_memory_needed = attribute_offsets[i] + attribute_sizes[i];
       }
-      total_memory_needed = rd::IPass_Context::align_up(total_memory_needed);
+      total_memory_needed = rd::IFactory::align_up(total_memory_needed);
       index_offset        = total_memory_needed;
       ito(primitives.size) {
         total_memory_needed += primitives[i].mesh.get_bytes_per_index() *
                                primitives[i].mesh.num_indices;
       }
       // Calculate meshlets
-#if 0
+#  if 0
 				meshlet_attribute_sizes.resize(attributes.size);
       meshlet_attribute_offsets.resize(attributes.size);
       total_memory_needed =
-          rd::IPass_Context::align_up(total_memory_needed);
+          rd::IFactory::align_up(total_memory_needed);
       u32 meshlet_vertex_offset = total_memory_needed;
       ito(primitives.size) {
         Raw_Meshlets_Opaque meshlets = primitives[i].meshlets;
@@ -389,16 +382,16 @@ struct GfxMesh : public Mesh {
         }
       }
       ito(attributes.size) {
-        meshlet_attribute_sizes[i] += rd::IPass_Context::BUFFER_ALIGNMENT;
+        meshlet_attribute_sizes[i] += rd::IFactory::BUFFER_ALIGNMENT;
         jto(i) { meshlet_attribute_offsets[i] += meshlet_attribute_sizes[j]; }
         meshlet_attribute_offsets[i] =
             meshlet_vertex_offset +
-            rd::IPass_Context::align_up(meshlet_attribute_offsets[i]);
+            rd::IFactory::align_up(meshlet_attribute_offsets[i]);
         total_memory_needed =
             meshlet_attribute_offsets[i] + meshlet_attribute_sizes[i];
       }
       total_memory_needed =
-          rd::IPass_Context::align_up(total_memory_needed);
+          rd::IFactory::align_up(total_memory_needed);
       meshlet_index_offset     = total_memory_needed;
       meshlet_total_index_data = 0;
       ito(primitives.size) {
@@ -407,7 +400,7 @@ struct GfxMesh : public Mesh {
         meshlet_total_index_data += meshlets.index_data.size;
       }
       total_memory_needed =
-          rd::IPass_Context::align_up(total_memory_needed);
+          rd::IFactory::align_up(total_memory_needed);
       meshlet_data_offset = total_memory_needed;
       meshlet_data_size   = 0;
       ito(primitives.size) {
@@ -415,7 +408,7 @@ struct GfxMesh : public Mesh {
         meshlet_data_size += meshlets.meshlets.size * sizeof(GPU_Meshlet);
         total_memory_needed += meshlets.meshlets.size * sizeof(GPU_Meshlet);
       }
-#endif // 0
+#  endif // 0
     }
     return total_memory_needed;
   }
@@ -443,7 +436,7 @@ struct GfxMesh : public Mesh {
     }
 
     // put meshlets
-#if 0
+#  if 0
     {
       InlineArray<size_t, 16> attribute_cursors;
       MEMZERO(attribute_cursors);
@@ -474,7 +467,7 @@ struct GfxMesh : public Mesh {
         }
       }
     }
-#endif
+#  endif
   }
 
   void draw(rd::Imm_Ctx *ctx, Resource_ID vertex_buffer, size_t offset) {
@@ -532,7 +525,7 @@ struct GfxMesh : public Mesh {
       vertex_cursor += primitives[i].mesh.num_vertices;
     }
   }
-#if 0
+#  if 0
   void dispatch_meshlets(rd::Imm_Ctx *ctx, Resource_ID vertex_buffer,
                          size_t offset, u32 push_offset) {
     static u32 attribute_to_location[] = {
@@ -577,7 +570,7 @@ struct GfxMesh : public Mesh {
       vertex_cursor += num_vertices;
     }
   }
-#endif
+#  endif
 };
 
 class Scene {
@@ -664,7 +657,7 @@ public:
     return out;
   }
 
-  void on_pass_begin(rd::IPass_Context *rm) {
+  void on_pass_begin(rd::IFactory *rm) {
     root->update_transform();
     if (dummy_texture.is_null()) {
       rd::Image_Create_Info info;
@@ -684,7 +677,7 @@ public:
       gfx_buffers_initialized = true;
       ito(meshes.size) {
         size_t mesh_mem = meshes[i]->get_needed_memory();
-        mesh_mem        = rd::IPass_Context::align_up(mesh_mem);
+        mesh_mem        = rd::IFactory::align_up(mesh_mem);
         mesh_offsets.insert(meshes[i], total_memory);
         total_memory += mesh_mem;
       }
@@ -822,7 +815,7 @@ public:
         },
         root);
   }
-#if 0
+#  if 0
   void gfx_dispatch_meshlets(rd::Imm_Ctx *ctx, u32 push_offset) {
     gfx_bind(ctx);
     traverse(
@@ -841,15 +834,15 @@ public:
         },
         root);
   }
-#endif
+#  endif
 
-  void on_pass_end(rd::IPass_Context *rm) {
+  void on_pass_end(rd::IFactory *rm) {
     if (staging_vertex_buffer.is_null() == false) {
       rm->release_resource(staging_vertex_buffer);
       staging_vertex_buffer.reset();
     }
   }
-  void release_gfx(rd::IPass_Context *rm) {
+  void release_gfx(rd::IFactory *rm) {
     ito(gfx_images.size) rm->release_resource(gfx_images[i]);
     gfx_images.release();
     rm->release_resource(vertex_buffer);
@@ -869,15 +862,13 @@ public:
     root->release();
   }
 };
-
+#endif
 static void setup_default_state(rd::Imm_Ctx *ctx, u32 num_rts = 1) {
   rd::Blend_State bs;
   MEMZERO(bs);
   bs.enabled          = false;
-  bs.color_write_mask = (u32)rd::Color_Component_Bit::R_BIT |
-                        (u32)rd::Color_Component_Bit::G_BIT |
-                        (u32)rd::Color_Component_Bit::B_BIT |
-                        (u32)rd::Color_Component_Bit::A_BIT;
+  bs.color_write_mask = (u32)rd::Color_Component_Bit::R_BIT | (u32)rd::Color_Component_Bit::G_BIT |
+                        (u32)rd::Color_Component_Bit::B_BIT | (u32)rd::Color_Component_Bit::A_BIT;
   ito(num_rts) ctx->OM_set_blend_state(i, bs);
   ctx->IA_set_topology(rd::Primitive::TRIANGLE_LIST);
   rd::RS_State rs_state;
@@ -913,7 +904,7 @@ struct ImGui_ID {
   }
 };
 
-class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
+class IGUI_Pass : public rd::IEvent_Consumer {
   protected:
   Resource_ID vs;
   Resource_ID ps;
@@ -930,14 +921,15 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
   unsigned char *font_pixels;
   int            font_width, font_height;
 
-  i32         last_m_x;
-  i32         last_m_y;
-  ImDrawData *draw_data;
-  Timer       timer;
-  bool        imgui_initialized;
+  i32           last_m_x;
+  i32           last_m_y;
+  ImDrawData *  draw_data;
+  Timer         timer;
+  bool          imgui_initialized;
+  rd::Pass_Mng *pmng;
 
   public:
-  virtual void on_gui(rd::IPass_Context *pc) {}
+  virtual void on_gui(rd::IFactory *factory) {}
 
   void consume(void *_event) override {
     SDL_Event *event = (SDL_Event *)_event;
@@ -948,7 +940,8 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
       SDL_MouseMotionEvent *m = (SDL_MouseMotionEvent *)event;
     }
   }
-  IGUI_Pass() {
+  void init(rd::Pass_Mng *pmng) {
+    this->pmng = pmng;
     image_bindings.init();
     timer.init();
     imgui_initialized = false;
@@ -963,19 +956,7 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
     index_buffer.reset();
     sampler.reset();
   }
-  void on_end(rd::IPass_Context *rm) override {
-    rm->release_resource(vertex_buffer);
-    rm->release_resource(index_buffer);
-    if (staging_buffer.is_null() == false) {
-      rm->release_resource(staging_buffer);
-    }
-    vertex_buffer.reset();
-    index_buffer.reset();
-    staging_buffer.reset();
-    image_bindings.size = 1;
-  }
-  ImTextureID bind_texture(Resource_ID id, u32 layer, u32 level,
-                           rd::Format format) {
+  ImTextureID bind_texture(Resource_ID id, u32 layer, u32 level, rd::Format format) {
     ImGui_ID iid;
     MEMZERO(iid);
     iid.id         = id;
@@ -985,17 +966,26 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
     image_bindings.push(iid);
     return (ImTextureID)(size_t)(image_bindings.size - 1);
   }
-
-  void on_begin(rd::IPass_Context *pc) override {
-    rd::Image2D_Info info = pc->get_swapchain_image_info();
-    width                 = info.width;
-    height                = info.height;
+  void on_frame(rd::IFactory *factory) override {
+    rd::Image2D_Info scinfo = factory->get_swapchain_image_info();
+    width                   = scinfo.width;
+    height                  = scinfo.height;
     timer.update();
     rd::Clear_Color cl;
     MEMZERO(cl);
     cl.clear = true;
 
-    pc->add_render_target(pc->get_swapchain_image(), 0, 0, cl);
+    rd::Render_Pass_Create_Info info;
+    MEMZERO(info);
+    rd::RT_View rt0;
+    MEMZERO(rt0);
+    rt0.image             = factory->get_swapchain_image();
+    rt0.format            = rd::Format::NATIVE;
+    rt0.clear_color.clear = true;
+    rt0.clear_color.r     = 1.0f;
+    info.rts.push(rt0);
+    rd::Imm_Ctx *ctx = factory->start_render_pass(info);
+
     static string_ref            shader    = stref_s(R"(
 @(DECLARE_PUSH_CONSTANTS
   (add_field (type float2)   (name uScale))
@@ -1069,10 +1059,8 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
         {stref_s("VERTEX"), {}},
         {stref_s("PIXEL"), {}},
     };
-    if (vs.is_null())
-      vs = pc->create_shader_raw(rd::Stage_t::VERTEX, shader, &defines[0], 1);
-    if (ps.is_null())
-      ps = pc->create_shader_raw(rd::Stage_t::PIXEL, shader, &defines[1], 1);
+    if (vs.is_null()) vs = factory->create_shader_raw(rd::Stage_t::VERTEX, shader, &defines[0], 1);
+    if (ps.is_null()) ps = factory->create_shader_raw(rd::Stage_t::PIXEL, shader, &defines[1], 1);
 
     if (sampler.is_null()) {
       rd::Sampler_Create_Info info;
@@ -1085,7 +1073,7 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
       info.mip_mode       = rd::Filter::NEAREST;
       info.anisotropy     = false;
       info.max_anisotropy = 16.0f;
-      sampler             = pc->create_sampler(info);
+      sampler             = factory->create_sampler(info);
     }
 
     if (!imgui_initialized) {
@@ -1095,38 +1083,36 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
       ImGuiIO &io = ImGui::GetIO();
       io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
       ImGui::StyleColorsDark();
-      ImGui_ImplSDL2_InitForVulkan((SDL_Window *)pc->get_window_handle());
+      ImGui_ImplSDL2_InitForVulkan((SDL_Window *)pmng->get_window_handle());
 
       io.Fonts->GetTexDataAsRGBA32(&font_pixels, &font_width, &font_height);
 
       rd::Image_Create_Info info;
       MEMZERO(info);
-      info.format     = rd::Format::RGBA8_UNORM;
-      info.width      = font_width;
-      info.height     = font_height;
-      info.depth      = 1;
-      info.layers     = 1;
-      info.levels     = 1;
-      info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
-      info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_SAMPLED |
-                        (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST;
-      font_texture = pc->create_image(info);
-      io.Fonts->TexID =
-          bind_texture(font_texture, 0, 0, rd::Format::RGBA8_UNORM);
+      info.format   = rd::Format::RGBA8_UNORM;
+      info.width    = font_width;
+      info.height   = font_height;
+      info.depth    = 1;
+      info.layers   = 1;
+      info.levels   = 1;
+      info.mem_bits = (u32)rd::Memory_Bits::DEVICE_LOCAL;
+      info.usage_bits =
+          (u32)rd::Image_Usage_Bits::USAGE_SAMPLED | (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST;
+      font_texture    = factory->create_image(info);
+      io.Fonts->TexID = bind_texture(font_texture, 0, 0, rd::Format::RGBA8_UNORM);
 
       rd::Buffer_Create_Info buf_info;
       MEMZERO(buf_info);
       buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
       buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
       buf_info.size       = font_width * font_height * 4;
-      staging_buffer      = pc->create_buffer(buf_info);
+      staging_buffer      = factory->create_buffer(buf_info);
     }
 
-    ImGui_ImplSDL2_NewFrame((SDL_Window *)pc->get_window_handle());
+    ImGui_ImplSDL2_NewFrame((SDL_Window *)pmng->get_window_handle());
     ImGui::NewFrame();
-    ImGuiWindowFlags window_flags =
-        ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoDocking;
-    ImGuiViewport *viewport = ImGui::GetMainViewport();
+    ImGuiWindowFlags window_flags = ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoDocking;
+    ImGuiViewport *  viewport     = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->Pos);
     ImGui::SetNextWindowSize(viewport->Size);
     ImGui::SetNextWindowViewport(viewport->ID);
@@ -1134,8 +1120,7 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     window_flags |= ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
                     ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove;
-    window_flags |=
-        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus;
+    window_flags |= ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus;
     window_flags |= ImGuiWindowFlags_NoBackground;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 1.0f);
@@ -1143,13 +1128,12 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
     ImGui::Begin("DockSpace", nullptr, window_flags);
     ImGui::PopStyleVar(4);
     ImGuiID dockspace_id = ImGui::GetID("MyDockSpace");
-    ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f),
-                     ImGuiDockNodeFlags_PassthruCentralNode);
+    ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_PassthruCentralNode);
     ImGui::End();
 
     static bool show_demo_window = true;
     ImGui::ShowDemoWindow(&show_demo_window);
-    on_gui(pc);
+    on_gui(factory);
     ImGui::Render();
 
     draw_data = ImGui::GetDrawData();
@@ -1159,7 +1143,7 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
       buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
       buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
       buf_info.size       = (draw_data->TotalVtxCount + 1) * sizeof(ImDrawVert);
-      vertex_buffer       = pc->create_buffer(buf_info);
+      vertex_buffer       = factory->create_buffer(buf_info);
     }
     {
       rd::Buffer_Create_Info buf_info;
@@ -1167,44 +1151,39 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
       buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
       buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER;
       buf_info.size       = (draw_data->TotalIdxCount + 1) * sizeof(ImDrawIdx);
-      index_buffer        = pc->create_buffer(buf_info);
+      index_buffer        = factory->create_buffer(buf_info);
     }
-  }
-  void exec(rd::Imm_Ctx *ctx) override {
     {
 
       {
-        ImDrawVert *vtx_dst = (ImDrawVert *)ctx->map_buffer(vertex_buffer);
+        ImDrawVert *vtx_dst = (ImDrawVert *)factory->map_buffer(vertex_buffer);
 
         ito(draw_data->CmdListsCount) {
 
           const ImDrawList *cmd_list = draw_data->CmdLists[i];
-          memcpy(vtx_dst, cmd_list->VtxBuffer.Data,
-                 cmd_list->VtxBuffer.Size * sizeof(ImDrawVert));
+          memcpy(vtx_dst, cmd_list->VtxBuffer.Data, cmd_list->VtxBuffer.Size * sizeof(ImDrawVert));
 
           vtx_dst += cmd_list->VtxBuffer.Size;
         }
-        ctx->unmap_buffer(vertex_buffer);
+        factory->unmap_buffer(vertex_buffer);
       }
       {
-        ImDrawIdx *idx_dst = (ImDrawIdx *)ctx->map_buffer(index_buffer);
+        ImDrawIdx *idx_dst = (ImDrawIdx *)factory->map_buffer(index_buffer);
         ito(draw_data->CmdListsCount) {
 
           const ImDrawList *cmd_list = draw_data->CmdLists[i];
 
-          memcpy(idx_dst, cmd_list->IdxBuffer.Data,
-                 cmd_list->IdxBuffer.Size * sizeof(ImDrawIdx));
+          memcpy(idx_dst, cmd_list->IdxBuffer.Data, cmd_list->IdxBuffer.Size * sizeof(ImDrawIdx));
           idx_dst += cmd_list->IdxBuffer.Size;
         }
-        ctx->unmap_buffer(index_buffer);
+        factory->unmap_buffer(index_buffer);
       }
     }
     if (font_pixels != NULL) {
-      void *dst = ctx->map_buffer(staging_buffer);
+      void *dst = factory->map_buffer(staging_buffer);
       memcpy(dst, font_pixels, font_width * font_height * 4);
-      ctx->unmap_buffer(staging_buffer);
-      ctx->copy_buffer_to_image(staging_buffer, 0, font_texture,
-                                rd::Image_Copy::top_level());
+      factory->unmap_buffer(staging_buffer);
+      ctx->copy_buffer_to_image(staging_buffer, 0, font_texture, rd::Image_Copy::top_level());
       font_pixels = NULL;
     }
     setup_default_state(ctx);
@@ -1219,8 +1198,7 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
     bs.src_color        = rd::Blend_Factor::SRC_ALPHA;
     bs.color_write_mask = (u32)rd::Color_Component_Bit::R_BIT |
                           (u32)rd::Color_Component_Bit::G_BIT |
-                          (u32)rd::Color_Component_Bit::B_BIT |
-                          (u32)rd::Color_Component_Bit::A_BIT;
+                          (u32)rd::Color_Component_Bit::B_BIT | (u32)rd::Color_Component_Bit::A_BIT;
     ctx->OM_set_blend_state(0, bs);
     ctx->VS_set_shader(vs);
     ctx->PS_set_shader(ps);
@@ -1273,8 +1251,7 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
       ctx->push_constants(&control, 16, 4);
     }
     ctx->IA_set_index_buffer(index_buffer, 0, rd::Index_t::UINT16);
-    ctx->IA_set_vertex_buffer(0, vertex_buffer, 0, sizeof(ImDrawVert),
-                              rd::Input_Rate::VERTEX);
+    ctx->IA_set_vertex_buffer(0, vertex_buffer, 0, sizeof(ImDrawVert), rd::Input_Rate::VERTEX);
     u32 control = 0;
     ctx->push_constants(&control, 16, 4);
     for (int n = 0; n < draw_data->CmdListsCount; n++) {
@@ -1305,8 +1282,7 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
         ctx->bind_image(0, 0, 0, img.id, range, img.format);
         ctx->set_scissor(clip_rect.x, clip_rect.y, clip_rect.z - clip_rect.x,
                          clip_rect.w - clip_rect.y);
-        ctx->draw_indexed(pcmd->ElemCount, 1,
-                          pcmd->IdxOffset + global_idx_offset, 0,
+        ctx->draw_indexed(pcmd->ElemCount, 1, pcmd->IdxOffset + global_idx_offset, 0,
                           pcmd->VtxOffset + global_vtx_offset);
         if (control != 0) {
           control = 0;
@@ -1318,7 +1294,18 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
     }
 
     ImGuiIO &io = ImGui::GetIO();
+    factory->release_resource(vertex_buffer);
+    factory->release_resource(index_buffer);
+    if (staging_buffer.is_null() == false) {
+      factory->release_resource(staging_buffer);
+    }
+    vertex_buffer.reset();
+    index_buffer.reset();
+    staging_buffer.reset();
+    image_bindings.size = 1;
+    factory->end_render_pass(ctx);
   }
+
   ImVec2 get_window_size() {
     auto  wsize       = ImGui::GetWindowSize();
     float height_diff = 42;
@@ -1329,8 +1316,7 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
     }
     return wsize;
   }
-  string_ref get_name() override { return stref_s("IGUI_Pass"); }
-  void       release(rd::IPass_Context *rm) override {
+  void release(rd::IFactory *rm) {
     ImGui_ImplSDL2_Shutdown();
     ImGui::DestroyContext();
     rm->release_resource(vs);
@@ -1339,12 +1325,13 @@ class IGUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
   }
 };
 
+#if 0
 struct Mip_Builder {
   Resource_ID cs;
   Resource_ID staging_buffer;
   bool        is_initialized;
 
-  static Resource_ID create_image(rd::IPass_Context *pc,
+  static Resource_ID create_image(rd::IFactory *factory,
                                   Image2D_Raw const &image, bool mips) {
     Resource_ID           output_image;
     rd::Image_Create_Info info;
@@ -1358,15 +1345,15 @@ struct Mip_Builder {
     info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
     info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST |
                       (u32)rd::Image_Usage_Bits::USAGE_SAMPLED;
-    output_image = pc->create_image(info);
+    output_image = factory->create_image(info);
     return output_image;
   }
 
-  void init(rd::IPass_Context *pc) {
+  void init(rd::IFactory *factory) {
     if (!is_initialized) {
       is_initialized = true;
       if (staging_buffer.is_null() == false)
-        pc->release_resource(staging_buffer);
+        factory->release_resource(staging_buffer);
 
       rd::Buffer_Create_Info buf_info;
       MEMZERO(buf_info);
@@ -1375,11 +1362,11 @@ struct Mip_Builder {
                             (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST |
                             (u32)rd::Buffer_Usage_Bits::USAGE_UAV;
       buf_info.size  = 1 << 26;
-      staging_buffer = pc->create_buffer(buf_info);
+      staging_buffer = factory->create_buffer(buf_info);
 
       if (cs.is_null()) {
         TMP_STORAGE_SCOPE;
-        cs = pc->create_shader_raw(rd::Stage_t::COMPUTE, stref_s(R"(
+        cs = factory->create_shader_raw(rd::Stage_t::COMPUTE, stref_s(R"(
 @(DECLARE_PUSH_CONSTANTS
   (add_field (type u32)  (name src_offset))
   (add_field (type u32)  (name src_width))
@@ -1536,16 +1523,16 @@ void store(ivec2 coord, float4 val) {
       u32 dst_height;
       u32 format;
       u32 op;
-    } pc;
-    MEMZERO(pc);
-    pc.op = 0;
+    } factory;
+    MEMZERO(factory);
+    factory.op = 0;
     switch (image.format) {
     // clang-format off
-      case rd::Format::RGBA8_SRGBA:  {  pc.format = 0; } break;
-      case rd::Format::RGBA8_UNORM:  {  pc.format = 1; } break;
-      case rd::Format::RGB32_FLOAT:  {  pc.format = 2; } break;
-      case rd::Format::R32_FLOAT:    {  pc.format = 3; } break;
-      case rd::Format::RGBA32_FLOAT: {  pc.format = 4; } break;
+      case rd::Format::RGBA8_SRGBA:  {  factory.format = 0; } break;
+      case rd::Format::RGBA8_UNORM:  {  factory.format = 1; } break;
+      case rd::Format::RGB32_FLOAT:  {  factory.format = 2; } break;
+      case rd::Format::R32_FLOAT:    {  factory.format = 3; } break;
+      case rd::Format::RGBA32_FLOAT: {  factory.format = 4; } break;
       // clang-format on
     default: TRAP;
     }
@@ -1571,13 +1558,13 @@ void store(ivec2 coord, float4 val) {
     }
 
     for (u32 i = 0; i < mip_offsets.size - 1; i++) {
-      pc.src_offset = mip_offsets[i] / 4;
-      pc.src_width  = mip_sizes[i].x;
-      pc.src_height = mip_sizes[i].y;
-      pc.dst_offset = mip_offsets[i + 1] / 4;
-      pc.dst_width  = mip_sizes[i + 1].x;
-      pc.dst_height = mip_sizes[i + 1].y;
-      ctx->push_constants(&pc, 0, sizeof(pc));
+      factory.src_offset = mip_offsets[i] / 4;
+      factory.src_width  = mip_sizes[i].x;
+      factory.src_height = mip_sizes[i].y;
+      factory.dst_offset = mip_offsets[i + 1] / 4;
+      factory.dst_width  = mip_sizes[i + 1].x;
+      factory.dst_height = mip_sizes[i + 1].y;
+      ctx->push_constants(&factory, 0, sizeof(factory));
       ctx->buffer_barrier(staging_buffer,
                           (u32)rd::Access_Bits::SHADER_READ |
                               (u32)rd::Access_Bits::SHADER_WRITE);
@@ -1599,7 +1586,7 @@ void store(ivec2 coord, float4 val) {
     }
   }
 
-  void release(rd::IPass_Context *rm) {
+  void release(rd::IFactory *rm) {
     rm->release_resource(cs);
     if (staging_buffer.is_null() == false) {
       rm->release_resource(staging_buffer);
@@ -1614,12 +1601,12 @@ struct Raw_Mesh_3p16i_Wrapper {
   u32         num_indices;
   u32         num_vertices;
 
-  void release(rd::IPass_Context *rm) {
+  void release(rd::IFactory *rm) {
     rm->release_resource(vertex_buffer);
     rm->release_resource(index_buffer);
     MEMZERO(*this);
   }
-  void init(rd::IPass_Context *rm, Raw_Mesh_3p16i const &model) {
+  void init(rd::IFactory *rm, Raw_Mesh_3p16i const &model) {
     num_indices  = model.indices.size * 3;
     num_vertices = model.positions.size;
     {
@@ -1684,7 +1671,7 @@ class Gizmo_Layer {
   Resource_ID gizmo_lines_ps;
 
   public:
-  void init(rd::IPass_Context *rm) {
+  void init(rd::IFactory *rm) {
     cylinder_draw_cmds.init();
     sphere_draw_cmds.init();
     cone_draw_cmds.init();
@@ -1795,7 +1782,7 @@ class Gizmo_Layer {
     gizmo_lines_ps =
         rm->create_shader_raw(rd::Stage_t::PIXEL, shader_lines, &defines[1], 1);
   }
-  void release(rd::IPass_Context *rm) {
+  void release(rd::IFactory *rm) {
     cylinder_draw_cmds.release();
     cone_draw_cmds.release();
     sphere_draw_cmds.release();
@@ -1869,8 +1856,8 @@ class Gizmo_Layer {
   bool on_mouse_down(float3 ray_origin, float3 ray_dir) {}
   void on_mouse_up(float3 ray_origin, float3 ray_dir) {}
   void on_mouse_drag(float3 ray_origin, float3 ray_dir) {}
-  void on_pass_begin(rd::IPass_Context *rm) {}
-  void on_pass_end(rd::IPass_Context *rm) {}
+  void on_pass_begin(rd::IFactory *rm) {}
+  void on_pass_end(rd::IFactory *rm) {}
   void render(rd::Imm_Ctx *ctx, float4x4 const &viewproj) {
     if (cylinder_draw_cmds.size == 0 && sphere_draw_cmds.size == 0 &&
         cone_draw_cmds.size == 0 && line_segments.size == 0)
@@ -1949,7 +1936,7 @@ class Gizmo_Layer {
     if (line_segments.size != 0) {
       ctx->push_state();
       defer(ctx->pop_state());
-      ctx->RS_set_line_width(4.2f);
+      ctx->RS_set_line_width(2.2f);
       ctx->RS_set_depth_bias(-30.0f);
 
       rd::Buffer_Create_Info buf_info;
@@ -1990,5 +1977,7 @@ class Gizmo_Layer {
     }
   }
 };
+
+#endif
 
 #endif // RENDERING_UTILS_HPP

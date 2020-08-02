@@ -29,12 +29,12 @@ struct Timer {
   void release() {}
 };
 
-#define ASSERT_ALWAYS(x)                                                       \
-  do {                                                                         \
-    if (!(x)) {                                                                \
-      fprintf(stderr, "%s:%i [FAIL] at %s\n", __FILE__, __LINE__, #x);         \
-      abort();                                                                 \
-    }                                                                          \
+#define ASSERT_ALWAYS(x)                                                                                               \
+  do {                                                                                                                 \
+    if (!(x)) {                                                                                                        \
+      fprintf(stderr, "%s:%i [FAIL] at %s\n", __FILE__, __LINE__, #x);                                                 \
+      abort();                                                                                                         \
+    }                                                                                                                  \
   } while (0)
 #define ASSERT_DEBUG(x) ASSERT_ALWAYS(x)
 #define ASSERT_PANIC(x) ASSERT_ALWAYS(x)
@@ -70,23 +70,23 @@ using f64 = double;
 
 #if __linux__
 // UNIX headers
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
-#define DLL_EXPORT __attribute__((visibility("default")))
-#define ATTR_USED __attribute__((used))
+#  include <sys/mman.h>
+#  include <sys/stat.h>
+#  include <sys/types.h>
+#  include <unistd.h>
+#  define DLL_EXPORT __attribute__((visibility("default")))
+#  define ATTR_USED __attribute__((used))
 #elif WIN32
-#pragma warning(disable : 4996)
-#define NOMINMAX
-#include <Windows.h>
-#undef min
-#undef max
-#define DLL_EXPORT __declspec(dllexport)
-#define ATTR_USED
-#define _CRT_SECURE_NO_WARNINGS
+#  pragma warning(disable : 4996)
+#  define NOMINMAX
+#  include <Windows.h>
+#  undef min
+#  undef max
+#  define DLL_EXPORT __declspec(dllexport)
+#  define ATTR_USED
+#  define _CRT_SECURE_NO_WARNINGS
 
-#include <cfenv>
+#  include <cfenv>
 
 static u32 enable_fpe() {
   u32 fe_value  = ~(    //
@@ -124,15 +124,13 @@ static void restore_fpe(u32 new_mask) {
   ASSERT_DEBUG(result == 0);
 }
 #else
-#define DLL_EXPORT
-#define ATTR_USED
+#  define DLL_EXPORT
+#  define ATTR_USED
 #endif
 
 template <typename T> T copy(T const &in) { return in; }
 
-template <typename M, typename K> bool contains(M const &in, K const &key) {
-  return in.find(key) != in.end();
-}
+template <typename M, typename K> bool contains(M const &in, K const &key) { return in.find(key) != in.end(); }
 
 template <typename M> bool sets_equal(M const &a, M const &b) {
   if (a.size() != b.size()) return false;
@@ -156,16 +154,16 @@ template <typename T, typename F> bool any(T set, F f) {
   return false;
 }
 
-#define UNIMPLEMENTED_(s)                                                      \
-  do {                                                                         \
-    fprintf(stderr, "%s:%i UNIMPLEMENTED %s\n", __FILE__, __LINE__, s);        \
-    abort();                                                                   \
+#define UNIMPLEMENTED_(s)                                                                                              \
+  do {                                                                                                                 \
+    fprintf(stderr, "%s:%i UNIMPLEMENTED %s\n", __FILE__, __LINE__, s);                                                \
+    abort();                                                                                                           \
   } while (0)
 #define UNIMPLEMENTED UNIMPLEMENTED_("")
-#define TRAP                                                                   \
-  do {                                                                         \
-    fprintf(stderr, "%s:%i TRAP\n", __FILE__, __LINE__);                       \
-    abort();                                                                   \
+#define TRAP                                                                                                           \
+  do {                                                                                                                 \
+    fprintf(stderr, "%s:%i TRAP\n", __FILE__, __LINE__);                                                               \
+    abort();                                                                                                           \
   } while (0)
 #define NOCOMMIT (void)0
 
@@ -190,14 +188,14 @@ template <typename F> __Defer__<F> defer_func(F f) { return __Defer__<F>(f); }
 #define PERF_ENTER(name)
 #define PERF_EXIT(name)
 #define OK_FALLTHROUGH (void)0;
-#define TMP_STORAGE_SCOPE                                                      \
-  tl_alloc_tmp_enter();                                                        \
+#define TMP_STORAGE_SCOPE                                                                                              \
+  tl_alloc_tmp_enter();                                                                                                \
   defer(tl_alloc_tmp_exit(););
-#define SWAP(x, y)                                                             \
-  do {                                                                         \
-    auto tmp = x;                                                              \
-    x        = y;                                                              \
-    y        = tmp;                                                            \
+#define SWAP(x, y)                                                                                                     \
+  do {                                                                                                                 \
+    auto tmp = x;                                                                                                      \
+    x        = y;                                                                                                      \
+    y        = tmp;                                                                                                    \
   } while (0)
 
 #if __linux__
@@ -212,26 +210,16 @@ static inline size_t get_page_size() {
 static inline size_t get_page_size() { return 1 << 12; }
 #endif
 
-static inline size_t page_align_up(size_t n) {
-  return (n + get_page_size() - 1) & (~(get_page_size() - 1));
-}
+static inline size_t page_align_up(size_t n) { return (n + get_page_size() - 1) & (~(get_page_size() - 1)); }
 
-static inline size_t page_align_down(size_t n) {
-  return (n) & (~(get_page_size() - 1));
-}
+static inline size_t page_align_down(size_t n) { return (n) & (~(get_page_size() - 1)); }
 
-static inline size_t get_num_pages(size_t size) {
-  return page_align_up(size) / get_page_size();
-}
+static inline size_t get_num_pages(size_t size) { return page_align_up(size) / get_page_size(); }
 
 #if __linux__
-static inline void protect_pages(void *ptr, size_t num_pages) {
-  mprotect(ptr, num_pages * get_page_size(), PROT_NONE);
-}
-static inline void unprotect_pages(void *ptr, size_t num_pages,
-                                   bool exec = false) {
-  mprotect(ptr, num_pages * get_page_size(),
-           PROT_WRITE | PROT_READ | (exec ? PROT_EXEC : 0));
+static inline void protect_pages(void *ptr, size_t num_pages) { mprotect(ptr, num_pages * get_page_size(), PROT_NONE); }
+static inline void unprotect_pages(void *ptr, size_t num_pages, bool exec = false) {
+  mprotect(ptr, num_pages * get_page_size(), PROT_WRITE | PROT_READ | (exec ? PROT_EXEC : 0));
 }
 
 static inline void unmap_pages(void *ptr, size_t num_pages) {
@@ -240,22 +228,19 @@ static inline void unmap_pages(void *ptr, size_t num_pages) {
 }
 
 static inline void map_pages(void *ptr, size_t num_pages) {
-  void *new_ptr = mmap(ptr, num_pages * get_page_size(), PROT_READ | PROT_WRITE,
-                       MAP_ANON | MAP_PRIVATE, -1, 0);
+  void *new_ptr = mmap(ptr, num_pages * get_page_size(), PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
   ASSERT_ALWAYS((size_t)new_ptr == (size_t)ptr);
 }
 #elif WIN32
 // TODO
 static inline void protect_pages(void *ptr, size_t num_pages) {}
-static inline void unprotect_pages(void *ptr, size_t num_pages,
-                                   bool exec = false) {}
+static inline void unprotect_pages(void *ptr, size_t num_pages, bool exec = false) {}
 static inline void unmap_pages(void *ptr, size_t num_pages) {}
 static inline void map_pages(void *ptr, size_t num_pages) {}
 #else
 // Noops
 static inline void protect_pages(void *ptr, size_t num_pages) {}
-static inline void unprotect_pages(void *ptr, size_t num_pages,
-                                   bool exec = false) {}
+static inline void unprotect_pages(void *ptr, size_t num_pages, bool exec = false) {}
 static inline void unmap_pages(void *ptr, size_t num_pages) {}
 static inline void map_pages(void *ptr, size_t num_pages) {}
 #endif
@@ -263,14 +248,10 @@ static inline void map_pages(void *ptr, size_t num_pages) {}
 template <typename T, typename V> struct Pair {
   T    first;
   V    second;
-  bool operator==(Pair const &that) const {
-    return first == that.first && second == that.second;
-  }
+  bool operator==(Pair const &that) const { return first == that.first && second == that.second; }
 };
 
-template <typename T, typename V> Pair<T, V> make_pair(T t, V v) {
-  return {t, v};
-}
+template <typename T, typename V> Pair<T, V> make_pair(T t, V v) { return {t, v}; }
 
 template <typename T, typename V> u64 hash_of(Pair<T, V> const &p) {
   return hash_of(hash_of(p.first)) ^ hash_of(p.second);
@@ -288,11 +269,9 @@ template <typename T = uint8_t> struct Pool {
     ASSERT_DEBUG(capacity > 0);
     Pool   out;
     size_t STACK_CAPACITY = 0x20 * sizeof(size_t);
-    out.mem_length =
-        get_num_pages(STACK_CAPACITY + capacity * sizeof(T)) * get_page_size();
+    out.mem_length        = get_num_pages(STACK_CAPACITY + capacity * sizeof(T)) * get_page_size();
 #if __linux__
-    out.ptr = (uint8_t *)mmap(NULL, out.mem_length, PROT_READ | PROT_WRITE,
-                              MAP_ANON | MAP_PRIVATE, -1, 0);
+    out.ptr = (uint8_t *)mmap(NULL, out.mem_length, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     ASSERT_ALWAYS(out.ptr != MAP_FAILED);
 #else
     out.ptr = (uint8_t *)malloc(out.mem_length);
@@ -305,9 +284,7 @@ template <typename T = uint8_t> struct Pool {
     return out;
   }
 
-  T *back() {
-    return (T *)(this->ptr + this->stack_capacity + this->cursor * sizeof(T));
-  }
+  T *back() { return (T *)(this->ptr + this->stack_capacity + this->cursor * sizeof(T)); }
 
   void advance(size_t size) {
     this->cursor += size;
@@ -330,9 +307,7 @@ template <typename T = uint8_t> struct Pool {
 
   bool has_items() { return this->cursor > 0; }
 
-  T *at(uint32_t i) {
-    return (T *)(this->ptr + this->stack_capacity + i * sizeof(T));
-  }
+  T *at(uint32_t i) { return (T *)(this->ptr + this->stack_capacity + i * sizeof(T)); }
 
   T *alloc(size_t size) {
     ASSERT_DEBUG(size != 0);
@@ -365,10 +340,9 @@ template <typename T = uint8_t> struct Pool {
 
   T *alloc_page_aligned(size_t size) {
     ASSERT_DEBUG(size != 0);
-    size   = page_align_up(size) + get_page_size();
-    T *ptr = (T *)(this->ptr + this->stack_capacity + this->cursor * sizeof(T));
-    T *aligned_ptr =
-        (T *)(void *)page_align_down((size_t)ptr + get_page_size());
+    size           = page_align_up(size) + get_page_size();
+    T *ptr         = (T *)(this->ptr + this->stack_capacity + this->cursor * sizeof(T));
+    T *aligned_ptr = (T *)(void *)page_align_down((size_t)ptr + get_page_size());
     this->cursor += size;
     ASSERT_DEBUG(this->cursor < this->capacity);
     return aligned_ptr;
@@ -431,9 +405,7 @@ void tl_alloc_tmp_exit();
 struct string_ref {
   const char *ptr;
   size_t      len;
-  string_ref  substr(size_t offset, size_t new_len) {
-    return string_ref{ptr + offset, new_len};
-  }
+  string_ref  substr(size_t offset, size_t new_len) { return string_ref{ptr + offset, new_len}; }
 };
 
 static inline i32 str_match(char const *cur, char const *patt) {
@@ -465,8 +437,7 @@ static inline i32 str_find(char const *cur, size_t maxlen, char c) {
 
 static inline bool operator==(string_ref a, string_ref b) {
   if (a.ptr == NULL || b.ptr == NULL) return false;
-  return a.len != b.len ? false
-                        : strncmp(a.ptr, b.ptr, a.len) == 0 ? true : false;
+  return a.len != b.len ? false : strncmp(a.ptr, b.ptr, a.len) == 0 ? true : false;
 }
 
 static inline uint64_t hash_of(uint64_t u) {
@@ -494,9 +465,7 @@ template <typename T> static void swap(T &a, T &b) {
 static inline uint64_t hash_of(uint32_t u) { return hash_of((uint64_t)u); }
 static inline uint64_t hash_of(uint16_t u) { return hash_of((uint64_t)u); }
 
-template <typename T> static uint64_t hash_of(T *ptr) {
-  return hash_of((size_t)ptr);
-}
+template <typename T> static uint64_t hash_of(T *ptr) { return hash_of((size_t)ptr); }
 
 static inline uint64_t hash_of(string_ref a) {
   if (a.len == 0) return 0;
@@ -512,8 +481,7 @@ static inline uint64_t hash_of(string_ref a) {
 /** String view of a static string
  */
 static inline string_ref stref_s(char const *static_string) {
-  if (static_string == NULL || static_string[0] == '\0')
-    return string_ref{NULL, 0};
+  if (static_string == NULL || static_string[0] == '\0') return string_ref{NULL, 0};
   ASSERT_DEBUG(static_string != NULL);
   string_ref out;
   out.ptr = static_string;
@@ -580,14 +548,12 @@ static inline int32_t stref_find(string_ref a, string_ref b, size_t start = 0) {
   return -1;
 }
 
-static inline int32_t stref_find_last(string_ref a, string_ref b,
-                                      size_t start = 0) {
+static inline int32_t stref_find_last(string_ref a, string_ref b, size_t start = 0) {
   int32_t last_pos = -1;
   int32_t cursor   = stref_find(a, b, start);
   while (cursor >= 0) {
     last_pos = cursor;
-    if ((size_t)cursor + 1 < a.len)
-      cursor = stref_find_last(a, b, (size_t)(cursor + 1));
+    if ((size_t)cursor + 1 < a.len) cursor = stref_find_last(a, b, (size_t)(cursor + 1));
   }
   return last_pos;
 }
@@ -613,6 +579,11 @@ template <int N> struct inline_string {
     memcpy(buf, str.ptr, len);
     if (len < N) buf[len] = '\0';
   }
+  void init(char const *str) {
+    size_t len = MIN(strlen(str), N);
+    memcpy(buf, str, len);
+    if (len < N) buf[len] = '\0';
+  }
   string_ref ref() const { return string_ref{&buf[0], len()}; }
   u32        len() const {
     ito(N) {
@@ -622,16 +593,12 @@ template <int N> struct inline_string {
   }
 };
 
-template <int N>
-static inline bool operator==(inline_string<N> const &a,
-                              inline_string<N> const &b) {
+template <int N> static inline bool operator==(inline_string<N> const &a, inline_string<N> const &b) {
   if (a.len() != b.len()) return false;
   return strncmp(a.buf, b.buf, a.len()) == 0 ? true : false;
 }
 
-template <int N>
-static inline bool operator!=(inline_string<N> const &a,
-                              inline_string<N> const &b) {
+template <int N> static inline bool operator!=(inline_string<N> const &a, inline_string<N> const &b) {
   return !(a == b);
 }
 
@@ -655,13 +622,10 @@ struct string {
 
 static inline bool operator==(string a, string b) {
   if (a.ptr == NULL || b.ptr == NULL) return false;
-  return a.len != b.len ? false
-                        : strncmp(a.ptr, b.ptr, a.len) == 0 ? true : false;
+  return a.len != b.len ? false : strncmp(a.ptr, b.ptr, a.len) == 0 ? true : false;
 }
 
-template <int N> static inline uint64_t hash_of(inline_string<N> a) {
-  return hash_of(a.ref());
-}
+template <int N> static inline uint64_t hash_of(inline_string<N> a) { return hash_of(a.ref()); }
 
 static inline uint64_t hash_of(string a) { return hash_of(a.ref()); }
 
@@ -689,10 +653,8 @@ struct String_Builder {
   void       init() { tmp_buf = Pool<char>::create(1 << 20); }
   void       release() { tmp_buf.release(); }
   void       reset() { tmp_buf.reset(); }
-  string_ref get_str() {
-    return string_ref{(char const *)tmp_buf.at(0), tmp_buf.cursor};
-  }
-  void putf(char const *fmt, ...) {
+  string_ref get_str() { return string_ref{(char const *)tmp_buf.at(0), tmp_buf.cursor}; }
+  void       putf(char const *fmt, ...) {
     va_list args;
     va_start(args, fmt);
     i32 len = vsprintf(tmp_buf.back(), fmt, args);
@@ -746,10 +708,22 @@ static inline char *read_file_tmp(char const *filename) {
   return data;
 }
 
-static inline void ATTR_USED write_image_rgba32_float_pfm(const char *file_name,
-                                                          void *      data,
-                                                          uint32_t    width,
-                                                          uint32_t    height) {
+static inline string_ref read_file_tmp_stref(char const *filename) {
+  FILE *text_file = fopen(filename, "rb");
+  if (text_file == NULL) return string_ref{NULL, 0};
+  fseek(text_file, 0, SEEK_END);
+  long fsize = ftell(text_file);
+  fseek(text_file, 0, SEEK_SET);
+  size_t size = (size_t)fsize;
+  char * data = (char *)tl_alloc_tmp((size_t)fsize + 1);
+  fread(data, 1, (size_t)fsize, text_file);
+  data[size] = '\0';
+  fclose(text_file);
+  return string_ref{data, (size_t)fsize};
+}
+
+static inline void ATTR_USED write_image_rgba32_float_pfm(const char *file_name, void *data, uint32_t width,
+                                                          uint32_t height) {
   FILE *file = fopen(file_name, "wb");
   ASSERT_ALWAYS(file);
   fprintf(file, "PF\n%d %d\n%lf\n", width, height, -1.0f);
@@ -764,9 +738,7 @@ static inline void ATTR_USED write_image_rgba32_float_pfm(const char *file_name,
   fclose(file);
 }
 
-static inline void ATTR_USED write_image_2d_i32_ppm(const char *file_name,
-                                                    void *data, uint32_t pitch,
-                                                    uint32_t width,
+static inline void ATTR_USED write_image_2d_i32_ppm(const char *file_name, void *data, uint32_t pitch, uint32_t width,
                                                     uint32_t height) {
   FILE *file = fopen(file_name, "wb");
   ASSERT_ALWAYS(file);
@@ -775,12 +747,11 @@ static inline void ATTR_USED write_image_2d_i32_ppm(const char *file_name,
   fprintf(file, "255\n");
   ito(height) {
     jto(width) {
-      uint32_t pixel =
-          *(uint32_t *)(void *)(((uint8_t *)data) + i * pitch + j * 4);
-      uint8_t r = ((pixel >> 0) & 0xff);
-      uint8_t g = ((pixel >> 8) & 0xff);
-      uint8_t b = ((pixel >> 16) & 0xff);
-      uint8_t a = ((pixel >> 24) & 0xff);
+      uint32_t pixel = *(uint32_t *)(void *)(((uint8_t *)data) + i * pitch + j * 4);
+      uint8_t  r     = ((pixel >> 0) & 0xff);
+      uint8_t  g     = ((pixel >> 8) & 0xff);
+      uint8_t  b     = ((pixel >> 16) & 0xff);
+      uint8_t  a     = ((pixel >> 24) & 0xff);
       if (a == 0) {
         r = ((i & 1) ^ (j & 1)) * 127;
         g = ((i & 1) ^ (j & 1)) * 127;
@@ -794,9 +765,7 @@ static inline void ATTR_USED write_image_2d_i32_ppm(const char *file_name,
   fclose(file);
 }
 
-static inline void ATTR_USED write_image_2d_i24_ppm(const char *file_name,
-                                                    void *data, uint32_t pitch,
-                                                    uint32_t width,
+static inline void ATTR_USED write_image_2d_i24_ppm(const char *file_name, void *data, uint32_t pitch, uint32_t width,
                                                     uint32_t height) {
   FILE *file = fopen(file_name, "wb");
   ASSERT_ALWAYS(file);
@@ -805,12 +774,9 @@ static inline void ATTR_USED write_image_2d_i24_ppm(const char *file_name,
   fprintf(file, "255\n");
   ito(height) {
     jto(width) {
-      uint8_t r =
-          *(uint8_t *)(void *)(((uint8_t *)data) + i * pitch + j * 3 + 0);
-      uint8_t g =
-          *(uint8_t *)(void *)(((uint8_t *)data) + i * pitch + j * 3 + 1);
-      uint8_t b =
-          *(uint8_t *)(void *)(((uint8_t *)data) + i * pitch + j * 3 + 2);
+      uint8_t r = *(uint8_t *)(void *)(((uint8_t *)data) + i * pitch + j * 3 + 0);
+      uint8_t g = *(uint8_t *)(void *)(((uint8_t *)data) + i * pitch + j * 3 + 1);
+      uint8_t b = *(uint8_t *)(void *)(((uint8_t *)data) + i * pitch + j * 3 + 2);
       fputc(r, file);
       fputc(g, file);
       fputc(b, file);
@@ -819,9 +785,7 @@ static inline void ATTR_USED write_image_2d_i24_ppm(const char *file_name,
   fclose(file);
 }
 
-static inline void ATTR_USED write_image_2d_i8_ppm(const char *file_name,
-                                                   void *data, uint32_t pitch,
-                                                   uint32_t width,
+static inline void ATTR_USED write_image_2d_i8_ppm(const char *file_name, void *data, uint32_t pitch, uint32_t width,
                                                    uint32_t height) {
   FILE *file = fopen(file_name, "wb");
   ASSERT_ALWAYS(file);
@@ -846,8 +810,7 @@ struct Allocator {
   static Allocator *get_default() {
     struct _Allocator : public Allocator {
       virtual void *alloc(size_t size) override { return tl_alloc(size); }
-      virtual void *realloc(void *ptr, size_t old_size,
-                            size_t new_size) override {
+      virtual void *realloc(void *ptr, size_t old_size, size_t new_size) override {
         return tl_realloc(ptr, old_size, new_size);
       }
       virtual void free(void *ptr) override { tl_free(ptr); }
@@ -859,10 +822,8 @@ struct Allocator {
 
 struct Default_Allocator {
   static void *alloc(size_t size) { return tl_alloc(size); }
-  static void *realloc(void *ptr, size_t old_size, size_t new_size) {
-    return tl_realloc(ptr, old_size, new_size);
-  }
-  static void free(void *ptr) { tl_free(ptr); }
+  static void *realloc(void *ptr, size_t old_size, size_t new_size) { return tl_realloc(ptr, old_size, new_size); }
+  static void  free(void *ptr) { tl_free(ptr); }
 };
 
 //#define SWAP(a, b) do {auto tmp = a; a = b; b = tmp; } while (0)
@@ -993,9 +954,8 @@ struct Array {
   void resize(size_t new_size) {
     if (new_size > capacity) {
       uint64_t new_capacity = new_size;
-      ptr      = (T *)Allcator_t::realloc(ptr, sizeof(T) * capacity,
-                                     sizeof(T) * new_capacity);
-      capacity = new_capacity;
+      ptr                   = (T *)Allcator_t::realloc(ptr, sizeof(T) * capacity, sizeof(T) * new_capacity);
+      capacity              = new_capacity;
     }
     ASSERT_DEBUG(ptr != NULL);
     size = new_size;
@@ -1008,8 +968,7 @@ struct Array {
   }
   void reserve(size_t new_capacity) {
     if (new_capacity > capacity) {
-      ptr      = (T *)Allcator_t::realloc(ptr, sizeof(T) * capacity,
-                                     sizeof(T) * new_capacity);
+      ptr      = (T *)Allcator_t::realloc(ptr, sizeof(T) * capacity, sizeof(T) * new_capacity);
       capacity = new_capacity;
     }
   }
@@ -1021,8 +980,7 @@ struct Array {
   void push(T elem) {
     if (size + 1 > capacity) {
       size_t new_capacity = capacity + grow_k;
-      ptr                 = (T *)Allcator_t::realloc(ptr, sizeof(T) * capacity,
-                                     sizeof(T) * new_capacity);
+      ptr                 = (T *)Allcator_t::realloc(ptr, sizeof(T) * capacity, sizeof(T) * new_capacity);
       capacity            = new_capacity;
     }
     ASSERT_DEBUG(capacity >= size + 1);
@@ -1042,9 +1000,8 @@ struct Array {
     T elem = ptr[size - 1];
     if (size + grow_k < capacity) {
       uint64_t new_capacity = capacity - grow_k;
-      ptr      = (T *)Allcator_t::realloc(ptr, sizeof(T) * capacity,
-                                     sizeof(T) * new_capacity);
-      capacity = new_capacity;
+      ptr                   = (T *)Allcator_t::realloc(ptr, sizeof(T) * capacity, sizeof(T) * new_capacity);
+      capacity              = new_capacity;
     }
     ASSERT_DEBUG(size != 0);
     size -= 1;
@@ -1111,8 +1068,7 @@ struct SmallArray {
   }
 };
 
-template <typename K, typename Allcator_t = Default_Allocator,
-          size_t grow_k = 0x10, size_t MAX_ATTEMPTS = 0x10>
+template <typename K, typename Allcator_t = Default_Allocator, size_t grow_k = 0x10, size_t MAX_ATTEMPTS = 0x10>
 struct Hash_Set {
   struct Hash_Pair {
     K        key;
@@ -1172,8 +1128,7 @@ struct Hash_Set {
         arr.ptr[id] = pair;
         item_count += 1;
         return true;
-      } else if (arr.ptr[id].hash == key_hash &&
-                 arr.ptr[id].key == key) { // Override
+      } else if (arr.ptr[id].hash == key_hash && arr.ptr[id].key == key) { // Override
         arr.ptr[id] = pair;
         return true;
       } else { // collision
@@ -1267,17 +1222,15 @@ template <typename K, typename V> struct Map_Pair {
   bool operator==(Map_Pair const &that) const { return this->key == that.key; }
 };
 
-template <typename K, typename V> u64 hash_of(Map_Pair<K, V> const &item) {
-  return hash_of(item.key);
-}
+template <typename K, typename V> u64 hash_of(Map_Pair<K, V> const &item) { return hash_of(item.key); }
 
-template <typename K, typename V, typename Allcator_t = Default_Allocator,
-          size_t grow_k = 0x10, size_t MAX_ATTEMPTS = 0x20>
+template <typename K, typename V, typename Allcator_t = Default_Allocator, size_t grow_k = 0x10,
+          size_t MAX_ATTEMPTS = 0x20>
 struct Hash_Table {
   using Pair_t = Map_Pair<K, V>;
   Hash_Set<Map_Pair<K, V>, Allcator_t, grow_k, MAX_ATTEMPTS> set;
-  void release() { set.release(); }
-  void init() { set.init(); }
+  void                                                       release() { set.release(); }
+  void                                                       init() { set.init(); }
 
   i32 find(K key) { return set.find(Map_Pair<K, V>{key, {}}); }
 
@@ -1346,20 +1299,20 @@ struct Hash_Table {
 
 #ifdef UTILS_TL_IMPL
 #ifndef UTILS_TL_IMPL_H
-#define UTILS_TL_IMPL_H
-#include <string.h>
+#  define UTILS_TL_IMPL_H
+#  include <string.h>
 
-#ifndef UTILS_TL_TMP_SIZE
-#define UTILS_TL_TMP_SIZE 1 << 24
-#endif
+#  ifndef UTILS_TL_TMP_SIZE
+#    define UTILS_TL_TMP_SIZE 1 << 24
+#  endif
 
 struct Thread_Local {
   Temporary_Storage<> temporal_storage;
   bool                initialized = false;
   ~Thread_Local() { temporal_storage.release(); }
-#ifdef UTILS_TL_IMPL_DEBUG
+#  ifdef UTILS_TL_IMPL_DEBUG
   i64 allocated = 0;
-#endif
+#  endif
 };
 
 // TODO(aschrein): Change to __thread?
@@ -1373,27 +1326,25 @@ Thread_Local *get_tl() {
   return &g_tl;
 }
 
-void *tl_alloc_tmp(size_t size) {
-  return get_tl()->temporal_storage.alloc(size);
-}
+void *tl_alloc_tmp(size_t size) { return get_tl()->temporal_storage.alloc(size); }
 
 void tl_alloc_tmp_enter() { get_tl()->temporal_storage.enter_scope(); }
 void tl_alloc_tmp_exit() { get_tl()->temporal_storage.exit_scope(); }
 
 void *tl_alloc(size_t size) {
-#ifdef UTILS_TL_IMPL_DEBUG
+#  ifdef UTILS_TL_IMPL_DEBUG
   get_tl()->allocated += (i64)size;
   void *ptr          = malloc(size + sizeof(size_t));
   ((size_t *)ptr)[0] = size;
   return ((u8 *)ptr + 8);
-#elif UTILS_TL_IMPL_TRACY
+#  elif UTILS_TL_IMPL_TRACY
   ZoneScopedS(16);
   void *ptr = malloc(size);
   TracyAllocS(ptr, size, 16);
   return ptr;
-#else
+#  else
   return malloc(size);
-#endif
+#  endif
 }
 
 static inline void *_tl_realloc(void *ptr, size_t oldsize, size_t newsize) {
@@ -1408,16 +1359,16 @@ static inline void *_tl_realloc(void *ptr, size_t oldsize, size_t newsize) {
   return new_ptr;
 }
 
-#ifdef UTILS_TL_IMPL_DEBUG
+#  ifdef UTILS_TL_IMPL_DEBUG
 static inline void assert_tl_alloc_zero() {
   ASSERT_ALWAYS(get_tl()->allocated == 0);
   ASSERT_ALWAYS(get_tl()->temporal_storage.cursor == 0);
   ASSERT_ALWAYS(get_tl()->temporal_storage.stack_cursor == 0);
 }
-#endif
+#  endif
 
 void *tl_realloc(void *ptr, size_t oldsize, size_t newsize) {
-#ifdef UTILS_TL_IMPL_DEBUG
+#  ifdef UTILS_TL_IMPL_DEBUG
   if (ptr == NULL) {
     ASSERT_ALWAYS(oldsize == 0);
     return tl_alloc(newsize);
@@ -1426,11 +1377,10 @@ void *tl_realloc(void *ptr, size_t oldsize, size_t newsize) {
   get_tl()->allocated += (i64)newsize;
   void *old_ptr = (u8 *)ptr - sizeof(size_t);
   ASSERT_ALWAYS(((size_t *)old_ptr)[0] == oldsize);
-  void *new_ptr =
-      _tl_realloc(old_ptr, oldsize + sizeof(size_t), newsize + sizeof(size_t));
+  void *new_ptr          = _tl_realloc(old_ptr, oldsize + sizeof(size_t), newsize + sizeof(size_t));
   ((size_t *)new_ptr)[0] = newsize;
   return ((u8 *)new_ptr + sizeof(size_t));
-#elif UTILS_TL_IMPL_TRACY
+#  elif UTILS_TL_IMPL_TRACY
   ZoneScopedS(16);
   size_t minsize = MIN(oldsize, newsize);
   void * new_ptr = NULL;
@@ -1443,24 +1393,24 @@ void *tl_realloc(void *ptr, size_t oldsize, size_t newsize) {
   }
   TracyFreeS(ptr, 16);
   return new_ptr;
-#else
+#  else
   return _tl_realloc(ptr, oldsize, newsize);
-#endif
+#  endif
 }
 
 void tl_free(void *ptr) {
-#ifdef UTILS_TL_IMPL_DEBUG
+#  ifdef UTILS_TL_IMPL_DEBUG
   size_t size = ((size_t *)((u8 *)ptr - sizeof(size_t)))[0];
   get_tl()->allocated -= (i64)size;
   free(((u8 *)ptr - sizeof(size_t)));
   return;
-#elif UTILS_TL_IMPL_TRACY
+#  elif UTILS_TL_IMPL_TRACY
   ZoneScopedS(16);
   TracyFreeS(ptr, 16);
   free(ptr);
-#else
+#  else
   free(ptr);
-#endif
+#  endif
 }
 #endif // UTILS_TL_IMPL_H
 #endif // UTILS_TL_IMPL

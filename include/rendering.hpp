@@ -5,8 +5,8 @@
 
 struct ID {
   u32  _id;
-  u32  index() { return _id - 1; }
-  bool is_null() { return _id == 0; }
+  u32  index() const { return _id - 1; }
+  bool is_null() const { return _id == 0; }
   bool operator==(ID const &that) const { return _id == that._id; }
   bool operator!=(ID const &that) const { return _id != that._id; }
 };
@@ -23,7 +23,7 @@ struct Resource_ID {
   };
   static Resource_ID null() { return {0, 0}; }
   u32                index() { return id.index(); }
-  bool               is_null() { return id.is_null(); }
+  bool               is_null() const { return id.is_null(); }
   void               reset() { memset(this, 0, sizeof(*this)); }
 };
 
@@ -31,9 +31,7 @@ static_assert(sizeof(Resource_ID) == 8, "blimey!");
 
 static inline u64 hash_of(ID id) { return hash_of(id._id); }
 
-static inline u64 hash_of(Resource_ID res) {
-  return hash_of(res.id._id) ^ hash_of(res.type);
-}
+static inline u64 hash_of(Resource_ID res) { return hash_of(res.id._id) ^ hash_of(res.type); }
 
 namespace rd {
 enum class Impl_t { VULKAN, Null };
@@ -330,93 +328,7 @@ struct Image_Copy {
   }
 };
 
-class IFactory {
-  public:
-  virtual Resource_ID  create_image(Image_Create_Info info)             = 0;
-  virtual Resource_ID  create_buffer(Buffer_Create_Info info)           = 0;
-  virtual Resource_ID  create_shader_raw(Stage_t type, string_ref text,
-                                         Pair<string_ref, string_ref> *defines,
-                                         size_t num_defines)            = 0;
-  virtual Resource_ID  create_sampler(Sampler_Create_Info const &info)  = 0;
-  virtual void         release_resource(Resource_ID id)                 = 0;
-  virtual Resource_ID  get_resource(string_ref res_name)                = 0;
-  virtual void         assign_name(Resource_ID res_id, string_ref name) = 0;
-  virtual Resource_ID  get_swapchain_image()                            = 0;
-  virtual Image2D_Info get_swapchain_image_info()                       = 0;
-  virtual Image_Info   get_image_info(Resource_ID res_id)               = 0;
-  virtual void *       map_buffer(Resource_ID id)                       = 0;
-  virtual void         unmap_buffer(Resource_ID id)                     = 0;
-};
-
-class Imm_Ctx : public IFactory {
-  public:
-  ////////////////////////////
-  // Immediate mode context //
-  ////////////////////////////
-  virtual void clear_state()                                           = 0;
-  virtual void clear_bindings()                                        = 0;
-  virtual void push_state()                                            = 0;
-  virtual void pop_state()                                             = 0;
-  virtual void image_barrier(Resource_ID image_id, u32 access_flags,
-                             Image_Layout layout)                      = 0;
-  virtual void buffer_barrier(Resource_ID buf_id, u32 access_flags)    = 0;
-  virtual bool get_fence_state(Resource_ID fence_id)                   = 0;
-  virtual void RS_set_line_width(float width)                          = 0;
-  virtual void RS_set_depth_bias(float b)                              = 0;
-  virtual void IA_set_topology(Primitive topology)                     = 0;
-  virtual void IA_set_index_buffer(Resource_ID id, u32 offset,
-                                   Index_t format)                     = 0;
-  virtual void IA_set_vertex_buffer(u32 index, Resource_ID buffer,
-                                    size_t offset, size_t stride,
-                                    Input_Rate rate)                   = 0;
-  virtual void IA_set_attribute(Attribute_Info const &info)            = 0;
-  virtual void VS_set_shader(Resource_ID id)                           = 0;
-  virtual void PS_set_shader(Resource_ID id)                           = 0;
-  virtual void CS_set_shader(Resource_ID id)                           = 0;
-  virtual void RS_set_state(RS_State const &rs_state)                  = 0;
-  virtual void DS_set_state(DS_State const &ds_state)                  = 0;
-  virtual void MS_set_state(MS_State const &ds_state)                  = 0;
-  virtual void fill_buffer(Resource_ID id, size_t offset, size_t size,
-                           u32 value)                                  = 0;
-  virtual void clear_image(Resource_ID id, Image_Subresource const &range,
-                           Clear_Value const &cv)                      = 0;
-  virtual void OM_set_blend_state(u32 rt_index, Blend_State const &bl) = 0;
-
-  virtual void bind_uniform_buffer(u32 set, u32 binding, Resource_ID buf_id,
-                                   size_t offset, size_t size)              = 0;
-  virtual void bind_sampler(u32 set, u32 binding, Resource_ID sampler_id)   = 0;
-  virtual void bind_storage_buffer(u32 set, u32 binding, Resource_ID buf_id,
-                                   size_t offset, size_t size)              = 0;
-  virtual void bind_image(u32 set, u32 binding, u32 index, Resource_ID image_id,
-                          Image_Subresource const &range, Format format)    = 0;
-  virtual void bind_rw_image(u32 set, u32 binding, u32 index,
-                             Resource_ID              image_id,
-                             Image_Subresource const &range, Format format) = 0;
-  virtual void push_constants(void const *data, size_t offset, size_t size) = 0;
-  virtual void draw_indexed(u32 indices, u32 instances, u32 first_index,
-                            u32 first_instance, i32 vertex_offset)          = 0;
-  virtual void draw(u32 vertices, u32 instances, u32 first_vertex,
-                    u32 first_instance)                                     = 0;
-  virtual void multi_draw_indexed_indirect(Resource_ID arg_buf_id,
-                                           u32         arg_buf_offset,
-                                           Resource_ID cnt_buf_id,
-                                           u32 cnt_buf_offset, u32 max_count,
-                                           u32 stride)                      = 0;
-  virtual void dispatch(u32 dim_x, u32 dim_y, u32 dim_z)                    = 0;
-  virtual void set_viewport(float x, float y, float width, float height,
-                            float mindepth, float maxdepth)                 = 0;
-  virtual void set_scissor(u32 x, u32 y, u32 width, u32 height)             = 0;
-  virtual void copy_buffer_to_image(Resource_ID buf_id, size_t buffer_offset,
-                                    Resource_ID       img_id,
-                                    Image_Copy const &dst_info)             = 0;
-  virtual void copy_image_to_buffer(Resource_ID buf_id, size_t buffer_offset,
-                                    Resource_ID       img_id,
-                                    Image_Copy const &dst_info)             = 0;
-  virtual void copy_buffer(Resource_ID src_buf_id, size_t src_offset,
-                           Resource_ID dst_buf_id, size_t dst_offset,
-                           u32 size)                                        = 0;
-  virtual Image_Info get_image_info(Resource_ID res_id)                     = 0;
-};
+class Imm_Ctx;
 
 struct Clear_Color {
   float r, g, b, a;
@@ -430,56 +342,137 @@ struct Clear_Depth {
 
 enum class Fence_Position { PASS_FINISED };
 
-class IPass;
+enum class Pass_t { COMPUTE, RENDER };
 
-class IPass_Context : public IFactory {
+struct RT_View {
+  Resource_ID image;
+  Format      format;
+  u32         layer;
+  u32         level;
+  Clear_Color clear_color;
+  Clear_Depth clear_depth;
+  void        reset() { MEMZERO(*this); }
+};
+
+struct Render_Pass_Create_Info {
+  InlineArray<RT_View, 0x10> rts;
+  RT_View                    depth_target;
+  void                       reset() { MEMZERO(*this); }
+};
+
+static inline u64 hash_of(RT_View const &pc) {
+  return hash_of(string_ref{(char *)&pc, sizeof(pc)});
+}
+
+static inline bool operator==(RT_View const &a, RT_View const &b) {
+  return memcmp(&a, &b, sizeof(a)) == 0;
+}
+
+static inline u64 hash_of(Render_Pass_Create_Info const &pc) {
+  return hash_of(string_ref{(char *)&pc, sizeof(pc)});
+}
+
+static inline bool operator==(Render_Pass_Create_Info const &a, Render_Pass_Create_Info const &b) {
+  return memcmp(&a, &b, sizeof(a)) == 0;
+}
+
+class IFactory {
   public:
   static constexpr u32 BUFFER_ALIGNMENT = 0x100;
   static size_t        align_up(size_t size) {
     return (size + BUFFER_ALIGNMENT - 1) & ~(BUFFER_ALIGNMENT - 1);
   }
-  static size_t align_down(size_t size) {
-    return (size) & ~(BUFFER_ALIGNMENT - 1);
-  }
-  virtual void add_render_target(string_ref name, Image_Create_Info const &info,
-                                 u32 layer, u32 level,
-                                 Clear_Color const &cl) = 0;
-  virtual void add_render_target(Resource_ID id, u32 layer, u32 level,
-                                 Clear_Color const &cl) = 0;
-  virtual void add_depth_target(string_ref name, Image_Create_Info const &info,
-                                u32 layer, u32 level,
-                                Clear_Depth const &cl)  = 0;
-  virtual void add_depth_target(Resource_ID id, u32 layer, u32 level,
-                                Clear_Depth const &cl)  = 0;
+  static size_t        align_down(size_t size) { return (size) & ~(BUFFER_ALIGNMENT - 1); }
+  virtual Resource_ID  create_image(Image_Create_Info info)            = 0;
+  virtual Resource_ID  create_buffer(Buffer_Create_Info info)          = 0;
+  virtual Resource_ID  create_shader_raw(Stage_t type, string_ref text,
+                                         Pair<string_ref, string_ref> *defines,
+                                         size_t                        num_defines)           = 0;
+  virtual Resource_ID  create_sampler(Sampler_Create_Info const &info) = 0;
+  virtual void         release_resource(Resource_ID id)                = 0;
+  virtual Resource_ID  get_swapchain_image()                           = 0;
+  virtual Image2D_Info get_swapchain_image_info()                      = 0;
+  virtual Image_Info   get_image_info(Resource_ID res_id)              = 0;
+  virtual void *       map_buffer(Resource_ID id)                      = 0;
+  virtual void         unmap_buffer(Resource_ID id)                    = 0;
+  // virtual double       get_pass_duration(string_ref name)               = 0;
 
-  virtual Resource_ID get_fence(Fence_Position position) = 0;
-  virtual void *      get_window_handle()                = 0;
-  virtual IPass *     get_pass(string_ref name)          = 0;
-  virtual double      get_pass_duration(string_ref name) = 0;
+  virtual Imm_Ctx *start_render_pass(Render_Pass_Create_Info const &info) = 0;
+  virtual void     end_render_pass(Imm_Ctx *ctx)                          = 0;
+  virtual Imm_Ctx *start_compute_pass()                                   = 0;
+  virtual void     end_compute_pass(Imm_Ctx *ctx)                         = 0;
 };
 
-enum class Pass_t { COMPUTE, RENDER };
-
-class IPass {
+class Imm_Ctx {
   public:
-  virtual void       on_begin(IPass_Context *rm) = 0;
-  virtual void       exec(rd::Imm_Ctx *ctx)      = 0;
-  virtual void       on_end(IPass_Context *rm)   = 0;
-  virtual void       release(IPass_Context *rm)  = 0;
-  virtual string_ref get_name()                  = 0;
+  ////////////////////////////
+  // Immediate mode context //
+  ////////////////////////////
+  virtual void clear_state()                                                              = 0;
+  virtual void clear_bindings()                                                           = 0;
+  virtual void push_state()                                                               = 0;
+  virtual void pop_state()                                                                = 0;
+  virtual void image_barrier(Resource_ID image_id, u32 access_flags, Image_Layout layout) = 0;
+  virtual void buffer_barrier(Resource_ID buf_id, u32 access_flags)                       = 0;
+  virtual bool get_fence_state(Resource_ID fence_id)                                      = 0;
+  virtual void RS_set_line_width(float width)                                             = 0;
+  virtual void RS_set_depth_bias(float b)                                                 = 0;
+  virtual void IA_set_topology(Primitive topology)                                        = 0;
+  virtual void IA_set_index_buffer(Resource_ID id, u32 offset, Index_t format)            = 0;
+  virtual void IA_set_vertex_buffer(u32 index, Resource_ID buffer, size_t offset, size_t stride,
+                                    Input_Rate rate)                                      = 0;
+  virtual void IA_set_attribute(Attribute_Info const &info)                               = 0;
+  virtual void VS_set_shader(Resource_ID id)                                              = 0;
+  virtual void PS_set_shader(Resource_ID id)                                              = 0;
+  virtual void CS_set_shader(Resource_ID id)                                              = 0;
+  virtual void RS_set_state(RS_State const &rs_state)                                     = 0;
+  virtual void DS_set_state(DS_State const &ds_state)                                     = 0;
+  virtual void MS_set_state(MS_State const &ds_state)                                     = 0;
+  virtual void fill_buffer(Resource_ID id, size_t offset, size_t size, u32 value)         = 0;
+  virtual void clear_image(Resource_ID id, Image_Subresource const &range,
+                           Clear_Value const &cv)                                         = 0;
+  virtual void OM_set_blend_state(u32 rt_index, Blend_State const &bl)                    = 0;
+  virtual void bind_uniform_buffer(u32 set, u32 binding, Resource_ID buf_id, size_t offset,
+                                   size_t size)                                           = 0;
+  virtual void bind_sampler(u32 set, u32 binding, Resource_ID sampler_id)                 = 0;
+  virtual void bind_storage_buffer(u32 set, u32 binding, Resource_ID buf_id, size_t offset,
+                                   size_t size)                                           = 0;
+  virtual void bind_image(u32 set, u32 binding, u32 index, Resource_ID image_id,
+                          Image_Subresource const &range, Format format)                  = 0;
+  virtual void bind_rw_image(u32 set, u32 binding, u32 index, Resource_ID image_id,
+                             Image_Subresource const &range, Format format)               = 0;
+  virtual void push_constants(void const *data, size_t offset, size_t size)               = 0;
+  virtual void draw_indexed(u32 indices, u32 instances, u32 first_index, u32 first_instance,
+                            i32 vertex_offset)                                            = 0;
+  virtual void draw(u32 vertices, u32 instances, u32 first_vertex, u32 first_instance)    = 0;
+  virtual void multi_draw_indexed_indirect(Resource_ID arg_buf_id, u32 arg_buf_offset,
+                                           Resource_ID cnt_buf_id, u32 cnt_buf_offset,
+                                           u32 max_count, u32 stride)                     = 0;
+  virtual void dispatch(u32 dim_x, u32 dim_y, u32 dim_z)                                  = 0;
+  virtual void set_viewport(float x, float y, float width, float height, float mindepth,
+                            float maxdepth)                                               = 0;
+  virtual void set_scissor(u32 x, u32 y, u32 width, u32 height)                           = 0;
+  virtual void copy_buffer_to_image(Resource_ID buf_id, size_t buffer_offset, Resource_ID img_id,
+                                    Image_Copy const &dst_info)                           = 0;
+  virtual void copy_image_to_buffer(Resource_ID buf_id, size_t buffer_offset, Resource_ID img_id,
+                                    Image_Copy const &dst_info)                           = 0;
+  virtual void copy_buffer(Resource_ID src_buf_id, size_t src_offset, Resource_ID dst_buf_id,
+                           size_t dst_offset, u32 size)                                   = 0;
+  virtual Image_Info get_image_info(Resource_ID res_id)                                   = 0;
 };
 
 class IEvent_Consumer {
   public:
   virtual void consume(void *event) = 0;
+  virtual void on_frame(IFactory *) = 0;
 };
 
 struct Pass_Mng {
   static Pass_Mng *create(Impl_t type);
   virtual void     loop()                                        = 0;
-  virtual void     add_pass(Pass_t type, IPass *pass)            = 0;
   virtual void     set_event_consumer(IEvent_Consumer *consumer) = 0;
   virtual void     release()                                     = 0;
+  virtual void *   get_window_handle()                           = 0;
 };
 
 } // namespace rd
