@@ -149,7 +149,7 @@ int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
   rd::Pass_Mng *pmng = rd::Pass_Mng::create(rd::Impl_t::VULKAN);
-  IGUI_Pass *gui = new IGUI_Pass;
+  IGUI_Pass *   gui  = new IGUI_Pass;
   gui->init(pmng);
   pmng->set_event_consumer(gui);
   pmng->loop();

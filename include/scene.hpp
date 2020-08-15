@@ -22,13 +22,14 @@ using float3x3 = mat3;
 using float4x4 = mat4;
 
 #ifdef __clang__
-#define ALIGN16 __attribute__((aligned(16)))
+#  define ALIGN16 __attribute__((aligned(16)))
 #else
-#define ALIGN16 __declspec(align(16))
+#  define ALIGN16 __declspec(align(16))
 #endif
 
 typedef i32 ALIGN16   ai32;
 typedef u32 ALIGN16   au32;
+typedef float ALIGN16 af32;
 typedef ivec2 ALIGN16 aint2;
 typedef ivec3 ALIGN16 aint3;
 typedef ivec4 ALIGN16 aint4;
@@ -51,14 +52,10 @@ static constexpr float INV_FOUR_PI         = 0.0795775;
 static constexpr float DIELECTRIC_SPECULAR = 0.04;
 
 // https://github.com/graphitemaster/normals_revisited
-static float minor(const float m[16], int r0, int r1, int r2, int c0, int c1,
-                   int c2) {
-  return m[4 * r0 + c0] * (m[4 * r1 + c1] * m[4 * r2 + c2] -
-                           m[4 * r2 + c1] * m[4 * r1 + c2]) -
-         m[4 * r0 + c1] * (m[4 * r1 + c0] * m[4 * r2 + c2] -
-                           m[4 * r2 + c0] * m[4 * r1 + c2]) +
-         m[4 * r0 + c2] * (m[4 * r1 + c0] * m[4 * r2 + c1] -
-                           m[4 * r2 + c0] * m[4 * r1 + c1]);
+static float minor(const float m[16], int r0, int r1, int r2, int c0, int c1, int c2) {
+  return m[4 * r0 + c0] * (m[4 * r1 + c1] * m[4 * r2 + c2] - m[4 * r2 + c1] * m[4 * r1 + c2]) -
+         m[4 * r0 + c1] * (m[4 * r1 + c0] * m[4 * r2 + c2] - m[4 * r2 + c0] * m[4 * r1 + c2]) +
+         m[4 * r0 + c2] * (m[4 * r1 + c0] * m[4 * r2 + c1] - m[4 * r2 + c0] * m[4 * r1 + c1]);
 }
 
 static void cofactor(const float src[16], float dst[16]) {
@@ -131,18 +128,16 @@ class Random_Factory {
     }
   }
   // Z is up here
-  float3 polar_to_cartesian(float sinTheta, float cosTheta, float sinPhi,
-                            float cosPhi) {
+  float3 polar_to_cartesian(float sinTheta, float cosTheta, float sinPhi, float cosPhi) {
     return float3(sinTheta * cosPhi, sinTheta * sinPhi, cosTheta);
   }
   // Z is up here
-  float3 uniform_sample_cone(float cos_theta_max, float3 xbasis, float3 ybasis,
-                             float3 zbasis) {
+  float3 uniform_sample_cone(float cos_theta_max, float3 xbasis, float3 ybasis, float3 zbasis) {
     vec2   rand     = vec2(rand_unit_float(), rand_unit_float());
     float  cosTheta = (1.0f - rand.x) + rand.x * cos_theta_max;
     float  sinTheta = std::sqrt(1.0f - cosTheta * cosTheta);
     float  phi      = rand.y * PI * 2.0f;
-    float3 samplev = polar_to_cartesian(sinTheta, cosTheta, sin(phi), cos(phi));
+    float3 samplev  = polar_to_cartesian(sinTheta, cosTheta, sin(phi), cos(phi));
     return samplev.x * xbasis + samplev.y * ybasis + samplev.z * zbasis;
   }
 
@@ -161,9 +156,7 @@ class Random_Factory {
     }
   }
 
-  float3 sample_lambert_BRDF(float3 N) {
-    return normalize(N + rand_unit_sphere());
-  }
+  float3 sample_lambert_BRDF(float3 N) { return normalize(N + rand_unit_sphere()); }
 
   vec2 random_halton() {
     f32 u = halton(halton_id + 1, 2);
@@ -222,8 +215,7 @@ struct Image2D_Raw {
     }
     auto load_f32 = [&](uint2 coord, u32 component) {
       uint2 size = uint2(width, height);
-      return *(
-          f32 *)&data[coord.x * bpc + coord.y * size.x * bpc + component * 4u];
+      return *(f32 *)&data[coord.x * bpc + coord.y * size.x * bpc + component * 4u];
     };
     uint2 size = uint2(width, height);
     if (coord.x >= size.x) coord.x = size.x - 1;
@@ -236,8 +228,7 @@ struct Image2D_Raw {
       u8 g = data[coord.x * bpc + coord.y * size.x * bpc + 1u];
       u8 b = data[coord.x * bpc + coord.y * size.x * bpc + 2u];
       u8 a = data[coord.x * bpc + coord.y * size.x * bpc + 3u];
-      return vec4(float(r) / 255.0f, float(g) / 255.0f, float(b) / 255.0f,
-                  float(a) / 255.0f);
+      return vec4(float(r) / 255.0f, float(g) / 255.0f, float(b) / 255.0f, float(a) / 255.0f);
     }
     case rd::Format::RGBA8_SRGBA: {
       u8 r = data[coord.x * bpc + coord.y * size.x * bpc];
@@ -245,8 +236,7 @@ struct Image2D_Raw {
       u8 b = data[coord.x * bpc + coord.y * size.x * bpc + 2u];
       u8 a = data[coord.x * bpc + coord.y * size.x * bpc + 3u];
 
-      auto out = vec4(float(r) / 255.0f, float(g) / 255.0f, float(b) / 255.0f,
-                      float(a) / 255.0f);
+      auto out = vec4(float(r) / 255.0f, float(g) / 255.0f, float(b) / 255.0f, float(a) / 255.0f);
       out.r    = std::pow(out.r, 2.2f);
       out.g    = std::pow(out.g, 2.2f);
       out.b    = std::pow(out.b, 2.2f);
@@ -329,7 +319,7 @@ struct Image2D_Raw {
         while (coord[i][j] < 0) coord[i][j] += size[j];
       }
     }
-    vec2  fract = vec2(suv.x - std::floor(suv.x), suv.y - std::floor(suv.y));
+    vec2  fract     = vec2(suv.x - std::floor(suv.x), suv.y - std::floor(suv.y));
     float weights[] = {
         (1.0f - fract.x) * (1.0f - fract.y),
         (1.0f - fract.x) * (fract.y),
@@ -372,9 +362,7 @@ struct Image2D_Raw {
   }
 };
 
-static inline float3 safe_normalize(float3 v) {
-  return v / (glm::length(v) + 1.0e-5f);
-}
+static inline float3 safe_normalize(float3 v) { return v / (glm::length(v) + 1.0e-5f); }
 
 struct Vertex_Full {
   float3 position;
@@ -438,25 +426,21 @@ struct Raw_Mesh_3p16i {
   }
 };
 
-static Raw_Mesh_3p16i subdivide_cylinder(uint32_t level, float radius,
-                                         float length) {
+static Raw_Mesh_3p16i subdivide_cylinder(uint32_t level, float radius, float length) {
   Raw_Mesh_3p16i out;
   out.init();
   level += 4;
   float step = PI * 2.0f / level;
   out.positions.resize(level * 2);
   for (u32 i = 0; i < level; i++) {
-    float angle      = step * i;
-    out.positions[i] = {radius * std::cos(angle), radius * std::sin(angle),
-                        0.0f};
-    out.positions[i + level] = {radius * std::cos(angle),
-                                radius * std::sin(angle), length};
+    float angle              = step * i;
+    out.positions[i]         = {radius * std::cos(angle), radius * std::sin(angle), 0.0f};
+    out.positions[i + level] = {radius * std::cos(angle), radius * std::sin(angle), length};
   }
   for (u32 i = 0; i < level; i++) {
+    out.indices.push(u16_face{(u16)i, (u16)(i + level), (u16)((i + 1) % level)});
     out.indices.push(
-        u16_face{(u16)i, (u16)(i + level), (u16)((i + 1) % level)});
-    out.indices.push(u16_face{(u16)((i + 1) % level), (u16)(i + level),
-                              (u16)(((i + 1) % level) + level)});
+        u16_face{(u16)((i + 1) % level), (u16)(i + level), (u16)(((i + 1) % level) + level)});
   }
   return out;
 }
@@ -467,14 +451,12 @@ static Raw_Mesh_3p16i subdivide_icosahedron(uint32_t level) {
   static float const  X                           = 0.5257311f;
   static float const  Z                           = 0.8506508f;
   static float3 const g_icosahedron_positions[12] = {
-      {-X, 0.0, Z}, {X, 0.0, Z},  {-X, 0.0, -Z}, {X, 0.0, -Z},
-      {0.0, Z, X},  {0.0, Z, -X}, {0.0, -Z, X},  {0.0, -Z, -X},
-      {Z, X, 0.0},  {-Z, X, 0.0}, {Z, -X, 0.0},  {-Z, -X, 0.0}};
+      {-X, 0.0, Z}, {X, 0.0, Z},   {-X, 0.0, -Z}, {X, 0.0, -Z}, {0.0, Z, X},  {0.0, Z, -X},
+      {0.0, -Z, X}, {0.0, -Z, -X}, {Z, X, 0.0},   {-Z, X, 0.0}, {Z, -X, 0.0}, {-Z, -X, 0.0}};
   static u16_face const g_icosahedron_indices[20] = {
-      {1, 4, 0},  {4, 9, 0},  {4, 5, 9},  {8, 5, 4},  {1, 8, 4},
-      {1, 10, 8}, {10, 3, 8}, {8, 3, 5},  {3, 2, 5},  {3, 7, 2},
-      {3, 10, 7}, {10, 6, 7}, {6, 11, 7}, {6, 0, 11}, {6, 1, 0},
-      {10, 1, 6}, {11, 0, 9}, {2, 11, 9}, {5, 2, 9},  {11, 2, 7}};
+      {1, 4, 0}, {4, 9, 0},  {4, 5, 9},  {8, 5, 4},  {1, 8, 4},  {1, 10, 8}, {10, 3, 8},
+      {8, 3, 5}, {3, 2, 5},  {3, 7, 2},  {3, 10, 7}, {10, 6, 7}, {6, 11, 7}, {6, 0, 11},
+      {6, 1, 0}, {10, 1, 6}, {11, 0, 9}, {2, 11, 9}, {5, 2, 9},  {11, 2, 7}};
   for (auto p : g_icosahedron_positions) {
     out.positions.push(p);
   }
@@ -500,8 +482,7 @@ static Raw_Mesh_3p16i subdivide_icosahedron(uint32_t level) {
         auto v0_z = out.positions[i0].z;
         auto v1_z = out.positions[i1].z;
 
-        auto mid_point  = float3{(v0_x + v1_x) / 2.0f, (v0_y + v1_y) / 2.0f,
-                                (v0_z + v1_z) / 2.0f};
+        auto mid_point  = float3{(v0_x + v1_x) / 2.0f, (v0_y + v1_y) / 2.0f, (v0_z + v1_z) / 2.0f};
         auto add_vertex = [&](float3 p) {
           float length = std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
           out.positions.push(float3{p.x / length, p.y / length, p.z / length});
@@ -533,8 +514,7 @@ static Raw_Mesh_3p16i subdivide_icosahedron(uint32_t level) {
   return out;
 }
 
-static Raw_Mesh_3p16i subdivide_cone(uint32_t level, float radius,
-                                     float length) {
+static Raw_Mesh_3p16i subdivide_cone(uint32_t level, float radius, float length) {
   Raw_Mesh_3p16i out;
   out.init();
   level += 4;
@@ -544,14 +524,11 @@ static Raw_Mesh_3p16i subdivide_cone(uint32_t level, float radius,
   out.positions[1] = {0.0f, 0.0f, length};
   for (u32 i = 0; i < level; i++) {
     float angle          = step * i;
-    out.positions[i + 2] = {radius * std::cos(angle), radius * std::sin(angle),
-                            0.0f};
+    out.positions[i + 2] = {radius * std::cos(angle), radius * std::sin(angle), 0.0f};
   }
   for (u32 i = 0; i < level; i++) {
-    out.indices.push(
-        u16_face{(u16)(i + 2), (u16)(2 + (i + 1) % level), (u16)0});
-    out.indices.push(
-        u16_face{(u16)(i + 2), (u16)(2 + (i + 1) % level), (u16)1});
+    out.indices.push(u16_face{(u16)(i + 2), (u16)(2 + (i + 1) % level), (u16)0});
+    out.indices.push(u16_face{(u16)(i + 2), (u16)(2 + (i + 1) % level), (u16)1});
   }
   return out;
 }
@@ -618,9 +595,7 @@ struct Raw_Meshlets_Opaque {
   InlineArray<Attribute, 16> attributes;
   u32                        num_vertices;
   u32                        num_indices;
-  u32                        get_attribute_size(u32 index) const {
-    return attributes[index].size * num_vertices;
-  }
+  u32  get_attribute_size(u32 index) const { return attributes[index].size * num_vertices; }
   void init() {
     MEMZERO(*this);
     attributes.init();
@@ -660,8 +635,7 @@ struct Raw_Mesh_Opaque {
     u32 offset = 0;
     ito(attributes.size) {
       memcpy((u8 *)dst + offset,
-             &attribute_data[0] + attributes[i].offset +
-                 attributes[i].stride * index,
+             &attribute_data[0] + attributes[i].offset + attributes[i].stride * index,
              attributes[i].size);
       offset += attributes[i].size;
     }
@@ -709,9 +683,7 @@ struct Raw_Mesh_Opaque {
     attribute_offsets.init();
     attribute_sizes.init();
     attribute_cursors.init();
-    ito(attributes.size) {
-      attribute_sizes[i] = num_vertices * attributes[i].size;
-    }
+    ito(attributes.size) { attribute_sizes[i] = num_vertices * attributes[i].size; }
     u32 total_mem = 0;
     ito(attributes.size) {
       jto(i) attribute_offsets[i] += attribute_sizes[j];
@@ -719,8 +691,8 @@ struct Raw_Mesh_Opaque {
     }
     ito(num_vertices) {
       jto(attributes.size) {
-        attribute_cursors[j] += write_attribute(
-            dst.ptr + attribute_offsets[j] + attribute_cursors[j], i, j);
+        attribute_cursors[j] +=
+            write_attribute(dst.ptr + attribute_offsets[j] + attribute_cursors[j], i, j);
       }
     }
     ito(attributes.size) {
@@ -731,9 +703,7 @@ struct Raw_Mesh_Opaque {
     attribute_data = dst;
   }
   bool is_compatible(Raw_Mesh_Opaque const &that) const {
-    if (attributes.size != that.attributes.size ||
-        index_type != that.index_type)
-      return false;
+    if (attributes.size != that.attributes.size || index_type != that.index_type) return false;
     ito(attributes.size) {
       if (attributes[i].format != that.attributes[i].format ||
           attributes[i].stride != that.attributes[i].stride ||
@@ -747,9 +717,7 @@ struct Raw_Mesh_Opaque {
   }
   void sort_attributes() {
     quicky_sort(attributes.elems, attributes.size,
-                [](Attribute const &a, Attribute const &b) {
-                  return (u32)a.type < (u32)b.type;
-                });
+                [](Attribute const &a, Attribute const &b) { return (u32)a.type < (u32)b.type; });
   }
   void init() {
     MEMZERO(*this);
@@ -773,9 +741,7 @@ struct Raw_Mesh_Opaque {
     return &attribute_data[attributes[attrib_index].offset +
                            attributes[attrib_index].stride * vertex_index];
   }
-  u32 get_attribute_size(u32 index) const {
-    return attributes[index].size * num_vertices;
-  }
+  u32    get_attribute_size(u32 index) const { return attributes[index].size * num_vertices; }
   float3 fetch_position(u32 index) const {
     ito(attributes.size) {
       switch (attributes[i].type) {
@@ -783,10 +749,7 @@ struct Raw_Mesh_Opaque {
       case rd::Attriute_t ::POSITION:
         ASSERT_PANIC(attributes[i].format == rd::Format::RGB32_FLOAT);
         float3 pos;
-        memcpy(&pos,
-               attribute_data.at(index * attributes[i].stride +
-                                 attributes[i].offset),
-               12);
+        memcpy(&pos, attribute_data.at(index * attributes[i].stride + attributes[i].offset), 12);
         return pos;
       default: break;
       }
@@ -800,59 +763,39 @@ struct Raw_Mesh_Opaque {
       switch (attributes[i].type) {
       case rd::Attriute_t ::NORMAL:
         ASSERT_PANIC(attributes[i].format == rd::Format::RGB32_FLOAT);
-        memcpy(&v.normal,
-               attribute_data.at(index * attributes[i].stride +
-                                 attributes[i].offset),
+        memcpy(&v.normal, attribute_data.at(index * attributes[i].stride + attributes[i].offset),
                12);
         break;
       case rd::Attriute_t ::BINORMAL:
         ASSERT_PANIC(attributes[i].format == rd::Format::RGB32_FLOAT);
-        memcpy(&v.binormal,
-               attribute_data.at(index * attributes[i].stride +
-                                 attributes[i].offset),
+        memcpy(&v.binormal, attribute_data.at(index * attributes[i].stride + attributes[i].offset),
                12);
         break;
       case rd::Attriute_t ::TANGENT:
         ASSERT_PANIC(attributes[i].format == rd::Format::RGBA32_FLOAT);
-        memcpy(&v.tangent,
-               attribute_data.at(index * attributes[i].stride +
-                                 attributes[i].offset),
+        memcpy(&v.tangent, attribute_data.at(index * attributes[i].stride + attributes[i].offset),
                12);
         break;
       case rd::Attriute_t ::POSITION:
         ASSERT_PANIC(attributes[i].format == rd::Format::RGB32_FLOAT);
-        memcpy(&v.position,
-               attribute_data.at(index * attributes[i].stride +
-                                 attributes[i].offset),
+        memcpy(&v.position, attribute_data.at(index * attributes[i].stride + attributes[i].offset),
                12);
         break;
       case rd::Attriute_t ::TEXCOORD0:
         ASSERT_PANIC(attributes[i].format == rd::Format::RG32_FLOAT);
-        memcpy(&v.u0,
-               attribute_data.at(index * attributes[i].stride +
-                                 attributes[i].offset),
-               8);
+        memcpy(&v.u0, attribute_data.at(index * attributes[i].stride + attributes[i].offset), 8);
         break;
       case rd::Attriute_t ::TEXCOORD1:
         ASSERT_PANIC(attributes[i].format == rd::Format::RG32_FLOAT);
-        memcpy(&v.u1,
-               attribute_data.at(index * attributes[i].stride +
-                                 attributes[i].offset),
-               8);
+        memcpy(&v.u1, attribute_data.at(index * attributes[i].stride + attributes[i].offset), 8);
         break;
       case rd::Attriute_t ::TEXCOORD2:
         ASSERT_PANIC(attributes[i].format == rd::Format::RG32_FLOAT);
-        memcpy(&v.u2,
-               attribute_data.at(index * attributes[i].stride +
-                                 attributes[i].offset),
-               8);
+        memcpy(&v.u2, attribute_data.at(index * attributes[i].stride + attributes[i].offset), 8);
         break;
       case rd::Attriute_t ::TEXCOORD3:
         ASSERT_PANIC(attributes[i].format == rd::Format::RG32_FLOAT);
-        memcpy(&v.u3,
-               attribute_data.at(index * attributes[i].stride +
-                                 attributes[i].offset),
-               8);
+        memcpy(&v.u3, attribute_data.at(index * attributes[i].stride + attributes[i].offset), 8);
         break;
       default: TRAP;
       }
@@ -906,17 +849,14 @@ struct Raw_Mesh_Opaque {
     float         k2   = uv.y;
     float         k0   = 1.0f - uv.x - uv.y;
     Vertex_Full   vertex;
-    vertex.normal =
-        safe_normalize(v0.normal * k0 + v1.normal * k1 + v2.normal * k2);
+    vertex.normal   = safe_normalize(v0.normal * k0 + v1.normal * k1 + v2.normal * k2);
     vertex.position = v0.position * k0 + v1.position * k1 + v2.position * k2;
-    vertex.tangent =
-        safe_normalize(v0.tangent * k0 + v1.tangent * k1 + v2.tangent * k2);
-    vertex.binormal =
-        safe_normalize(v0.binormal * k0 + v1.binormal * k1 + v2.binormal * k2);
-    vertex.u0 = v0.u0 * k0 + v1.u0 * k1 + v2.u0 * k2;
-    vertex.u1 = v0.u1 * k0 + v1.u1 * k1 + v2.u1 * k2;
-    vertex.u2 = v0.u2 * k0 + v1.u2 * k1 + v2.u2 * k2;
-    vertex.u3 = v0.u3 * k0 + v1.u3 * k1 + v2.u3 * k2;
+    vertex.tangent  = safe_normalize(v0.tangent * k0 + v1.tangent * k1 + v2.tangent * k2);
+    vertex.binormal = safe_normalize(v0.binormal * k0 + v1.binormal * k1 + v2.binormal * k2);
+    vertex.u0       = v0.u0 * k0 + v1.u0 * k1 + v2.u0 * k2;
+    vertex.u1       = v0.u1 * k0 + v1.u1 * k1 + v2.u1 * k2;
+    vertex.u2       = v0.u2 * k0 + v1.u2 * k1 + v2.u2 * k2;
+    vertex.u3       = v0.u3 * k0 + v1.u3 * k1 + v2.u3 * k2;
     return vertex;
   }
 };
@@ -1022,15 +962,11 @@ struct BVH_Node {
     this->min = min;
     this->max = max;
   }
-  bool is_leaf() { return (flags & LEAF_BIT) == LEAF_BIT; }
-  u32  num_items() { return ((flags >> NUM_ITEMS_SHIFT) & NUM_ITEMS_MASK); }
-  u32  items_offset() {
-    return ((flags >> ITEMS_OFFSET_SHIFT) & ITEMS_OFFSET_MASK);
-  }
-  BVH_Node *first_child() {
-    return this + (((flags >> FIRST_CHILD_SHIFT) & FIRST_CHILD_MASK));
-  }
-  void set_num_items(u32 num) {
+  bool      is_leaf() { return (flags & LEAF_BIT) == LEAF_BIT; }
+  u32       num_items() { return ((flags >> NUM_ITEMS_SHIFT) & NUM_ITEMS_MASK); }
+  u32       items_offset() { return ((flags >> ITEMS_OFFSET_SHIFT) & ITEMS_OFFSET_MASK); }
+  BVH_Node *first_child() { return this + (((flags >> FIRST_CHILD_SHIFT) & FIRST_CHILD_MASK)); }
+  void      set_num_items(u32 num) {
     ASSERT_DEBUG(num <= NUM_ITEMS_MASK);
     flags &= ~(NUM_ITEMS_MASK << NUM_ITEMS_SHIFT);
     flags |= (num << NUM_ITEMS_SHIFT);
@@ -1132,8 +1068,8 @@ class Node {
     node->set_parent(this);
   }
   void update_transform(float4x4 const &parent = float4x4(1.0f)) {
-    transform_cache = parent * glm::translate(float4x4(1.0f), offset) *
-                      (float4x4)rotation * glm::scale(float4x4(1.0f), scale);
+    transform_cache = parent * glm::translate(float4x4(1.0f), offset) * (float4x4)rotation *
+                      glm::scale(float4x4(1.0f), scale);
     ito(children.size) {
       Node *child = children[i];
       child->update_transform(transform_cache);
@@ -1205,9 +1141,8 @@ template <typename T> struct BVH_Helper {
         TMP_STORAGE_SCOPE;
         u32           num_items = items.size;
         Sorting_Node *sorted_dims[6];
-        ito(6) sorted_dims[i] =
-            (Sorting_Node *)tl_alloc_tmp(sizeof(Sorting_Node) * num_items);
-        T *items = items.ptr;
+        ito(6) sorted_dims[i] = (Sorting_Node *)tl_alloc_tmp(sizeof(Sorting_Node) * num_items);
+        T *items              = items.ptr;
         ito(num_items) {
           float3 tmin, tmax;
           get_aabb(items[i], tmin, tmax);
@@ -1218,17 +1153,15 @@ template <typename T> struct BVH_Helper {
             sorted_dims[j + 3][i].id  = i;
           }
         }
-        ito(6) quicky_sort(sorted_dims[i], num_items,
-                           [](Sorting_Node const &a, Sorting_Node const &b) {
-                             return a.val < b.val;
-                           });
+        ito(6)
+            quicky_sort(sorted_dims[i], num_items,
+                        [](Sorting_Node const &a, Sorting_Node const &b) { return a.val < b.val; });
         float max_dim_diff = 0.0f;
         u32   max_dim_id   = 0;
         u32   last_item    = num_items - 1;
         ito(3) {
           // max - min
-          float diff =
-              sorted_dims[i + 3][last_item].val - sorted_dims[i][0].val;
+          float diff = sorted_dims[i + 3][last_item].val - sorted_dims[i][0].val;
           if (diff > max_dim_diff) {
             max_dim_diff = diff;
             max_dim_id   = i;
@@ -1308,8 +1241,7 @@ template <typename T> struct BVH {
     if (!root->intersects_ray(ro, rd)) return;
     traverse(root, ro, rd, fn);
   }
-  template <typename F>
-  void traverse(BVH_Node *node, float3 ro, float3 rd, F fn) {
+  template <typename F> void traverse(BVH_Node *node, float3 ro, float3 rd, F fn) {
     if (node->is_leaf()) {
       T * items     = item_pool.at(node->items_offset());
       u32 num_items = node->num_items();
@@ -1391,9 +1323,7 @@ class MeshNode : public Node {
   void release() override { Node::release(); }
 };
 
-template <typename T> static bool isa(Node *node) {
-  return node->get_type_id() == T::ID();
-}
+template <typename T> static bool isa(Node *node) { return node->get_type_id() == T::ID(); }
 
 class IFactory {
   public:
@@ -1403,10 +1333,9 @@ class IFactory {
   virtual u32       add_image(Image2D_Raw img)     = 0;
 };
 
-Node *load_gltf_pbr(IFactory *factory, string_ref filename);
+Node *              load_gltf_pbr(IFactory *factory, string_ref filename);
 Raw_Mesh_Opaque     optimize_mesh(Raw_Mesh_Opaque const &opaque_mesh);
 Raw_Mesh_Opaque     simplify_mesh(Raw_Mesh_Opaque const &opaque_mesh);
 Raw_Meshlets_Opaque build_meshlets(Raw_Mesh_Opaque &opaque_mesh);
-Image2D_Raw         load_image(string_ref filename,
-                               rd::Format format = rd::Format::RGBA8_SRGBA);
+Image2D_Raw         load_image(string_ref filename, rd::Format format = rd::Format::RGBA8_SRGBA);
 #endif // SCENE

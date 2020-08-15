@@ -26,11 +26,11 @@ struct Config_Item {
   };
   union {
     u32 v_u32_min;
-    u32 v_f32_min;
+    f32 v_f32_min;
   };
   union {
     u32 v_u32_max;
-    u32 v_f32_max;
+    f32 v_f32_max;
   };
 };
 
@@ -170,18 +170,18 @@ struct Config {
     items.iter_pairs([&](string_t const &name, Config_Item const &item) {
       if (item.type == Config_Item::U32) {
         if (item.v_u32_min != item.v_u32_max)
-          fprintf(file, " (add u32 %.*s %i (min %i) (max %i))\n", STRF(name.ref()), item.v_u32,
+          fprintf(file, " (add u32 \"%.*s\" %i (min %i) (max %i))\n", STRF(name.ref()), item.v_u32,
                   item.v_u32_min, item.v_u32_max);
         else
-          fprintf(file, " (add u32 %.*s %i)\n", STRF(name.ref()), item.v_u32);
+          fprintf(file, " (add u32 \"%.*s\" %i)\n", STRF(name.ref()), item.v_u32);
       } else if (item.type == Config_Item::F32) {
         if (item.v_f32_min != item.v_f32_max)
-          fprintf(file, " (add f32 %.*s %f (min %f) (max %f))\n", STRF(name.ref()), item.v_f32,
+          fprintf(file, " (add f32 \"%.*s\" %f (min %f) (max %f))\n", STRF(name.ref()), item.v_f32,
                   item.v_f32_min, item.v_f32_max);
         else
-          fprintf(file, " (add f32 %.*s %f)\n", STRF(name.ref()), item.v_f32);
+          fprintf(file, " (add f32 \"%.*s\" %f)\n", STRF(name.ref()), item.v_f32);
       } else if (item.type == Config_Item::BOOL) {
-        fprintf(file, " (add bool %.*s %i)\n", STRF(name.ref()), item.v_bool ? 1 : 0);
+        fprintf(file, " (add bool \"%.*s\" %i)\n", STRF(name.ref()), item.v_bool ? 1 : 0);
       } else {
         TRAP;
       }
@@ -982,7 +982,6 @@ class IGUI_Pass : public rd::IEvent_Consumer {
     rt0.image             = factory->get_swapchain_image();
     rt0.format            = rd::Format::NATIVE;
     rt0.clear_color.clear = true;
-    rt0.clear_color.r     = 1.0f;
     info.rts.push(rt0);
     rd::Imm_Ctx *ctx = factory->start_render_pass(info);
 
@@ -1305,7 +1304,6 @@ class IGUI_Pass : public rd::IEvent_Consumer {
     image_bindings.size = 1;
     factory->end_render_pass(ctx);
   }
-
   ImVec2 get_window_size() {
     auto  wsize       = ImGui::GetWindowSize();
     float height_diff = 42;

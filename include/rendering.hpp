@@ -36,7 +36,7 @@ static inline u64 hash_of(Resource_ID res) { return hash_of(res.id._id) ^ hash_o
 namespace rd {
 enum class Impl_t { VULKAN, Null };
 enum class Cmp { LT, LE, GT, GE, EQ };
-enum class Primitive { TRIANGLE_LIST, LINE_LIST };
+enum class Primitive { TRIANGLE_LIST, TRIANGLE_STRIP, LINE_LIST };
 enum class Front_Face { CW, CCW };
 enum class Cull_Mode { NONE, FRONT, BACK };
 enum class Index_t { UINT32, UINT16 };
@@ -355,6 +355,8 @@ struct RT_View {
 };
 
 struct Render_Pass_Create_Info {
+  u32                        width;
+  u32                        height;
   InlineArray<RT_View, 0x10> rts;
   RT_View                    depth_target;
   void                       reset() { MEMZERO(*this); }
@@ -401,6 +403,8 @@ class IFactory {
   virtual void     end_render_pass(Imm_Ctx *ctx)                          = 0;
   virtual Imm_Ctx *start_compute_pass()                                   = 0;
   virtual void     end_compute_pass(Imm_Ctx *ctx)                         = 0;
+  virtual bool     get_timestamp_state(Resource_ID)                       = 0;
+  virtual double   get_timestamp_ms(Resource_ID t0, Resource_ID t1)       = 0;
 };
 
 class Imm_Ctx {
@@ -408,10 +412,11 @@ class Imm_Ctx {
   ////////////////////////////
   // Immediate mode context //
   ////////////////////////////
-  virtual void clear_state()                                                              = 0;
-  virtual void clear_bindings()                                                           = 0;
-  virtual void push_state()                                                               = 0;
-  virtual void pop_state()                                                                = 0;
+  virtual void        clear_state()                                                       = 0;
+  virtual void        clear_bindings()                                                    = 0;
+  virtual void        push_state()                                                        = 0;
+  virtual void        pop_state()                                                         = 0;
+  virtual Resource_ID insert_timestamp()                                                  = 0;
   virtual void image_barrier(Resource_ID image_id, u32 access_flags, Image_Layout layout) = 0;
   virtual void buffer_barrier(Resource_ID buf_id, u32 access_flags)                       = 0;
   virtual bool get_fence_state(Resource_ID fence_id)                                      = 0;
@@ -463,8 +468,10 @@ class Imm_Ctx {
 
 class IEvent_Consumer {
   public:
-  virtual void consume(void *event) = 0;
-  virtual void on_frame(IFactory *) = 0;
+  virtual void consume(void *event)   = 0;
+  virtual void on_init(IFactory *)    = 0;
+  virtual void on_release(IFactory *) = 0;
+  virtual void on_frame(IFactory *)   = 0;
 };
 
 struct Pass_Mng {

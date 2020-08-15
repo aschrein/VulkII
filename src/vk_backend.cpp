@@ -66,6 +66,7 @@ enum class Resource_Type : u32 {
   IMAGE_VIEW,
   FENCE,
   SEMAPHORE,
+  TIMESTAMP,
   NONE
 };
 
@@ -80,7 +81,7 @@ struct Ref_Cnt : public Slot {
 };
 
 struct Mem_Chunk : public Ref_Cnt {
-  static constexpr u32 PAGE_SIZE = 1 << 24;
+  static constexpr u32 PAGE_SIZE = 1 << 20;
 
   VkDeviceMemory        mem              = VK_NULL_HANDLE;
   VkMemoryPropertyFlags prop_flags       = 0;
@@ -436,6 +437,9 @@ static Array<u32> compile_glsl(VkDevice device, string_ref text, shaderc_shader_
       defines[i].second.len);
 
   shaderc_compile_options_set_source_language(options, shaderc_source_language_glsl);
+#ifndef NDEBUG
+  shaderc_compile_options_set_generate_debug_info(options);
+#endif
   shaderc_compile_options_set_target_spirv(options, shaderc_spirv_version_1_3);
   shaderc_compile_options_set_target_env(options, shaderc_target_env_vulkan,
                                          shaderc_env_version_vulkan_1_2);
@@ -714,6 +718,7 @@ static void preprocess_shader(String_Builder &builder, string_ref body) {
 #define f32 float
 #define f64 double
 #define VERTEX_INDEX  gl_VertexIndex
+#define FRAGMENT_COORDINATES  gl_FragCoord
 #define INSTANCE_INDEX  gl_InstanceIndex
 #define GLOBAL_THREAD_INDEX  gl_GlobalInvocationID
 #define GROUPT_INDEX  gl_WorkGroupID
@@ -722,6 +727,8 @@ static void preprocess_shader(String_Builder &builder, string_ref body) {
 #define float2_splat(x)  vec2(x, x)
 #define float3_splat(x)  vec3(x, x, x)
 #define float4_splat(x)  vec4(x, x, x, x)
+#define bitcast_f32_to_u32(x)  floatBitsToUint(x)
+#define bitcast_u32_to_f32(x)  uintBitsToFloat(x)
 #define mul4(x, y)  (x * y)
 
 #define image_load(image, coords) imageLoad(image, ivec2(coords))
@@ -729,6 +736,8 @@ static void preprocess_shader(String_Builder &builder, string_ref body) {
 #define buffer_load(buffer, index) buffer[index]
 #define buffer_store(buffer, index, data) buffer[index] = data
 #define buffer_atomic_add(buffer, index, num) atomicAdd(buffer[index], num)
+#define buffer_atomic_cas(buffer, index, cmp, replace) atomicCompSwap(buffer[index], cmp, replace)
+#define buffer_atomic_exchange(buffer, index, replace) atomicExchange(buffer[index], replace)
 
 )");
   char const *cur       = body.ptr;
@@ -1017,6 +1026,7 @@ VkBool32 to_vk(bool b) { return b ? VK_TRUE : VK_FALSE; }
 VkPrimitiveTopology to_vk(rd::Primitive p) {
   switch (p) {
   case rd::Primitive::TRIANGLE_LIST: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  case rd::Primitive::TRIANGLE_STRIP: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
   case rd::Primitive::LINE_LIST: return VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
   default: UNIMPLEMENTED;
   }
@@ -1883,7 +1893,7 @@ struct Window {
     }
     // if failed create a new one
     Mem_Chunk new_chunk;
-    u32       num_pages = 1 << 13;
+    u32       num_pages = 1 << 16;
     if (num_pages * Mem_Chunk::PAGE_SIZE < size) {
       num_pages = (size + Mem_Chunk::PAGE_SIZE - 1) / Mem_Chunk::PAGE_SIZE;
     }
@@ -2247,30 +2257,30 @@ struct Window {
   void release_resource(Resource_ID res_id) {
     if (res_id.type == (u32)Resource_Type::PASS) {
       Render_Pass &pass = render_passes[res_id.id];
-      render_passes.remove(res_id.id, 4);
+      render_passes.remove(res_id.id, 3);
       if (pass_cache.contains(pass.create_info)) pass_cache.remove(pass.create_info);
     } else if (res_id.type == (u32)Resource_Type::BUFFER) {
       Buffer &buf = buffers[res_id.id];
       // buf.rem_reference();
-      ito(buf.views.size) buffer_views.remove(buf.views[i], 4);
+      ito(buf.views.size) buffer_views.remove(buf.views[i], 3);
       buffers.remove(res_id.id, 4);
     } else if (res_id.type == (u32)Resource_Type::BUFFER_VIEW) {
       BufferView &view = buffer_views[res_id.id];
       Buffer &    buf  = buffers[view.buf_id];
       buf.views.remove(res_id.id);
-      buffer_views.remove(res_id.id, 4);
+      buffer_views.remove(res_id.id, 3);
     } else if (res_id.type == (u32)Resource_Type::IMAGE_VIEW) {
       ImageView &view = image_views[res_id.id];
       Image &    img  = images[view.img_id];
       img.views.remove(res_id.id);
-      image_views.remove(res_id.id, 4);
+      image_views.remove(res_id.id, 3);
     } else if (res_id.type == (u32)Resource_Type::IMAGE) {
       Image &img = images[res_id.id];
-      images.remove(res_id.id, 4);
+      images.remove(res_id.id, 3);
       // img.rem_reference();
-      ito(img.views.size) image_views.remove(img.views[i], 4);
+      ito(img.views.size) image_views.remove(img.views[i], 3);
     } else if (res_id.type == (u32)Resource_Type::SHADER) {
-      shaders.remove(res_id.id, 4);
+      shaders.remove(res_id.id, 3);
     } else if (res_id.type == (u32)Resource_Type::FENCE) {
       fences.remove(res_id.id, 4);
     } else if (res_id.type == (u32)Resource_Type::SEMAPHORE) {
@@ -2278,7 +2288,8 @@ struct Window {
     } else if (res_id.type == (u32)Resource_Type::COMMAND_BUFFER) {
       cmd_buffers.remove(res_id.id, 4);
     } else if (res_id.type == (u32)Resource_Type::SAMPLER) {
-      samplers.remove(res_id.id, 4);
+      samplers.remove(res_id.id, 3);
+    } else if (res_id.type == (u32)Resource_Type::TIMESTAMP) {
     } else {
       TRAP;
     }
@@ -2787,6 +2798,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
     RENDER_RECT,
     BUFFER_FILL,
     CLEAR_IMAGE,
+    TIMESTAMP,
     COPY_BUFFER_IMAGE,
     COPY_IMAGE_BUFFER,
     COPY_BUFFER
@@ -2844,6 +2856,8 @@ class Vk_Ctx : public rd::Imm_Ctx {
   };
 
   struct Deferred_Dispatch {
+    // enum class Type : u32 { UNKNOWN = 0, DISPATCH, DISPATCH_INDIRECT };
+    // Type                            type;
     ID                              pso;
     InlineArray<VkDescriptorSet, 8> sets;
     union {
@@ -2889,6 +2903,11 @@ class Vk_Ctx : public rd::Imm_Ctx {
     Resource_ID dst_buf_id;
     size_t      dst_offset;
     u32         size;
+  };
+
+  struct Deferred_Timestamp {
+    VkQueryPool pool;
+    u32         timestamp_id;
   };
 
   void _copy_buffer(Resource_ID src_buf_id, size_t src_offset, Resource_ID dst_buf_id,
@@ -3095,7 +3114,11 @@ class Vk_Ctx : public rd::Imm_Ctx {
     vkCmdSetLineWidth(cmd, line_width);
     while (cpu_cmd.has_data()) {
       Cmd_t type = cpu_cmd.read_cmd_type();
-      if (type == Cmd_t::PUSH_CONSTANTS) {
+      if (type == Cmd_t::TIMESTAMP) {
+        Deferred_Timestamp dt;
+        cpu_cmd.read(&dt);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, dt.pool, dt.timestamp_id);
+      } else if (type == Cmd_t::PUSH_CONSTANTS) {
         Deferred_Push_Constants dpc;
         cpu_cmd.read(&dpc);
         memcpy(pcs + dpc.offset, cpu_cmd.read(dpc.size), dpc.size);
@@ -3186,7 +3209,11 @@ class Vk_Ctx : public rd::Imm_Ctx {
     u32 pc_dirty_range = 0;
     while (cpu_cmd.has_data()) {
       Cmd_t type = cpu_cmd.read_cmd_type();
-      if (type == Cmd_t::PUSH_CONSTANTS) {
+      if (type == Cmd_t::TIMESTAMP) {
+        Deferred_Timestamp dt;
+        cpu_cmd.read(&dt);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, dt.pool, dt.timestamp_id);
+      } else if (type == Cmd_t::PUSH_CONSTANTS) {
         Deferred_Push_Constants dpc;
         cpu_cmd.read(&dpc);
         memcpy(pcs + dpc.offset, cpu_cmd.read(dpc.size), dpc.size);
@@ -3689,7 +3716,8 @@ class Vk_Ctx : public rd::Imm_Ctx {
     rb.element               = 0;
     rb.uniform_buffer.buf_id = buf_id.id;
     rb.uniform_buffer.offset = offset;
-    rb.uniform_buffer.size   = size;
+    if (size == 0) size = VK_WHOLE_SIZE;
+    rb.uniform_buffer.size = size;
     insert_binding(rb);
   }
   void bind_storage_buffer(u32 set, u32 binding, Resource_ID buf_id, size_t offset,
@@ -3705,6 +3733,15 @@ class Vk_Ctx : public rd::Imm_Ctx {
     if (size == 0) size = VK_WHOLE_SIZE;
     rb.storage_buffer.size = size;
     insert_binding(rb);
+  }
+  Resource_ID insert_timestamp() override {
+    Deferred_Timestamp dt;
+    MEMZERO(dt);
+    dt.pool         = wnd->query_pool;
+    dt.timestamp_id = wnd->allocate_timestamp_id();
+    vkResetQueryPool(wnd->device, dt.pool, dt.timestamp_id, 1);
+    cpu_cmd.write(Cmd_t::TIMESTAMP, &dt);
+    return {dt.timestamp_id, (u32)Resource_Type::TIMESTAMP};
   }
   void bind_image(u32 set, u32 binding, u32 index, Resource_ID image_id,
                   rd::Image_Subresource const &range, rd::Format format) override {
@@ -3965,9 +4002,37 @@ class VkFactory : public rd::IFactory {
   Window *wnd;
 
   public:
-  void init(Window *wnd) { this->wnd = wnd; }
+  ID   last_sem;
+  void init(Window *wnd) {
+    this->wnd = wnd;
+    last_sem  = {0};
+  }
   void release() { delete this; }
-
+  void on_frame_begin() { last_sem = {0}; }
+  void on_frame_end() {
+    if (last_sem.is_null() == false) {
+      wnd->release_resource({last_sem, (u32)Resource_Type::SEMAPHORE});
+    }
+    last_sem = {0};
+  }
+  bool get_timestamp_state(Resource_ID t0) override {
+    u64      timestamp_results[1];
+    VkResult res = vkGetQueryPoolResults(wnd->device, wnd->query_pool, t0.id._id, 1, 8,
+                                         timestamp_results, 8, VK_QUERY_RESULT_64_BIT);
+    return res == VK_SUCCESS;
+  }
+  double get_timestamp_ms(Resource_ID t0, Resource_ID t1) override {
+    u64      timestamp_results[2];
+    VkResult res0 = vkGetQueryPoolResults(wnd->device, wnd->query_pool, t0.id._id, 1, 8,
+                                          timestamp_results + 0, 8, VK_QUERY_RESULT_64_BIT);
+    VkResult res1 = vkGetQueryPoolResults(wnd->device, wnd->query_pool, t1.id._id, 1, 8,
+                                          timestamp_results + 1, 8, VK_QUERY_RESULT_64_BIT);
+    if (res0 == VK_SUCCESS && res1 == VK_SUCCESS) {
+      u64 diff = timestamp_results[1] - timestamp_results[0];
+      return (double(diff) * wnd->device_properties.limits.timestampPeriod) * 1.0e-6;
+    }
+    return 0.0;
+  }
   Resource_ID create_image(rd::Image_Create_Info info) override {
     return wnd->create_image(info.width, info.height, info.depth, info.layers, info.levels,
                              to_vk(info.format), info.usage_bits, info.mem_bits);
@@ -4035,8 +4100,8 @@ class VkFactory : public rd::IFactory {
         attachments.release();
         refs.release();
       });
-      u32 width  = 0;
-      u32 height = 0;
+      u32 width  = info.width;
+      u32 height = info.height;
       ito(info.rts.size) {
         VkAttachmentDescription attachment;
         MEMZERO(attachment);
@@ -4163,10 +4228,18 @@ class VkFactory : public rd::IFactory {
     return ctx;
   }
   void end_render_pass(rd::Imm_Ctx *_ctx) override {
-    Vk_Ctx *    ctx        = (Vk_Ctx *)_ctx;
-    Resource_ID f          = wnd->create_fence(false);
-    ID          finish_sem = ctx->submit(wnd->fences[f.id].fence, NULL);
-    wnd->release_resource({finish_sem, (u32)Resource_Type::SEMAPHORE});
+    Vk_Ctx *    ctx = (Vk_Ctx *)_ctx;
+    Resource_ID f   = wnd->create_fence(false);
+    ID          finish_sem;
+    if (last_sem.is_null() == false) {
+      Semaphore s = wnd->semaphores[last_sem];
+      finish_sem  = ctx->submit(wnd->fences[f.id].fence, &s.sem);
+      wnd->release_resource({last_sem, (u32)Resource_Type::SEMAPHORE});
+      last_sem = {0};
+    } else {
+      finish_sem = ctx->submit(wnd->fences[f.id].fence, NULL);
+    }
+    last_sem = finish_sem;
     wnd->release_resource(f);
     ctx->release();
   }
@@ -4176,10 +4249,20 @@ class VkFactory : public rd::IFactory {
     return ctx;
   }
   void end_compute_pass(rd::Imm_Ctx *_ctx) override {
-    Vk_Ctx *    ctx        = (Vk_Ctx *)_ctx;
-    Resource_ID f          = wnd->create_fence(false);
-    ID          finish_sem = ctx->submit(wnd->fences[f.id].fence, NULL);
-    wnd->release_resource({finish_sem, (u32)Resource_Type::SEMAPHORE});
+    Vk_Ctx *    ctx = (Vk_Ctx *)_ctx;
+    Resource_ID f   = wnd->create_fence(false);
+
+    ID finish_sem;
+    if (last_sem.is_null() == false) {
+      Semaphore s = wnd->semaphores[last_sem];
+      finish_sem  = ctx->submit(wnd->fences[f.id].fence, &s.sem);
+      wnd->release_resource({last_sem, (u32)Resource_Type::SEMAPHORE});
+      last_sem = {0};
+    } else {
+      finish_sem = ctx->submit(wnd->fences[f.id].fence, NULL);
+    }
+    last_sem = finish_sem;
+
     wnd->release_resource(f);
     ctx->release();
   }
@@ -4198,13 +4281,16 @@ class VkPass_Mng : public rd::Pass_Mng {
     consumer = NULL;
   }
   void release() override {
-    wnd->release();
+    consumer->on_release(f);
     f->release();
+    wnd->release();
     delete wnd;
     delete this;
   }
   void loop() override {
-
+    wnd->start_frame();
+    consumer->on_init(f);
+    wnd->end_frame(NULL);
     while (true) {
       SDL_Event event;
       while (SDL_PollEvent(&event)) {
@@ -4212,6 +4298,7 @@ class VkPass_Mng : public rd::Pass_Mng {
           consumer->consume(&event);
         }
         if (event.type == SDL_QUIT) {
+          release();
           exit(0);
         }
         switch (event.type) {
@@ -4222,8 +4309,17 @@ class VkPass_Mng : public rd::Pass_Mng {
         }
       }
       wnd->start_frame();
+      f->on_frame_begin();
       consumer->on_frame(f);
-      wnd->end_frame(NULL);
+      VkSemaphore sem = VK_NULL_HANDLE;
+      if (f->last_sem.is_null() == false) {
+        sem = wnd->semaphores[f->last_sem].sem;
+      }
+      f->on_frame_end();
+      if (sem != VK_NULL_HANDLE)
+        wnd->end_frame(&sem);
+      else
+        wnd->end_frame(NULL);
     }
   }
   void  set_event_consumer(rd::IEvent_Consumer *consumer) override { this->consumer = consumer; }
