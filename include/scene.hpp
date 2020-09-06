@@ -2,9 +2,14 @@
 #define SCENE_HPP
 
 #include "rendering.hpp"
+#include "script.hpp"
 #include "utils.hpp"
 #include <glm/glm.hpp>
 #include <glm/gtx/quaternion.hpp>
+
+#include <imgui.h>
+#define IMGUI_DEFINE_MATH_OPERATORS
+#include "imgui_internal.h"
 
 using namespace glm;
 
@@ -178,7 +183,7 @@ class Random_Factory {
   u32 halton_id = 0;
 };
 
-struct Image2D_Raw {
+struct Image2D {
   u32        width;
   u32        height;
   rd::Format format;
@@ -192,10 +197,18 @@ struct Image2D_Raw {
     this->data   = (u8 *)tl_alloc(size);
     if (data != NULL) memcpy(this->data, data, size);
   }
+
+  static Image2D *create(u32 width, u32 height, rd::Format format, u8 *data) {
+    Image2D *i = new Image2D;
+    i->init(width, height, format, data);
+    return i;
+  }
+
   u32  get_size_in_bytes() const { return get_bpp() * width * height; }
   void release() {
     if (data != NULL) tl_free(data);
     MEMZERO(*this);
+    delete this;
   }
   u32 get_bpp() const {
     switch (format) {
@@ -330,11 +343,11 @@ struct Image2D_Raw {
     ito(4) result += load(uint2(coord[i].x, coord[i].y)) * weights[i];
     return result;
   }
-  Image2D_Raw downsample() const {
+  Image2D downsample() const {
     u32 new_width  = MAX(1, width >> 1);
     u32 new_height = MAX(1, height >> 1);
 
-    Image2D_Raw out;
+    Image2D out;
     out.init(new_width, new_height, format, NULL);
 
     ito(new_height) {
@@ -975,12 +988,68 @@ struct BVH_Node {
   bool is_full() { return num_items() == MAX_ITEMS - 1; }
 };
 
-class Node {
+class Type {
+  public:
+  virtual char const *getName()   = 0;
+  virtual Type *      getParent() = 0;
+};
+
+#define DECLARE_TYPE(X, P)                                                                         \
+  class X##Type : public Type {                                                                    \
+public:                                                                                            \
+    char const *getName() override { return #X; }                                                  \
+    Type *      getParent() override { return P::get_type(); }                                     \
+  };                                                                                               \
+  static Type *get_type() {                                                                        \
+    static X##Type t;                                                                              \
+    return &t;                                                                                     \
+  }                                                                                                \
+  Type *getType() override { return get_type(); }
+
+class Typed {
+  public:
+  static Type *              get_type() { return NULL; }
+  virtual Type *             getType() = 0;
+  template <typename T> bool isa() {
+    Type *ty = getType();
+    while (ty) {
+      if (ty == T::get_type()) return true;
+      ty = ty->getParent();
+    }
+    return false;
+  }
+  template <typename T> T *dyn_cast() {
+    if (this == NULL) return NULL;
+    Type *ty = getType();
+    while (ty) {
+      if (ty == T::get_type()) return (T *)this;
+      ty = ty->getParent();
+    }
+    return NULL;
+  }
+};
+
+class Node;
+
+class Component : public Typed {
+  protected:
+  Node *node = NULL;
+
+  public:
+  DECLARE_TYPE(Component, Typed)
+
+  virtual ~Component() {}
+  virtual void init(Node *n) { node = n; }
+  virtual void release() { delete this; }
+};
+
+class Node : public Typed {
   protected:
   u32                 id;
   float4x4            transform_cache;
   Node *              parent;
   Array<Node *>       children;
+  Array<Component *>  components;
   float3              aabb_min;
   float3              aabb_max;
   inline_string<0x10> name;
@@ -999,6 +1068,7 @@ class Node {
     } else
       this->name.init(name);
     children.init();
+    components.init();
     parent          = NULL;
     scale           = float3(1.0f, 1.0f, 1.0f);
     offset          = float3(0.0f, 0.0f, 0.0f);
@@ -1009,6 +1079,8 @@ class Node {
   }
 
   public:
+  DECLARE_TYPE(Node, Typed)
+
   float3 offset;
   quat   rotation;
   float3 scale;
@@ -1047,17 +1119,24 @@ class Node {
     out->init(name);
     return out;
   }
-  static u64 ID() {
-    static char p;
-    return (u64)(intptr_t)&p;
-  }
-  virtual u64  get_type_id() const { return ID(); }
+
   string_ref   get_name() const { return name.ref(); }
   u32          get_id() const { return id; }
   virtual void release() {
     ito(children.size) children[i]->release();
+    ito(components.size) components[i]->release();
     children.release();
+    components.release();
     delete this;
+  }
+  void addComponent(Component *c) {
+    components.push(c);
+  }
+  template <typename T> T *getComponent() {
+    ito(components.size) {
+      if (components[i]->isa<T>()) return components[i]->dyn_cast<T>();
+    }
+    return NULL;
   }
   void set_parent(Node *node) {
     ASSERT_ALWAYS(node != this);
@@ -1257,85 +1336,784 @@ template <typename T> struct BVH {
   }
 };
 
-struct Primitive {
+struct GPU_Meshlet {
+  u32 vertex_offset;
+  u32 index_offset;
+  u32 triangle_count;
+  u32 vertex_count;
+  // (x, y, z, radius)
+  float4 sphere;
+  // (x, y, z, _)
+  float4 cone_apex;
+  // (x, y, z, cutoff)
+  float4 cone_axis_cutoff;
+  u32    cone_pack;
+};
+static_assert(sizeof(GPU_Meshlet) == 68, "Packing error");
+
+class Surface {
+  public:
   Raw_Mesh_Opaque mesh;
   PBR_Material    material;
-  void            init() {
+
+  void init() {
     mesh.init();
     material.init();
   }
-  void release() { mesh.release(); }
-};
 
-struct Mesh {
-  Array<Primitive>    primitives;
-  inline_string<0x10> name;
-  void                init(string_ref name) {
-    primitives.init();
-    if (name.len == 0) {
-      char buf[0x10];
-      snprintf(buf, sizeof(buf), "mesh_%p", this);
-      this->name.init(stref_s(buf));
-    } else
-      this->name.init(name);
+  static Surface *create() {
+    Surface *p = new Surface;
+    p->init();
+    return p;
   }
+
   void release() {
-    ito(primitives.size) primitives[i].release();
-    primitives.release();
-  }
-  void add_primitive(Raw_Mesh_Opaque &mesh, PBR_Material &mat) {
-    Primitive p;
-    p.init();
-    p.mesh     = mesh;
-    p.material = mat;
-
-    primitives.push(p);
+    mesh.release();
+    delete this;
   }
 };
 
 class MeshNode : public Node {
   protected:
-  Mesh *mesh;
-  void  init(string_ref name) {
+  Array<Surface *> surfaces;
+
+  void init(string_ref name) {
     Node::init(name);
-    mesh = NULL;
+    surfaces.init();
   }
 
   public:
-  void             set_mesh(Mesh *mesh) { this->mesh = mesh; }
-  Mesh *           get_mesh() { return mesh; }
+  DECLARE_TYPE(MeshNode, Node)
+
   static MeshNode *create(string_ref name) {
     MeshNode *out = new MeshNode;
     out->init(name);
     return out;
   }
-  Node *clone() override {
+
+  void     add_surface(Surface *surface) { surfaces.push(surface); }
+  u32      getNumSurfaces() { return surfaces.size; }
+  Surface *getSurface(u32 i) { return surfaces[i]; }
+  Node *   clone() override {
     MeshNode *new_node = create(name.ref());
     Node::clone_into(new_node);
-    new_node->mesh = this->mesh;
     return new_node;
   }
-  static u64 ID() {
-    static char p;
-    return (u64)(intptr_t)&p;
-  }
-  u64  get_type_id() const override { return ID(); }
   void release() override { Node::release(); }
 };
 
-template <typename T> static bool isa(Node *node) { return node->get_type_id() == T::ID(); }
+struct Config_Item {
+  enum Type { U32, F32, BOOL };
+  Type type;
+  union {
+    u32  v_u32;
+    f32  v_f32;
+    bool v_bool;
+  };
+  union {
+    u32 v_u32_min;
+    f32 v_f32_min;
+  };
+  union {
+    u32 v_u32_max;
+    f32 v_f32_max;
+  };
+};
+
+struct Tmp_List_Allocator {
+  List *alloc() {
+    List *out = (List *)tl_alloc_tmp(sizeof(List));
+    memset(out, 0, sizeof(List));
+    return out;
+  }
+};
+
+struct Config {
+  using string_t = inline_string<32>;
+  Hash_Table<string_t, Config_Item> items;
+
+  void init(string_ref init_script) {
+    items.init();
+    TMP_STORAGE_SCOPE;
+    List *cur = List::parse(init_script, Tmp_List_Allocator());
+    traverse(cur);
+  }
+
+  void release() { items.release(); }
+
+  void traverse(List *l) {
+    struct Params {
+      i32  imin = -1;
+      f32  fmin = -1;
+      i32  imax = -1;
+      f32  fmax = -1;
+      void traverse(List *l) {
+        if (l == NULL) return;
+        if (l->child) {
+          traverse(l->child);
+          traverse(l->next);
+        } else {
+          if (l->cmp_symbol("min")) {
+            if (parse_decimal_int(l->get(1)->symbol.ptr, l->get(1)->symbol.len, &imin) == false)
+              parse_float(l->get(1)->symbol.ptr, l->get(1)->symbol.len, &fmin);
+          } else if (l->cmp_symbol("max")) {
+            if (parse_decimal_int(l->get(1)->symbol.ptr, l->get(1)->symbol.len, &imax) == false)
+              parse_float(l->get(1)->symbol.ptr, l->get(1)->symbol.len, &fmax);
+          }
+        }
+      }
+    };
+    if (l == NULL) return;
+    if (l->child) {
+      traverse(l->child);
+      traverse(l->next);
+    } else {
+      if (l->cmp_symbol("add")) {
+        string_ref  type = l->get(1)->symbol;
+        string_ref  name = l->get(2)->symbol;
+        Config_Item item;
+        MEMZERO(item);
+        string_t _name;
+        _name.init(name);
+        if (type == stref_s("u32")) {
+          Params params;
+          params.traverse(l->get(4));
+          item.type  = Config_Item::U32;
+          item.v_u32 = l->get(3)->parse_int();
+          if (params.imin != params.imax) {
+            item.v_u32_min = params.imin;
+            item.v_u32_max = params.imax;
+          }
+          items.insert(_name, item);
+        } else if (type == stref_s("f32")) {
+          Params params;
+          params.traverse(l->get(4));
+          if (params.fmin != params.fmax) {
+            item.v_f32_min = params.fmin;
+            item.v_f32_max = params.fmax;
+          }
+          item.type  = Config_Item::F32;
+          item.v_f32 = l->get(3)->parse_float();
+          items.insert(_name, item);
+        } else if (type == stref_s("bool")) {
+          item.type   = Config_Item::BOOL;
+          item.v_bool = l->get(3)->parse_int() > 0;
+          items.insert(_name, item);
+        } else {
+          TRAP;
+        }
+      }
+    }
+  }
+
+  void on_imgui() {
+    items.iter_pairs([&](string_t const &name, Config_Item &item) {
+      char buf[0x100];
+      snprintf(buf, sizeof(buf), "%.*s", STRF(name.ref()));
+      if (item.type == Config_Item::U32) {
+        if (item.v_u32_min != item.v_u32_max) {
+          ImGui::SliderInt(buf, (int *)&item.v_u32, item.v_u32_min, item.v_u32_max);
+        } else {
+          ImGui::InputInt(buf, (int *)&item.v_u32);
+        }
+      } else if (item.type == Config_Item::F32) {
+        if (item.v_f32_min != item.v_f32_max) {
+          ImGui::SliderFloat(buf, (float *)&item.v_f32, item.v_f32_min, item.v_f32_max);
+        } else {
+          ImGui::InputFloat(buf, (float *)&item.v_f32);
+        }
+      } else if (item.type == Config_Item::BOOL) {
+        ImGui::Checkbox(buf, &item.v_bool);
+      } else {
+        TRAP;
+      }
+    });
+  }
+
+  u32 &get_u32(char const *name) {
+    string_t _name;
+    _name.init(stref_s(name));
+    ASSERT_DEBUG(items.contains(_name));
+    return items.get_ref(_name).v_u32;
+  }
+
+  f32 &get_f32(char const *name) {
+    string_t _name;
+    _name.init(stref_s(name));
+    ASSERT_DEBUG(items.contains(_name));
+    return items.get_ref(_name).v_f32;
+  }
+
+  bool &get_bool(char const *name) {
+    string_t _name;
+    _name.init(stref_s(name));
+    ASSERT_DEBUG(items.contains(_name));
+    return items.get_ref(_name).v_bool;
+  }
+
+  void dump(FILE *file) {
+    fprintf(file, "(config\n");
+    items.iter_pairs([&](string_t const &name, Config_Item const &item) {
+      if (item.type == Config_Item::U32) {
+        if (item.v_u32_min != item.v_u32_max)
+          fprintf(file, " (add u32 \"%.*s\" %i (min %i) (max %i))\n", STRF(name.ref()), item.v_u32,
+                  item.v_u32_min, item.v_u32_max);
+        else
+          fprintf(file, " (add u32 \"%.*s\" %i)\n", STRF(name.ref()), item.v_u32);
+      } else if (item.type == Config_Item::F32) {
+        if (item.v_f32_min != item.v_f32_max)
+          fprintf(file, " (add f32 \"%.*s\" %f (min %f) (max %f))\n", STRF(name.ref()), item.v_f32,
+                  item.v_f32_min, item.v_f32_max);
+        else
+          fprintf(file, " (add f32 \"%.*s\" %f)\n", STRF(name.ref()), item.v_f32);
+      } else if (item.type == Config_Item::BOOL) {
+        fprintf(file, " (add bool \"%.*s\" %i)\n", STRF(name.ref()), item.v_bool ? 1 : 0);
+      } else {
+        TRAP;
+      }
+    });
+    fprintf(file, ")\n");
+  }
+};
+
+struct Camera {
+  float  phi;
+  float  theta;
+  float  distance;
+  float3 look_at;
+  float  aspect;
+  float  fov;
+  float  znear;
+  float  zfar;
+
+  float3   pos;
+  float4x4 view;
+  float4x4 proj;
+  float3   look;
+  float3   right;
+  float3   up;
+
+  void init() {
+    phi      = PI / 2.0f;
+    theta    = PI / 2.0f;
+    distance = 6.0f;
+    look_at  = float3(0.0f, -4.0f, 0.0f);
+    aspect   = 1.0;
+    fov      = PI / 2.0;
+    znear    = 1.0e-3f;
+    zfar     = 10.0e5f;
+  }
+
+  void traverse(List *l) {
+    if (l == NULL) return;
+    if (l->child) {
+      traverse(l->child);
+      traverse(l->next);
+    } else {
+      if (l->cmp_symbol("set_phi")) {
+        phi = l->get(1)->parse_float();
+      } else if (l->cmp_symbol("set_theta")) {
+        theta = l->get(1)->parse_float();
+      } else if (l->cmp_symbol("set_distance")) {
+        distance = l->get(1)->parse_float();
+      } else if (l->cmp_symbol("set_look_at")) {
+        look_at.x = l->get(1)->parse_float();
+        look_at.y = l->get(2)->parse_float();
+        look_at.z = l->get(3)->parse_float();
+      } else if (l->cmp_symbol("set_aspect")) {
+        aspect = l->get(1)->parse_float();
+      } else if (l->cmp_symbol("set_fov")) {
+        fov = l->get(1)->parse_float();
+      } else if (l->cmp_symbol("set_znear")) {
+        znear = l->get(1)->parse_float();
+      } else if (l->cmp_symbol("set_zfar")) {
+        zfar = l->get(1)->parse_float();
+      }
+    }
+  }
+
+  void dump(FILE *file) {
+    fprintf(file, "(camera\n");
+    fprintf(file, " (set_phi %f)\n", phi);
+    fprintf(file, " (set_theta %f)\n", theta);
+    fprintf(file, " (set_distance %f)\n", distance);
+    fprintf(file, " (set_look_at %f %f %f)\n", look_at.x, look_at.y, look_at.z);
+    fprintf(file, " (set_aspect %f)\n", aspect);
+    fprintf(file, " (set_fov %f)\n", fov);
+    fprintf(file, " (set_znear %f)\n", znear);
+    fprintf(file, " (set_zfar %f)\n", zfar);
+    fprintf(file, ")\n");
+  }
+
+  void release() {}
+
+  void update(float2 jitter = float2(0.0f, 0.0f)) {
+    pos = float3(sinf(theta) * cosf(phi), cos(theta), sinf(theta) * sinf(phi)) * distance + look_at;
+    look              = normalize(look_at - pos);
+    right             = normalize(cross(look, float3(0.0f, 1.0f, 0.0f)));
+    up                = normalize(cross(right, look));
+    proj              = float4x4(0.0f);
+    float tanHalfFovy = std::tan(fov * 0.5f);
+
+    proj[0][0] = 1.0f / (aspect * tanHalfFovy);
+    proj[1][1] = -1.0f / (tanHalfFovy);
+    proj[2][2] = 0.0f;
+    proj[2][3] = -1.0f;
+    proj[3][2] = znear;
+
+    proj[2][0] += jitter.x;
+    proj[2][1] += jitter.x;
+    view = glm::lookAt(pos, look_at, float3(0.0f, 1.0f, 0.0f));
+  }
+  float4x4 viewproj() { return proj * view; }
+};
 
 class IFactory {
   public:
-  virtual Node *    add_node(string_ref name)      = 0;
-  virtual MeshNode *add_mesh_node(string_ref name) = 0;
-  virtual Mesh *    add_mesh(string_ref name)      = 0;
-  virtual u32       add_image(Image2D_Raw img)     = 0;
+  virtual Node *    add_node(string_ref name)                             = 0;
+  virtual MeshNode *add_mesh_node(string_ref name)                        = 0;
+  virtual Surface * add_surface(Raw_Mesh_Opaque &mesh, PBR_Material &mat) = 0;
+  virtual u32       add_image(Image2D *img)                               = 0;
 };
 
 Node *              load_gltf_pbr(IFactory *factory, string_ref filename);
 Raw_Mesh_Opaque     optimize_mesh(Raw_Mesh_Opaque const &opaque_mesh);
 Raw_Mesh_Opaque     simplify_mesh(Raw_Mesh_Opaque const &opaque_mesh);
 Raw_Meshlets_Opaque build_meshlets(Raw_Mesh_Opaque &opaque_mesh);
-Image2D_Raw         load_image(string_ref filename, rd::Format format = rd::Format::RGBA8_SRGBA);
+Image2D *           load_image(string_ref filename, rd::Format format = rd::Format::RGBA8_SRGBA);
+
+class Asset_Manager {
+  Array<Image2D *> images;
+  Array<Surface *> surfaces;
+
+  void init() { MEMZERO(*this); }
+
+  public:
+  Surface *add_surface(Raw_Mesh_Opaque &mesh, PBR_Material &mat) {
+    Surface *p  = Surface::create();
+    p->mesh     = mesh;
+    p->material = mat;
+    surfaces.push(p);
+    return p;
+  }
+  static Asset_Manager *create() {
+    Asset_Manager *out = new Asset_Manager;
+    out->init();
+    return out;
+  }
+  u32 add_image(Image2D *img) {
+    images.push(img);
+    return images.size - 1;
+  }
+  u32 load_image(string_ref path, rd::Format format) {
+    images.push(::load_image(path, format));
+    return images.size - 1;
+  }
+  Image2D const *get_image(u32 index) { return images[index]; }
+  void           release() {
+    ito(surfaces.size) surfaces[i]->release();
+    ito(images.size) images[i]->release();
+    images.release();
+    surfaces.release();
+    delete this;
+  }
+  Array<Image2D *> const &get_images() const { return images; }
+  Array<Surface *> const &get_surfaces() const { return surfaces; }
+};
+
+class Scene {
+  public:
+  Node *         root;
+  Asset_Manager *assets;
+
+  friend class SceneFactory;
+  class SceneFactory : public IFactory {
+public:
+    Scene *scene;
+    SceneFactory(Scene *scene) : scene(scene) {}
+    Node *    add_node(string_ref name) override { return Node::create(name); }
+    MeshNode *add_mesh_node(string_ref name) override { return MeshNode::create(name); }
+    Surface * add_surface(Raw_Mesh_Opaque &mesh, PBR_Material &mat) override {
+      return scene->assets->add_surface(mesh, mat);
+    }
+    u32 add_image(Image2D *img) override { return scene->assets->add_image(img); }
+  };
+
+  void load_mesh(string_ref name, string_ref path) {
+    SceneFactory sf(this);
+    root->add_child(load_gltf_pbr(&sf, path)->rename(name));
+  }
+
+  template <typename F> void traverse(F fn, Node *node) {
+    if (node == NULL) node = root;
+    fn(node);
+    ito(node->get_children().size) { traverse(fn, node->get_children()[i]); }
+  }
+  void init() {
+    MEMZERO(*this);
+    root   = Node::create(stref_s("ROOT"));
+    assets = Asset_Manager::create();
+  }
+
+  public:
+  static Scene *create() {
+    Scene *s = new Scene;
+    s->init();
+    return s;
+  }
+
+  Asset_Manager *get_assets() { return assets; }
+
+  Node *get_node(string_ref name) {
+    Node *out = NULL;
+    traverse([&](Node *node) {
+      if (node->get_name() == name) {
+        out = node;
+      }
+    });
+    return out;
+  }
+  template <typename F> void traverse(F fn) { traverse(fn, root); }
+  void                       update() {}
+  void                       release() {
+    root->release();
+    assets->release();
+    delete this;
+  }
+};
+
+class GfxSurface {
+  InlineArray<size_t, 16>    attribute_offsets;
+  InlineArray<size_t, 16>    attribute_sizes;
+  InlineArray<Attribute, 16> attributes;
+
+  size_t total_memory_needed;
+  u32    total_indices;
+  size_t index_offset;
+
+  Resource_ID buffer;
+
+  rd::IFactory *factory;
+  Surface *     surface;
+
+  void init(rd::IFactory *factory, Surface *surface) {
+    MEMZERO(*this);
+    this->factory       = factory;
+    this->surface       = surface;
+    total_memory_needed = 0;
+    total_indices       = 0;
+    index_offset        = 0;
+    attribute_offsets.init();
+    attribute_sizes.init();
+    attributes.init();
+
+    rd::Buffer_Create_Info info;
+    MEMZERO(info);
+    info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
+    info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER |
+                      (u32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER |
+                      (u32)rd::Buffer_Usage_Bits::USAGE_UAV |
+                      (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
+    info.size = get_needed_memory();
+    buffer    = factory->create_buffer(info);
+
+    MEMZERO(info);
+    info.mem_bits             = (u32)rd::Memory_Bits::HOST_VISIBLE;
+    info.usage_bits           = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
+    info.size                 = get_needed_memory();
+    Resource_ID stagin_buffer = factory->create_buffer(info);
+    defer(factory->release_resource(stagin_buffer));
+
+    InlineArray<size_t, 16> attribute_cursors;
+    MEMZERO(attribute_cursors);
+    size_t indices_offset = 0;
+    void * ptr            = factory->map_buffer(stagin_buffer);
+    jto(surface->mesh.attributes.size) {
+      Attribute attribute      = surface->mesh.attributes[j];
+      size_t    attribute_size = surface->mesh.get_attribute_size(j);
+      memcpy((u8 *)ptr + attribute_offsets[j] + attribute_cursors[j],
+             &surface->mesh.attribute_data[0] + attribute.offset, attribute_size);
+      attribute_cursors[j] += attribute_size;
+    }
+    size_t index_size = surface->mesh.get_bytes_per_index() * surface->mesh.num_indices;
+    memcpy((u8 *)ptr + index_offset + indices_offset, &surface->mesh.index_data[0], index_size);
+    indices_offset += index_size;
+    factory->unmap_buffer(stagin_buffer);
+    auto *ctx = factory->start_compute_pass();
+    ctx->copy_buffer(stagin_buffer, 0, buffer, 0, get_needed_memory());
+    factory->end_compute_pass(ctx);
+  }
+  size_t get_needed_memory() {
+    if (total_memory_needed == 0) {
+      ito(surface->mesh.attributes.size) {
+        attributes.push(surface->mesh.attributes[i]);
+        attribute_offsets.push(0);
+        attribute_sizes.push(0);
+      }
+      jto(surface->mesh.attributes.size) {
+        attribute_sizes[j] += surface->mesh.get_attribute_size(j);
+      }
+
+      ito(attributes.size) {
+        jto(i) { attribute_offsets[i] += attribute_sizes[j]; }
+        attribute_offsets[i] = rd::IFactory::align_up(attribute_offsets[i]);
+        total_memory_needed  = attribute_offsets[i] + attribute_sizes[i];
+      }
+      total_memory_needed = rd::IFactory::align_up(total_memory_needed);
+      index_offset        = total_memory_needed;
+      total_memory_needed += surface->mesh.get_bytes_per_index() * surface->mesh.num_indices;
+    }
+    return total_memory_needed;
+  }
+  u32 get_num_indices() {
+    if (total_indices == 0) {
+      total_indices += surface->mesh.num_indices;
+    }
+    return total_indices;
+  }
+
+  public:
+  static GfxSurface *create(rd::IFactory *factory, Surface *surface) {
+    GfxSurface *out = new GfxSurface;
+    out->init(factory, surface);
+    return out;
+  }
+  void release() {
+    factory->release_resource(buffer);
+    delete this;
+  }
+  void draw(rd::Imm_Ctx *ctx, u32 *attribute_to_location) {
+    ito(attributes.size) {
+      Attribute attr = attributes[i];
+      ctx->IA_set_vertex_buffer(i, buffer, attribute_offsets[i], attr.stride,
+                                rd::Input_Rate::VERTEX);
+      rd::Attribute_Info info;
+      MEMZERO(info);
+      info.binding  = i;
+      info.format   = attr.format;
+      info.location = attribute_to_location[(u32)attr.type];
+      info.offset   = 0;
+      info.type     = attr.type;
+      ctx->IA_set_attribute(info);
+    }
+    ctx->IA_set_index_buffer(buffer, index_offset, rd::Index_t::UINT32);
+    u32 vertex_cursor = 0;
+    u32 index_cursor  = 0;
+    ctx->draw_indexed(surface->mesh.num_indices, 1, index_cursor, 0, vertex_cursor);
+    index_cursor += surface->mesh.num_indices;
+    vertex_cursor += surface->mesh.num_vertices;
+  }
+};
+
+class GfxSufraceComponent : public Component {
+  Array<GfxSurface *> gfx_surfaces;
+
+  public:
+  DECLARE_TYPE(GfxSufraceComponent, Component)
+
+  ~GfxSufraceComponent() override {}
+  static GfxSufraceComponent *create(rd::IFactory *factory, Node *n) {
+    ASSERT_DEBUG(n->isa<MeshNode>());
+    GfxSufraceComponent *s = new GfxSufraceComponent;
+    s->init(n);
+    MeshNode *mn = n->dyn_cast<MeshNode>();
+    ito(mn->getNumSurfaces()) {
+      s->gfx_surfaces.push(GfxSurface::create(factory, mn->getSurface(i)));
+    }
+    n->addComponent(s);
+    return s;
+  }
+  u32         getNumSurfaces() { return gfx_surfaces.size; }
+  GfxSurface *getSurface(u32 i) { return gfx_surfaces[i]; }
+  void        init(Node *n) override {
+    Component::init(n);
+    gfx_surfaces.init();
+  }
+  void release() override {
+    ito(gfx_surfaces.size) gfx_surfaces[i]->release();
+    gfx_surfaces.release();
+    delete this;
+  }
+};
+
+
+struct Topo_Mesh {
+  struct Vertex;
+  struct Edge;
+  struct TriFace {
+    u32 edge_0;
+    u32 edge_1;
+    u32 edge_2;
+
+    u32 vtx0;
+    u32 vtx1;
+    u32 vtx2;
+
+    void init() { memset(this, 0, sizeof(TriFace)); }
+    void release() {}
+  };
+  struct Edge {
+    u32 origin;
+    u32 end;
+    u32 face;
+    i32 sibling;
+    u32 next_edge;
+    u32 prev_edge;
+
+    void init() { memset(this, 0, sizeof(Edge)); }
+    void release() {}
+  };
+  struct Vertex {
+    SmallArray<u32, 8> edges;
+    SmallArray<u32, 8> faces;
+    u32                index;
+    float3             pos;
+
+    void init() {
+      memset(this, 0, sizeof(Vertex));
+      edges.init();
+      faces.init();
+    }
+    void release() {
+      edges.release();
+      faces.release();
+    }
+  };
+  Array<TriFace> faces;
+  Array<Edge>    edges;
+  // Hash_Table<Pair<u32, u32>, u32, Default_Allocator, 1 << 18, 16> edge_map;
+  Array<Vertex> vertices;
+  Array<u32>    seam_edges;
+  Array<u32>    nonmanifold_edges;
+  Edge *        get_edge(u32 id) { return &edges[id]; }
+  u32           add_edge() {
+    edges.push({});
+    return edges.size - 1;
+  }
+  TriFace *get_face(u32 id) { return &faces[id]; }
+  u32      add_face() {
+    faces.push({});
+    return faces.size - 1;
+  }
+  Vertex *get_vertex(u32 id) { return &vertices[id]; }
+  // void    register_edge(u32 vtx0, u32 vtx1, u32 edge_id) {
+  //  //ASSERT_ALWAYS(edge_map.contains({vtx0, vtx1}) == false);
+  //  edge_map.insert({vtx0, vtx1}, edge_id);
+  //}
+  void init(Raw_Mesh_Opaque const &opaque_mesh) {
+    // edge_map.init();
+    seam_edges.init();
+    nonmanifold_edges.init();
+    faces.init();
+    faces.reserve(opaque_mesh.num_indices / 3);
+    edges.init();
+    edges.reserve(opaque_mesh.num_indices);
+    vertices.init();
+    vertices.resize(opaque_mesh.num_vertices);
+    vertices.memzero();
+    ito(opaque_mesh.num_vertices) {
+      vertices[i].index = i;
+      vertices[i].pos   = opaque_mesh.fetch_position(i);
+    }
+    // edge_map.reserve(opaque_mesh.num_indices);
+    ito(opaque_mesh.num_indices / 3) {
+      Tri_Index face    = opaque_mesh.get_tri_index(i);
+      Vertex *  vtx0    = &vertices[face.i0];
+      Vertex *  vtx1    = &vertices[face.i1];
+      Vertex *  vtx2    = &vertices[face.i2];
+      u32       face_id = add_face();
+      u32       e0      = add_edge();
+      u32       e1      = add_edge();
+      u32       e2      = add_edge();
+
+      // register_edge(face.i0, face.i1, e0);
+      // register_edge(face.i1, face.i2, e1);
+      // register_edge(face.i2, face.i0, e2);
+
+      vtx0->edges.push(e0);
+      vtx0->edges.push(e2);
+      vtx0->faces.push(face_id);
+
+      vtx1->edges.push(e0);
+      vtx1->edges.push(e1);
+      vtx1->faces.push(face_id);
+
+      vtx2->edges.push(e1);
+      vtx2->edges.push(e2);
+      vtx2->faces.push(face_id);
+
+      get_edge(e0)->origin    = face.i0;
+      get_edge(e0)->face      = face_id;
+      get_edge(e0)->end       = face.i1;
+      get_edge(e0)->next_edge = e1;
+      get_edge(e0)->prev_edge = e2;
+      get_edge(e0)->sibling   = -1;
+
+      get_edge(e1)->origin    = face.i1;
+      get_edge(e1)->face      = face_id;
+      get_edge(e1)->end       = face.i2;
+      get_edge(e1)->next_edge = e2;
+      get_edge(e1)->prev_edge = e0;
+      get_edge(e1)->sibling   = -1;
+
+      get_edge(e2)->origin    = face.i2;
+      get_edge(e2)->face      = face_id;
+      get_edge(e2)->end       = face.i0;
+      get_edge(e2)->next_edge = e0;
+      get_edge(e2)->prev_edge = e1;
+      get_edge(e2)->sibling   = -1;
+
+      get_face(face_id)->edge_0 = e0;
+      get_face(face_id)->edge_1 = e1;
+      get_face(face_id)->edge_2 = e2;
+      get_face(face_id)->vtx0   = face.i0;
+      get_face(face_id)->vtx1   = face.i1;
+      get_face(face_id)->vtx2   = face.i2;
+    }
+    seam_edges.reserve(edges.size / 10);
+    ito(edges.size) {
+      Edge *e = get_edge(i);
+      // ASSERT_ALWAYS(edge_map.contains({e->origin, e->end}));
+      // ASSERT_ALWAYS(edge_map.get({e->origin, e->end}) == i);
+      Vertex *dst = get_vertex(e->end);
+      jto(dst->edges.size) {
+        Edge *se = get_edge(dst->edges[j]);
+        if (se->end == e->origin) {
+          // ASSERT_DEBUG(e->sibling == -1);
+          if (e->sibling != -1) {
+            nonmanifold_edges.push(i);
+            nonmanifold_edges.push(j);
+          }
+          e->sibling = dst->edges[j];
+        }
+      }
+      if (e->sibling == -1) {
+        seam_edges.push(i);
+      }
+      // if (edge_map.contains({e->end, e->origin})) {
+      //  e->sibling = edge_map.get({e->end, e->origin});
+      //} else {
+      //  // ASSERT_ALWAYS((*edge_map2).find(std::pair<u32, u32>{e->end,
+      //  // e->origin}) == (*edge_map2).end());
+      //  seam_edges.push(i);
+      //}
+
+      // ASSERT_ALWAYS(edge_map.contains({e->end, e->origin}));
+      // ASSERT_ALWAYS(edge_map.get({e->end, e->origin}) != i);
+      // e->sibling = edge_map.get({e->end, e->origin});
+    }
+  }
+  void release() {
+    ito(edges.size) edges[i].release();
+    edges.release();
+    ito(faces.size) faces[i].release();
+    faces.release();
+    ito(vertices.size) vertices[i].release();
+    vertices.release();
+    // edge_map.release();
+    seam_edges.release();
+    nonmanifold_edges.release();
+  }
+};
+
 #endif // SCENE

@@ -74,35 +74,6 @@ static float GetRandom(float Min, float Max) {
 
 #define TRESSFX_SIM_THREAD_GROUP_SIZE 64
 
-static void init_buffer(rd::IFactory *factory, Resource_ID buf, void const *src, size_t size) {
-  rd::Imm_Ctx *          ctx = factory->start_compute_pass();
-  rd::Buffer_Create_Info info;
-  MEMZERO(info);
-  info.mem_bits       = (u32)rd::Memory_Bits::HOST_VISIBLE;
-  info.usage_bits     = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
-  info.size           = size;
-  Resource_ID staging = factory->create_buffer(info);
-  void *      dst     = factory->map_buffer(staging);
-  memcpy(dst, src, size);
-  factory->unmap_buffer(staging);
-  ctx->copy_buffer(staging, 0, buf, 0, size);
-  factory->end_compute_pass(ctx);
-  factory->release_resource(staging);
-}
-
-template <typename T> static Resource_ID create_uniform(rd::IFactory *factory, T const &src) {
-
-  rd::Buffer_Create_Info info;
-  MEMZERO(info);
-  info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
-  info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER;
-  info.size       = sizeof(T);
-  Resource_ID out = factory->create_buffer(info);
-  void *      dst = factory->map_buffer(out);
-  memcpy(dst, &src, sizeof(src));
-  factory->unmap_buffer(out);
-  return out;
-}
 
 struct TressFX_Hair {
   i32           m_numGuideStrands;
@@ -465,47 +436,6 @@ static_defer({
   g_config.dump(scene_dump);
   fprintf(scene_dump, ")\n");
 });
-
-struct TimeStamp_Pool {
-  InlineArray<Resource_ID, 0x10> timestamps;
-  double                         duration;
-  void                           init() { timestamps.init(); }
-  void                           insert(rd::IFactory *factory, rd::Imm_Ctx *ctx) {
-    if (timestamps.size == 0x10) {
-      ito(0x10) { factory->release_resource(timestamps[i]); }
-      timestamps[0]   = ctx->insert_timestamp();
-      timestamps.size = 1;
-    } else {
-      timestamps.push(ctx->insert_timestamp());
-    }
-  }
-  void update(rd::IFactory *factory) {
-    if (timestamps.size < 2) return;
-    u32 cnt = 0;
-    ito(timestamps.size / 2) {
-      bool ready = factory->get_timestamp_state(timestamps[i * 2]) &&
-                   factory->get_timestamp_state(timestamps[i * 2 + 1]);
-      if (ready) {
-        cnt++;
-        duration +=
-            (factory->get_timestamp_ms(timestamps[i * 2], timestamps[i * 2 + 1]) - duration) * 0.05;
-      } else {
-        break;
-      }
-    }
-    ito(cnt) {
-      factory->release_resource(timestamps[i * 2]);
-      factory->release_resource(timestamps[i * 2 + 1]);
-    }
-    for (u32 i = cnt * 2; i < timestamps.size; i++) {
-      timestamps[i - cnt * 2] = timestamps[i];
-    }
-    timestamps.size -= cnt * 2;
-  }
-  void release(rd::IFactory *factory) {
-    ito(0x10) { factory->release_resource(timestamps[i]); }
-  }
-};
 
 struct Hair_Renderer {
   TressFX_Hair hair;
@@ -983,7 +913,6 @@ int main(int argc, char *argv[]) {
 
   rd::Pass_Mng *pmng = rd::Pass_Mng::create(rd::Impl_t::VULKAN);
   IGUI_Pass *   gui  = new Event_Consumer;
-  gui->init(pmng);
   pmng->set_event_consumer(gui);
   pmng->loop();
   return 0;

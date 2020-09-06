@@ -1,5 +1,10 @@
-commit 550f110354fc922d1a471906360558b14374c863
-Author: omar <omarcornut@gmail.com>
-Date:   Sun Jul 12 23:51:13 2020 +0200
+commit 05bc204dbd80dfebb3dab1511caf1cb980620c76
+Merge: b36d1d46 95c99aaa
+Author: ocornut <omarcornut@gmail.com>
+Date:   Tue Aug 18 17:51:43 2020 +0200
 
-    InputText, ImDrawList: Fixed assert triggering when drawing single line of text with more than ~16 KB characters. (#3349)
+    Merge branch 'master' into docking
+    
+    # Conflicts:
+    #       docs/CHANGELOG.txt
+    #       imgui.h

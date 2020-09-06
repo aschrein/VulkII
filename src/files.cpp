@@ -29,20 +29,16 @@ Raw_Mesh_Opaque optimize_mesh(Raw_Mesh_Opaque const &opaque_mesh) {
   u32 vertex_size = opaque_mesh.get_vertex_size();
   defer(vertex_blob.release());
   opaque_mesh.flatten(vertex_blob.ptr);
-  size_t vertex_count =
-      meshopt_generateVertexRemap(&remap[0], NULL, index_count, &vertex_blob[0],
-                                  opaque_mesh.num_indices, vertex_size);
-  meshopt_remapIndexBuffer(&indices[0], NULL, opaque_mesh.num_indices,
-                           &remap[0]);
+  size_t vertex_count = meshopt_generateVertexRemap(&remap[0], NULL, index_count, &vertex_blob[0],
+                                                    opaque_mesh.num_indices, vertex_size);
+  meshopt_remapIndexBuffer(&indices[0], NULL, opaque_mesh.num_indices, &remap[0]);
 
   out.attribute_data.resize(vertex_count * vertex_size);
-  meshopt_remapVertexBuffer(&out.attribute_data[0], &vertex_blob[0],
-                            index_count, vertex_size, &remap[0]);
-  meshopt_optimizeVertexCache(&indices[0], &indices[0], index_count,
-                              vertex_count);
+  meshopt_remapVertexBuffer(&out.attribute_data[0], &vertex_blob[0], index_count, vertex_size,
+                            &remap[0]);
+  meshopt_optimizeVertexCache(&indices[0], &indices[0], index_count, vertex_count);
   meshopt_optimizeVertexFetch(&out.attribute_data[0], &indices[0], index_count,
-                              &out.attribute_data[0], vertex_count,
-                              vertex_size);
+                              &out.attribute_data[0], vertex_count, vertex_size);
 
   out.index_type = rd::Index_t::UINT32;
   out.index_data.resize(indices.size * 4);
@@ -50,9 +46,7 @@ Raw_Mesh_Opaque optimize_mesh(Raw_Mesh_Opaque const &opaque_mesh) {
     u32 index = indices[i];
     memcpy(&out.index_data[i * 4], &index, 4);
   }
-  ito(opaque_mesh.attributes.size) {
-    out.attributes.push(opaque_mesh.attributes[i]);
-  }
+  ito(opaque_mesh.attributes.size) { out.attributes.push(opaque_mesh.attributes[i]); }
   u32 offset = 0;
   ito(out.attributes.size) {
     out.attributes[i].stride = vertex_size;
@@ -97,12 +91,11 @@ Raw_Meshlets_Opaque build_meshlets(Raw_Mesh_Opaque &opaque_mesh) {
   Array<meshopt_Meshlet> meshlets;
   meshlets.init();
   defer(meshlets.release());
-  meshlets.resize(meshopt_buildMeshletsBound(opaque_mesh.num_indices,
-                                             max_vertices, max_triangles));
+  meshlets.resize(meshopt_buildMeshletsBound(opaque_mesh.num_indices, max_vertices, max_triangles));
 
-  meshlets.resize(meshopt_buildMeshlets(
-      &meshlets[0], (u32 *)&opaque_mesh.index_data[0], opaque_mesh.num_indices,
-      opaque_mesh.num_vertices, max_vertices, max_triangles));
+  meshlets.resize(meshopt_buildMeshlets(&meshlets[0], (u32 *)&opaque_mesh.index_data[0],
+                                        opaque_mesh.num_indices, opaque_mesh.num_vertices,
+                                        max_vertices, max_triangles));
 
   InlineArray<Array<u8>, 0x10> tmp_attributes;
   tmp_attributes.init();
@@ -110,12 +103,9 @@ Raw_Meshlets_Opaque build_meshlets(Raw_Mesh_Opaque &opaque_mesh) {
   ito(opaque_mesh.attributes.size) {
     tmp_attributes[i].reserve((opaque_mesh.get_attribute_size(i) * 3) >> 1);
   }
-  auto write_attribute_data = [&](u8 const *src, size_t size,
-                                  u32 attribute_id) {
-    tmp_attributes[attribute_id].reserve(tmp_attributes[attribute_id].size +
-                                         size);
-    memcpy(tmp_attributes[attribute_id].ptr + tmp_attributes[attribute_id].size,
-           src, size);
+  auto write_attribute_data = [&](u8 const *src, size_t size, u32 attribute_id) {
+    tmp_attributes[attribute_id].reserve(tmp_attributes[attribute_id].size + size);
+    memcpy(tmp_attributes[attribute_id].ptr + tmp_attributes[attribute_id].size, src, size);
     tmp_attributes[attribute_id].size += size;
   };
   u32                 vertex_offset = 0;
@@ -144,20 +134,17 @@ Raw_Meshlets_Opaque build_meshlets(Raw_Mesh_Opaque &opaque_mesh) {
     u32 meshlet_vertex_offset = vertex_offset;
     u32 meshlet_index_offset  = index_offset;
 
-    for (unsigned int i = 0; i < meshlet.vertex_count; ++i)
-      write_vertex(meshlet.vertices[i]);
+    for (unsigned int i = 0; i < meshlet.vertex_count; ++i) write_vertex(meshlet.vertices[i]);
 
     ito(meshlet.triangle_count) {
       write_index(meshlet.indices[i][0]);
       write_index(meshlet.indices[i][1]);
       write_index(meshlet.indices[i][2]);
     }
-    Attribute position_attribute =
-        opaque_mesh.get_attribute(rd::Attriute_t::POSITION);
+    Attribute position_attribute = opaque_mesh.get_attribute(rd::Attriute_t::POSITION);
 
     meshopt_Bounds bounds = meshopt_computeMeshletBounds(
-        &meshlet,
-        (float *)&opaque_mesh.attribute_data[position_attribute.offset],
+        &meshlet, (float *)&opaque_mesh.attribute_data[position_attribute.offset],
         opaque_mesh.num_vertices, position_attribute.stride);
 
     Meshlet m        = {};
@@ -166,8 +153,7 @@ Raw_Meshlets_Opaque build_meshlets(Raw_Mesh_Opaque &opaque_mesh) {
     m.triangle_count = meshlet.triangle_count;
     m.vertex_count   = meshlet.vertex_count;
 
-    m.sphere = float4(bounds.center[0], bounds.center[1], bounds.center[2],
-                      bounds.radius);
+    m.sphere = float4(bounds.center[0], bounds.center[1], bounds.center[2], bounds.radius);
 
     m.cone_apex.x = bounds.cone_apex[0];
     m.cone_apex.y = bounds.cone_apex[1];
@@ -191,8 +177,8 @@ Raw_Meshlets_Opaque build_meshlets(Raw_Mesh_Opaque &opaque_mesh) {
   result.attribute_data.reserve(total_mem);
   result.attributes.resize(opaque_mesh.attributes.size);
   ito(opaque_mesh.attributes.size) {
-    memcpy(result.attribute_data.ptr + result.attribute_data.size,
-           tmp_attributes[i].ptr, tmp_attributes[i].size);
+    memcpy(result.attribute_data.ptr + result.attribute_data.size, tmp_attributes[i].ptr,
+           tmp_attributes[i].size);
     result.attributes[i]        = opaque_mesh.attributes[i];
     result.attributes[i].offset = result.attribute_data.size;
     result.attributes[i].stride = opaque_mesh.attributes[i].size;
@@ -205,24 +191,22 @@ Raw_Meshlets_Opaque build_meshlets(Raw_Mesh_Opaque &opaque_mesh) {
   return result;
 }
 
-void save_image(string_ref filename, Image2D_Raw const &image) {
-  if (image.format == rd::Format::RGBA8_UNORM ||
-      image.format == rd::Format::RGB8_UNORM ||
-      image.format == rd::Format::RGB8_SRGBA ||
-      image.format == rd::Format::RGBA8_SRGBA) {
+void save_image(string_ref filename, Image2D const *image) {
+  if (image->format == rd::Format::RGBA8_UNORM || image->format == rd::Format::RGB8_UNORM ||
+      image->format == rd::Format::RGB8_SRGBA || image->format == rd::Format::RGBA8_SRGBA) {
     Array<u8> data;
     data.init();
     defer(data.release());
-    data.resize(image.width * image.height * 4);
-    switch (image.format) {
+    data.resize(image->width * image->height * 4);
+    switch (image->format) {
     case rd::Format::RGB8_UNORM:
     case rd::Format::RGB8_SRGBA: {
-      ito(image.height) {
-        jto(image.width) {
-          u8 *dst = &data[i * image.width * 4 + j * 4];
-          u8  r   = image.data[i * image.width * 3 + j * 3 + 0];
-          u8  g   = image.data[i * image.width * 3 + j * 3 + 1];
-          u8  b   = image.data[i * image.width * 3 + j * 3 + 2];
+      ito(image->height) {
+        jto(image->width) {
+          u8 *dst = &data[i * image->width * 4 + j * 4];
+          u8  r   = image->data[i * image->width * 3 + j * 3 + 0];
+          u8  g   = image->data[i * image->width * 3 + j * 3 + 1];
+          u8  b   = image->data[i * image->width * 3 + j * 3 + 2];
           u8  a   = 255u;
           dst[0]  = r;
           dst[1]  = g;
@@ -233,24 +217,24 @@ void save_image(string_ref filename, Image2D_Raw const &image) {
     } break;
     case rd::Format::RGBA8_UNORM:
     case rd::Format::RGBA8_SRGBA: {
-      memcpy(data.ptr, image.data, data.size);
+      memcpy(data.ptr, image->data, data.size);
     } break;
     default: ASSERT_PANIC(false && "Unsupported format");
     }
     TMP_STORAGE_SCOPE;
-    stbi_write_png(stref_to_tmp_cstr(filename), image.width, image.height,
-                   STBI_rgb_alpha, &data[0], image.width * 4);
-  } else if (image.format == rd::Format::RGBA32_FLOAT) {
+    stbi_write_png(stref_to_tmp_cstr(filename), image->width, image->height, STBI_rgb_alpha,
+                   &data[0], image->width * 4);
+  } else if (image->format == rd::Format::RGBA32_FLOAT) {
     Array<float> data;
     data.init();
     defer(data.release());
-    data.resize(image.width * image.height * 4);
-    switch (image.format) {
+    data.resize(image->width * image->height * 4);
+    switch (image->format) {
     case rd::Format::RGB32_FLOAT: {
-      ito(image.height) {
-        jto(image.width) {
-          vec3   src = *(vec3 *)&image.data[i * image.width * 12 + j * 12];
-          float *dst = &data[i * image.width * 4 + j * 4];
+      ito(image->height) {
+        jto(image->width) {
+          vec3   src = *(vec3 *)&image->data[i * image->width * 12 + j * 12];
+          float *dst = &data[i * image->width * 4 + j * 4];
           dst[0]     = src.x;
           dst[1]     = src.y;
           dst[2]     = src.z;
@@ -259,17 +243,17 @@ void save_image(string_ref filename, Image2D_Raw const &image) {
       }
     } break;
     case rd::Format::RGBA32_FLOAT: {
-      memcpy(data.ptr, image.data, data.size * 4);
+      memcpy(data.ptr, image->data, data.size * 4);
     } break;
     default: ASSERT_PANIC(false && "Unsupported format");
     }
     TMP_STORAGE_SCOPE;
-    stbi_write_tga(stref_to_tmp_cstr(filename), image.width, image.height,
-                   STBI_rgb_alpha, &data[0]);
+    stbi_write_tga(stref_to_tmp_cstr(filename), image->width, image->height, STBI_rgb_alpha,
+                   &data[0]);
   }
 }
 
-Image2D_Raw load_image(string_ref filename, rd::Format format) {
+Image2D *load_image(string_ref filename, rd::Format format) {
   TMP_STORAGE_SCOPE;
   if (stref_find(filename, stref_s(".hdr")) != -1) {
     int            width, height, channels;
@@ -283,21 +267,18 @@ Image2D_Raw load_image(string_ref filename, rd::Format format) {
     ri.bits_per_channel = 8;
     ri.channel_order    = STBI_ORDER_RGB;
     ri.num_channels     = 0;
-    float *hdr = stbi__hdr_load(&s, &width, &height, &channels, STBI_rgb, &ri);
+    float *hdr          = stbi__hdr_load(&s, &width, &height, &channels, STBI_rgb, &ri);
 
     fclose(f);
     ASSERT_PANIC(hdr);
-    Image2D_Raw out;
-    out.init(width, height, rd::Format::RGB32_FLOAT, (u8 *)hdr);
+    Image2D *out = Image2D::create(width, height, rd::Format::RGB32_FLOAT, (u8 *)hdr);
     stbi_image_free(hdr);
     return out;
   } else {
     int  width, height, channels;
-    auto image = stbi_load(stref_to_tmp_cstr(filename), &width, &height,
-                           &channels, STBI_rgb_alpha);
+    auto image = stbi_load(stref_to_tmp_cstr(filename), &width, &height, &channels, STBI_rgb_alpha);
     ASSERT_PANIC(image);
-    Image2D_Raw out;
-    out.init(width, height, format, image);
+    Image2D *out = Image2D::create(width, height, format, image);
     stbi_image_free(image);
     return out;
   }
@@ -309,14 +290,13 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
   cgltf_options options;
   MEMZERO(options);
   cgltf_data *data = NULL;
-  ASSERT_ALWAYS(cgltf_parse_file(&options, stref_to_tmp_cstr(filename),
-                                 &data) == cgltf_result_success);
+  ASSERT_ALWAYS(cgltf_parse_file(&options, stref_to_tmp_cstr(filename), &data) ==
+                cgltf_result_success);
   defer(cgltf_free(data));
-  ASSERT_ALWAYS(
-      cgltf_load_buffers(&options, data, stref_to_tmp_cstr(filename)) ==
-      cgltf_result_success);
-  Hash_Table<string_ref, i32>      loaded_textures;
-  Hash_Table<cgltf_mesh *, Mesh *> mesh_table;
+  ASSERT_ALWAYS(cgltf_load_buffers(&options, data, stref_to_tmp_cstr(filename)) ==
+                cgltf_result_success);
+  Hash_Table<string_ref, i32>         loaded_textures;
+  Hash_Table<cgltf_mesh *, MeshNode *> mesh_table;
   loaded_textures.init();
   mesh_table.init();
   defer(loaded_textures.release());
@@ -336,10 +316,9 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
 
     cgltf_mesh *mesh = &data->meshes[mesh_index];
     // MeshNode *  mnode = factory->add_mesh_node(stref_s(mesh->name));
-    Mesh *mymesh = factory->add_mesh(stref_s(mesh->name));
+    MeshNode *mymesh = factory->add_mesh_node(stref_s(mesh->name));
     mesh_table.insert(mesh, mymesh);
-    for (u32 primitive_index = 0; primitive_index < mesh->primitives_count;
-         primitive_index++) {
+    for (u32 primitive_index = 0; primitive_index < mesh->primitives_count; primitive_index++) {
       cgltf_primitive *primitive = &mesh->primitives[primitive_index];
       ASSERT_ALWAYS(primitive->has_draco_mesh_compression == false);
       ASSERT_ALWAYS(primitive->extensions_count == 0);
@@ -353,49 +332,36 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
         ASSERT_ALWAYS(material->extensions_count == 0);
 
         if (material->has_pbr_metallic_roughness) {
-          if (material->pbr_metallic_roughness.base_color_texture.texture !=
-              NULL)
-            pbrmat.albedo_id =
-                load_texture(material->pbr_metallic_roughness.base_color_texture
-                                 .texture->image->uri,
-                             rd::Format::RGBA8_SRGBA);
-          if (material->pbr_metallic_roughness.metallic_roughness_texture
-                  .texture != NULL)
+          if (material->pbr_metallic_roughness.base_color_texture.texture != NULL)
+            pbrmat.albedo_id = load_texture(
+                material->pbr_metallic_roughness.base_color_texture.texture->image->uri,
+                rd::Format::RGBA8_SRGBA);
+          if (material->pbr_metallic_roughness.metallic_roughness_texture.texture != NULL)
             pbrmat.arm_id = load_texture(
-                material->pbr_metallic_roughness.metallic_roughness_texture
-                    .texture->image->uri,
+                material->pbr_metallic_roughness.metallic_roughness_texture.texture->image->uri,
                 rd::Format::RGBA8_UNORM);
-          pbrmat.albedo_factor =
-              float4(material->pbr_metallic_roughness.base_color_factor[0], //
-                     material->pbr_metallic_roughness.base_color_factor[1], //
-                     material->pbr_metallic_roughness.base_color_factor[2], //
-                     material->pbr_metallic_roughness.base_color_factor[3]  //
-              );
-          pbrmat.metal_factor =
-              material->pbr_metallic_roughness.metallic_factor;
-          pbrmat.roughness_factor =
-              material->pbr_metallic_roughness.roughness_factor;
+          pbrmat.albedo_factor    = float4(material->pbr_metallic_roughness.base_color_factor[0], //
+                                        material->pbr_metallic_roughness.base_color_factor[1], //
+                                        material->pbr_metallic_roughness.base_color_factor[2], //
+                                        material->pbr_metallic_roughness.base_color_factor[3]  //
+          );
+          pbrmat.metal_factor     = material->pbr_metallic_roughness.metallic_factor;
+          pbrmat.roughness_factor = material->pbr_metallic_roughness.roughness_factor;
         } else {
           if (material->pbr_specular_glossiness.diffuse_texture.texture != NULL)
             pbrmat.albedo_id =
-                load_texture(material->pbr_specular_glossiness.diffuse_texture
-                                 .texture->image->uri,
+                load_texture(material->pbr_specular_glossiness.diffuse_texture.texture->image->uri,
                              rd::Format::RGBA8_SRGBA);
-          if (material->pbr_specular_glossiness.specular_glossiness_texture
-                  .texture != NULL)
+          if (material->pbr_specular_glossiness.specular_glossiness_texture.texture != NULL)
             pbrmat.arm_id = load_texture(
-                material->pbr_specular_glossiness.specular_glossiness_texture
-                    .texture->image->uri,
+                material->pbr_specular_glossiness.specular_glossiness_texture.texture->image->uri,
                 rd::Format::RGBA8_UNORM);
-          pbrmat.metal_factor =
-              material->pbr_specular_glossiness.specular_factor[0];
-          pbrmat.roughness_factor =
-              material->pbr_specular_glossiness.glossiness_factor;
+          pbrmat.metal_factor     = material->pbr_specular_glossiness.specular_factor[0];
+          pbrmat.roughness_factor = material->pbr_specular_glossiness.glossiness_factor;
         }
         if (material->normal_texture.texture != NULL)
           pbrmat.normal_id =
-              load_texture(material->normal_texture.texture->image->uri,
-                           rd::Format::RGBA8_UNORM);
+              load_texture(material->normal_texture.texture->image->uri, rd::Format::RGBA8_UNORM);
       } while (0);
       Raw_Mesh_Opaque opaque_mesh;
       opaque_mesh.init();
@@ -404,8 +370,7 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
       if (primitive->indices->component_type == cgltf_component_type_r_16u) {
         opaque_mesh.index_type = rd::Index_t::UINT16;
         index_stride           = 2;
-      } else if (primitive->indices->component_type ==
-                 cgltf_component_type_r_32u) {
+      } else if (primitive->indices->component_type == cgltf_component_type_r_32u) {
         opaque_mesh.index_type = rd::Index_t::UINT32;
         index_stride           = 4;
       } else {
@@ -422,8 +387,7 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
           u16        cv    = (u16)index;
           write_index_data((u8 *)&cv, 2);
         }
-      } else if (primitive->indices->component_type ==
-                 cgltf_component_type_r_32u) {
+      } else if (primitive->indices->component_type == cgltf_component_type_r_32u) {
         ito(primitive->indices->count) {
           cgltf_size index = cgltf_accessor_read_index(primitive->indices, i);
           u32        cv    = (u32)index;
@@ -435,8 +399,7 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
       // Read attributes
       opaque_mesh.max = vec3(-1.0e10f);
       opaque_mesh.min = vec3(1.0e10f);
-      opaque_mesh.attribute_data.reserve(primitive->indices->count *
-                                         sizeof(Vertex_Full));
+      opaque_mesh.attribute_data.reserve(primitive->indices->count * sizeof(Vertex_Full));
       auto write_attribute_data = [&](u8 *src, size_t size) {
         ito(size) opaque_mesh.attribute_data.push(src[i]);
       };
@@ -445,8 +408,8 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
       //    opaque_mesh.attribute_data.push(0);
       //};
 
-      for (u32 attribute_index = 0;
-           attribute_index < primitive->attributes_count; attribute_index++) {
+      for (u32 attribute_index = 0; attribute_index < primitive->attributes_count;
+           attribute_index++) {
         cgltf_attribute *attribute = &primitive->attributes[attribute_index];
         // align_attribute_data();
         if (opaque_mesh.num_vertices == 0)
@@ -461,8 +424,7 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
         case cgltf_attribute_type_position: {
           ASSERT_ALWAYS(attribute->index == 0);
           ASSERT_ALWAYS(attribute->data->stride == 12);
-          ASSERT_ALWAYS(attribute->data->component_type ==
-                        cgltf_component_type_r_32f);
+          ASSERT_ALWAYS(attribute->data->component_type == cgltf_component_type_r_32f);
           Attribute a;
           MEMZERO(a);
           a.format = rd::Format::RGB32_FLOAT;
@@ -491,8 +453,7 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
         case cgltf_attribute_type_normal: {
           ASSERT_ALWAYS(attribute->index == 0);
           ASSERT_ALWAYS(attribute->data->stride == 12);
-          ASSERT_ALWAYS(attribute->data->component_type ==
-                        cgltf_component_type_r_32f);
+          ASSERT_ALWAYS(attribute->data->component_type == cgltf_component_type_r_32f);
           Attribute a;
           MEMZERO(a);
           a.format = rd::Format::RGB32_FLOAT;
@@ -511,8 +472,7 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
         case cgltf_attribute_type_tangent: {
           ASSERT_ALWAYS(attribute->index == 0);
           ASSERT_ALWAYS(attribute->data->stride == 16);
-          ASSERT_ALWAYS(attribute->data->component_type ==
-                        cgltf_component_type_r_32f);
+          ASSERT_ALWAYS(attribute->data->component_type == cgltf_component_type_r_32f);
           Attribute a;
           MEMZERO(a);
           a.format = rd::Format::RGBA32_FLOAT;
@@ -532,8 +492,7 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
           if (attribute->index >= 4) continue;
           ASSERT_ALWAYS(attribute->index < 4);
           ASSERT_ALWAYS(attribute->data->stride == 8);
-          ASSERT_ALWAYS(attribute->data->component_type ==
-                        cgltf_component_type_r_32f);
+          ASSERT_ALWAYS(attribute->data->component_type == cgltf_component_type_r_32f);
           Attribute a;
           MEMZERO(a);
           a.format = rd::Format::RG32_FLOAT;
@@ -568,7 +527,7 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
         }
       }
       opaque_mesh.sort_attributes();
-      mymesh->add_primitive(opaque_mesh, pbrmat);
+      mymesh->add_surface(factory->add_surface(opaque_mesh, pbrmat));
     }
   }
   Hash_Table<cgltf_node *, Node *> node_indices;
@@ -580,27 +539,23 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
     }
     Node *tnode = NULL;
     if (node->mesh != NULL) {
-      MeshNode *mnode = factory->add_mesh_node(stref_s(node->name));
       ASSERT_ALWAYS(mesh_table.contains(node->mesh));
-      Mesh *mesh = mesh_table.get(node->mesh);
-      mnode->set_mesh(mesh);
+      MeshNode *mnode = mesh_table.get(node->mesh);
       tnode = mnode;
     } else {
       tnode = factory->add_node(stref_s(node->name));
     }
     if (node->has_translation) {
-      tnode->offset = float3(node->translation[0], node->translation[1],
-                             node->translation[2]);
+      tnode->offset = float3(node->translation[0], node->translation[1], node->translation[2]);
     }
     if (node->has_scale) {
       tnode->scale = float3(node->scale[0], node->scale[1], node->scale[2]);
     }
     if (node->has_rotation) {
-      tnode->rotation = quat(node->rotation[0], node->rotation[1],
-                             node->rotation[2], node->rotation[3]);
+      tnode->rotation =
+          quat(node->rotation[0], node->rotation[1], node->rotation[2], node->rotation[3]);
     }
-    for (u32 child_index = 0; child_index < node->children_count;
-         child_index++) {
+    for (u32 child_index = 0; child_index < node->children_count; child_index++) {
       cgltf_node *child_node = node->children[child_index];
       tnode->add_child(load_node(child_node));
     }

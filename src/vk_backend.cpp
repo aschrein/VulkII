@@ -67,6 +67,7 @@ enum class Resource_Type : u32 {
   FENCE,
   SEMAPHORE,
   TIMESTAMP,
+  EVENT,
   NONE
 };
 
@@ -220,18 +221,17 @@ struct Image_Info {
 
 VkAccessFlags to_vk_access_flags(u32 flags) {
   u32 out = 0;
-  if (flags & (i32)rd::Access_Bits::SHADER_READ) {
-    out |= VK_ACCESS_SHADER_READ_BIT;
-  }
-  if (flags & (i32)rd::Access_Bits::SHADER_WRITE) {
-    out |= VK_ACCESS_SHADER_WRITE_BIT;
-  }
-  if (flags & (i32)rd::Access_Bits::MEMORY_WRITE) {
-    out |= VK_ACCESS_MEMORY_WRITE_BIT;
-  }
-  if (flags & (i32)rd::Access_Bits::MEMORY_READ) {
-    out |= VK_ACCESS_MEMORY_READ_BIT;
-  }
+  // clang-format off
+  if (flags & rd::Access_Bits::UNIFORM_READ                     ) out |= VK_ACCESS_UNIFORM_READ_BIT                   ;
+  if (flags & rd::Access_Bits::SHADER_READ                      ) out |= VK_ACCESS_SHADER_READ_BIT                    ;
+  if (flags & rd::Access_Bits::SHADER_WRITE                     ) out |= VK_ACCESS_SHADER_WRITE_BIT                   ;
+  if (flags & rd::Access_Bits::TRANSFER_READ                    ) out |= VK_ACCESS_TRANSFER_READ_BIT                  ;
+  if (flags & rd::Access_Bits::TRANSFER_WRITE                   ) out |= VK_ACCESS_TRANSFER_WRITE_BIT                 ;
+  if (flags & rd::Access_Bits::HOST_READ                        ) out |= VK_ACCESS_HOST_READ_BIT                      ;
+  if (flags & rd::Access_Bits::HOST_WRITE                       ) out |= VK_ACCESS_HOST_WRITE_BIT                     ;
+  if (flags & rd::Access_Bits::MEMORY_READ                      ) out |= VK_ACCESS_MEMORY_READ_BIT                    ;
+  if (flags & rd::Access_Bits::MEMORY_WRITE                     ) out |= VK_ACCESS_MEMORY_WRITE_BIT                   ;
+  // clang-format on
   return out;
 }
 
@@ -1451,6 +1451,12 @@ struct Fence : public Slot {
   void    release() {}
 };
 
+struct Event : public Slot {
+  VkEvent event;
+  void    init() { MEMZERO(*this); }
+  void    release() {}
+};
+
 struct Semaphore : public Slot {
   VkSemaphore sem;
   void        init() { MEMZERO(*this); }
@@ -1772,7 +1778,7 @@ struct Window {
     }
   } compute_pipelines;
   struct Fence_Array : Resource_Array<Fence, struct Fence_Array> {
-    static constexpr char const NAME[] = "Compute_Pipe_Array";
+    static constexpr char const NAME[] = "Fence_Pipe_Array";
     Window *                    wnd    = NULL;
     void                        release_item(Fence &item) {
       vkDestroyFence(wnd->device, item.fence, NULL);
@@ -1783,6 +1789,18 @@ struct Window {
       Resource_Array::init();
     }
   } fences;
+  struct Event_Array : Resource_Array<Event, struct Event_Array> {
+    static constexpr char const NAME[] = "Event_Pipe_Array";
+    Window *                    wnd    = NULL;
+    void                        release_item(Event &item) {
+      vkDestroyEvent(wnd->device, item.event, NULL);
+      MEMZERO(item);
+    }
+    void init(Window *wnd) {
+      this->wnd = wnd;
+      Resource_Array::init();
+    }
+  } events;
   struct CmdBuffer_Array : Resource_Array<CommandBuffer, struct CmdBuffer_Array> {
     static constexpr char const NAME[] = "CmdBuffer";
     Window *                    wnd    = NULL;
@@ -1840,6 +1858,7 @@ struct Window {
     pipelines.init(this);
     compute_pipelines.init(this);
     fences.init(this);
+    events.init(this);
     cmd_buffers.init(this);
     semaphores.init(this);
   }
@@ -1858,6 +1877,7 @@ struct Window {
     pipelines.release();
     compute_pipelines.release();
     fences.release();
+    events.release();
     cmd_buffers.release();
     semaphores.release();
     ito(mem_chunks.size) mem_chunks[i].release(device);
@@ -2026,6 +2046,17 @@ struct Window {
     VK_ASSERT_OK(vkCreateFence(device, &info, NULL, &fence.fence));
     ID fence_id = fences.push(fence);
     return {fence_id, (u32)Resource_Type::FENCE};
+  }
+
+  Resource_ID create_event() {
+    VkEventCreateInfo info;
+    MEMZERO(info);
+    info.sType = VK_STRUCTURE_TYPE_EVENT_CREATE_INFO;
+    Event event;
+    event.init();
+    VK_ASSERT_OK(vkCreateEvent(device, &info, NULL, &event.event));
+    ID fence_id = events.push(event);
+    return {fence_id, (u32)Resource_Type::EVENT};
   }
 
   Resource_ID create_command_buffer() {
@@ -2283,6 +2314,8 @@ struct Window {
       shaders.remove(res_id.id, 3);
     } else if (res_id.type == (u32)Resource_Type::FENCE) {
       fences.remove(res_id.id, 4);
+    } else if (res_id.type == (u32)Resource_Type::EVENT) {
+      events.remove(res_id.id, 4);
     } else if (res_id.type == (u32)Resource_Type::SEMAPHORE) {
       semaphores.remove(res_id.id, 4);
     } else if (res_id.type == (u32)Resource_Type::COMMAND_BUFFER) {
@@ -2618,6 +2651,7 @@ struct Window {
     pipelines.tick();
     compute_pipelines.tick();
     fences.tick();
+    events.tick();
     cmd_buffers.tick();
     semaphores.tick();
     {
@@ -2801,7 +2835,8 @@ class Vk_Ctx : public rd::Imm_Ctx {
     TIMESTAMP,
     COPY_BUFFER_IMAGE,
     COPY_IMAGE_BUFFER,
-    COPY_BUFFER
+    COPY_BUFFER,
+    EVENT
   };
 
   struct Deferred_Push_Constants {
@@ -2895,6 +2930,10 @@ class Vk_Ctx : public rd::Imm_Ctx {
     size_t         offset;
     Resource_ID    img_id;
     rd::Image_Copy dst_info;
+  };
+
+  struct Deferred_Event {
+    VkEvent event;
   };
 
   struct Deferred_Copy_Buffer {
@@ -3023,6 +3062,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       cursor = 0;
       data.reset();
     }
+    void  restart() { cursor = 0; }
     Cmd_t read_cmd_type() {
       u8 byte = data[cursor++];
       return (Cmd_t)byte;
@@ -3077,11 +3117,12 @@ class Vk_Ctx : public rd::Imm_Ctx {
     Render_Pass &pass = wnd->render_passes[cur_pass];
     ito(pass.create_info.rts.size) {
       Image &img = wnd->images[pass.create_info.rts[i].image.id];
-      img.barrier(cmd, VK_ACCESS_MEMORY_WRITE_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+      img.barrier(cmd, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     }
     if (pass.depth_target_view.is_null() == false) {
       Image &img = wnd->images[pass.create_info.depth_target.image.id];
-      img.barrier(cmd, VK_ACCESS_MEMORY_WRITE_BIT,
+      img.barrier(cmd, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                   VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     }
     VkRenderPassBeginInfo binfo;
@@ -3112,6 +3153,8 @@ class Vk_Ctx : public rd::Imm_Ctx {
     float depth_bias     = 0.0f;
     vkCmdSetDepthBias(cmd, depth_bias, 0.0f, 0.0f);
     vkCmdSetLineWidth(cmd, line_width);
+    InlineArray<VkEvent, 16> deferred_events;
+    deferred_events.init();
     while (cpu_cmd.has_data()) {
       Cmd_t type = cpu_cmd.read_cmd_type();
       if (type == Cmd_t::TIMESTAMP) {
@@ -3182,14 +3225,21 @@ class Vk_Ctx : public rd::Imm_Ctx {
           UNIMPLEMENTED;
         }
         }
+      } else if (type == Cmd_t::EVENT) {
+        Deferred_Event de;
+        cpu_cmd.read(&de);
+        deferred_events.push(de.event);
+        // pass
       } else {
         UNIMPLEMENTED;
       }
     }
-    cpu_cmd.reset();
     vkCmdEndRenderPass(cmd);
-    // vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, wnd->query_pool,
-    // timestamp_end_id);
+    // @TODO: Maybe enable some extension?
+    // "vkCmdSetEvent(): It is invalid to issue this call inside an active VkRenderPass"
+    ito(deferred_events.size)
+        vkCmdSetEvent(cmd, deferred_events[i], VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+    cpu_cmd.reset();
   }
 
   void flush_compute_pass() {
@@ -3213,6 +3263,10 @@ class Vk_Ctx : public rd::Imm_Ctx {
         Deferred_Timestamp dt;
         cpu_cmd.read(&dt);
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, dt.pool, dt.timestamp_id);
+      } else if (type == Cmd_t::EVENT) {
+        Deferred_Event de;
+        cpu_cmd.read(&de);
+        vkCmdSetEvent(cmd, de.event, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
       } else if (type == Cmd_t::PUSH_CONSTANTS) {
         Deferred_Push_Constants dpc;
         cpu_cmd.read(&dpc);
@@ -3531,6 +3585,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
     return finish_sem;
   }
   void release() {
+    cpu_cmd.release();
     deferred_bindings.release();
     stack.release();
     wnd->release_resource(cmd_id);
@@ -3582,13 +3637,21 @@ class Vk_Ctx : public rd::Imm_Ctx {
     deferred_bindings.reset();
   }
 
-  void push_state() override { stack.push(graphics_state); }
-  void pop_state() override { graphics_state = stack.pop(); }
-  bool get_fence_state(Resource_ID fence_id) override {
-    Fence &  fence    = wnd->fences[fence_id.id];
-    VkResult wait_res = vkWaitForFences(wnd->device, 1, &fence.fence, VK_TRUE, 0);
-    ASSERT_DEBUG(wait_res == VK_SUCCESS || wait_res == VK_TIMEOUT);
-    return wait_res == VK_SUCCESS;
+  void        push_state() override { stack.push(graphics_state); }
+  void        pop_state() override { graphics_state = stack.pop(); }
+  Resource_ID insert_event() override {
+    Resource_ID    event = wnd->create_event();
+    Deferred_Event de;
+    MEMZERO(de);
+    de.event = wnd->events[event.id].event;
+    cpu_cmd.write(Cmd_t::EVENT, &de);
+    return event;
+  }
+  bool get_event_state(Resource_ID fence_id) override {
+    Event &  event    = wnd->events[fence_id.id];
+    VkResult wait_res = vkGetEventStatus(wnd->device, event.event);
+    ASSERT_DEBUG(wait_res == VK_EVENT_SET || wait_res == VK_EVENT_RESET);
+    return wait_res == VK_EVENT_SET;
   }
   void IA_set_topology(rd::Primitive topology) override {
     ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
@@ -3600,7 +3663,8 @@ class Vk_Ctx : public rd::Imm_Ctx {
       UNIMPLEMENTED;
     }
     ASSERT_DEBUG(res_id.type == (i32)Resource_Type::BUFFER);
-    Buffer &    buf = wnd->buffers[res_id.id];
+    Buffer &buf = wnd->buffers[res_id.id];
+    buf.barrier(cmd, VK_ACCESS_INDEX_READ_BIT);
     VkIndexType type;
     switch (format) {
     case rd::Index_t::UINT32: type = VK_INDEX_TYPE_UINT32; break;
@@ -3618,7 +3682,8 @@ class Vk_Ctx : public rd::Imm_Ctx {
       UNIMPLEMENTED;
     }
     ASSERT_DEBUG(res_id.type == (i32)Resource_Type::BUFFER);
-    Buffer &     buf                       = wnd->buffers[res_id.id];
+    Buffer &buf = wnd->buffers[res_id.id];
+    buf.barrier(cmd, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT);
     VkDeviceSize doffset                   = (VkDeviceSize)offset;
     current_draw.vbos.size                 = MAX(index + 1, current_draw.vbos.size);
     current_draw.vbos[index].buffer        = buf.buffer;
@@ -3999,21 +4064,28 @@ class Vk_Ctx : public rd::Imm_Ctx {
 };
 
 class VkFactory : public rd::IFactory {
-  Window *wnd;
+  Window *           wnd;
+  Array<Resource_ID> release_queue;
 
   public:
   ID   last_sem;
   void init(Window *wnd) {
     this->wnd = wnd;
     last_sem  = {0};
+    release_queue.init();
   }
-  void release() { delete this; }
+  void release() {
+    release_queue.release();
+    delete this;
+  }
   void on_frame_begin() { last_sem = {0}; }
   void on_frame_end() {
     if (last_sem.is_null() == false) {
       wnd->release_resource({last_sem, (u32)Resource_Type::SEMAPHORE});
     }
     last_sem = {0};
+    ito(release_queue.size) wnd->release_resource(release_queue[i]);
+    release_queue.release();
   }
   bool get_timestamp_state(Resource_ID t0) override {
     u64      timestamp_results[1];
@@ -4051,7 +4123,7 @@ class VkFactory : public rd::IFactory {
   Resource_ID create_sampler(rd::Sampler_Create_Info const &info) override {
     return wnd->create_sampler(info);
   }
-  void        release_resource(Resource_ID id) override { wnd->release_resource(id); }
+  void        release_resource(Resource_ID id) override { release_queue.push(id); }
   Resource_ID get_swapchain_image() override {
     return {wnd->sc_images[wnd->image_index], (u32)Resource_Type::IMAGE};
   }
@@ -4288,6 +4360,7 @@ class VkPass_Mng : public rd::Pass_Mng {
     delete this;
   }
   void loop() override {
+    consumer->init(this);
     wnd->start_frame();
     consumer->on_init(f);
     wnd->end_frame(NULL);

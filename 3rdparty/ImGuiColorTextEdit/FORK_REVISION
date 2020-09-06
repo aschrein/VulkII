@@ -1,0 +1,7 @@
+commit 0a88824f7de8d0bd11d8419066caa7d3469395c4
+Author: BalazsJako <this.is.balazs.jako@gmail.com>
+Date:   Sat Jun 15 12:51:51 2019 +0100
+
+    Obsoleted ImGuiCol_ChildWindowBg fix.
+    
+    And a warning fix.

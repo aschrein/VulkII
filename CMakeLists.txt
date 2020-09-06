@@ -57,6 +57,9 @@ ELSE()
 ENDIF()
 
 function(ADD_EXAMPLE example_name example_file)
+    file(GLOB INCLUDES_SRC
+    include/*.h
+    )
     add_executable(${example_name}
     ${example_file}
     src/vk_backend.cpp
@@ -65,6 +68,10 @@ function(ADD_EXAMPLE example_name example_file)
     3rdparty/imgui/imgui_widgets.cpp
     3rdparty/imgui/imgui_draw.cpp
     3rdparty/imgui/imgui_demo.cpp
+    3rdparty/ImGuiColorTextEdit/TextEditor.cpp
+    ${INCLUDES_SRC}
+    3rdparty/imguinodegrapheditor.h
+    3rdparty/imguinodegrapheditor.cpp
     3rdparty/imgui/examples/imgui_impl_sdl.cpp
     )
     IF (WIN32)
@@ -100,3 +107,4 @@ add_example(simple_rendering examples/simple_rendering.cpp)
 add_example(mesh_lod examples/mesh_lod.cpp)
 add_example(simple_compute examples/simple_compute.cpp)
 add_example(oit examples/oit.cpp)
+add_example(virtual_textures examples/virtual_textures.cpp)

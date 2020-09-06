@@ -29,12 +29,12 @@ struct Timer {
   void release() {}
 };
 
-#define ASSERT_ALWAYS(x)                                                                                               \
-  do {                                                                                                                 \
-    if (!(x)) {                                                                                                        \
-      fprintf(stderr, "%s:%i [FAIL] at %s\n", __FILE__, __LINE__, #x);                                                 \
-      abort();                                                                                                         \
-    }                                                                                                                  \
+#define ASSERT_ALWAYS(x)                                                                           \
+  do {                                                                                             \
+    if (!(x)) {                                                                                    \
+      fprintf(stderr, "%s:%i [FAIL] at %s\n", __FILE__, __LINE__, #x);                             \
+      abort();                                                                                     \
+    }                                                                                              \
   } while (0)
 #define ASSERT_DEBUG(x) ASSERT_ALWAYS(x)
 #define ASSERT_PANIC(x) ASSERT_ALWAYS(x)
@@ -88,6 +88,25 @@ using f64 = double;
 
 #  include <cfenv>
 
+#  if !defined(alloca)
+#    if defined(__GLIBC__) || defined(__sun) || defined(__APPLE__) || defined(__NEWLIB__)
+#      include <alloca.h> // alloca (glibc uses <alloca.h>. Note that Cygwin may have _WIN32 defined, so the order matters here)
+#    elif defined(_WIN32)
+#      include <malloc.h> // alloca
+#      if !defined(alloca)
+#        define alloca _alloca // for clang with MS Codegen
+#      endif                   // alloca
+#    elif defined(__GLIBC__) || defined(__sun)
+#      include <alloca.h> // alloca
+#    else
+#      include <stdlib.h> // alloca
+#    endif
+#  endif // alloca
+
+#  if (defined(_MSC_VER) && !defined(snprintf))
+#    define snprintf _snprintf
+#  endif //(defined(_MSC_VER) && !defined(snprintf))
+
 static u32 enable_fpe() {
   u32 fe_value  = ~(    //
       _EM_INVALID |    //
@@ -130,7 +149,9 @@ static void restore_fpe(u32 new_mask) {
 
 template <typename T> T copy(T const &in) { return in; }
 
-template <typename M, typename K> bool contains(M const &in, K const &key) { return in.find(key) != in.end(); }
+template <typename M, typename K> bool contains(M const &in, K const &key) {
+  return in.find(key) != in.end();
+}
 
 template <typename M> bool sets_equal(M const &a, M const &b) {
   if (a.size() != b.size()) return false;
@@ -154,16 +175,16 @@ template <typename T, typename F> bool any(T set, F f) {
   return false;
 }
 
-#define UNIMPLEMENTED_(s)                                                                                              \
-  do {                                                                                                                 \
-    fprintf(stderr, "%s:%i UNIMPLEMENTED %s\n", __FILE__, __LINE__, s);                                                \
-    abort();                                                                                                           \
+#define UNIMPLEMENTED_(s)                                                                          \
+  do {                                                                                             \
+    fprintf(stderr, "%s:%i UNIMPLEMENTED %s\n", __FILE__, __LINE__, s);                            \
+    abort();                                                                                       \
   } while (0)
 #define UNIMPLEMENTED UNIMPLEMENTED_("")
-#define TRAP                                                                                                           \
-  do {                                                                                                                 \
-    fprintf(stderr, "%s:%i TRAP\n", __FILE__, __LINE__);                                                               \
-    abort();                                                                                                           \
+#define TRAP                                                                                       \
+  do {                                                                                             \
+    fprintf(stderr, "%s:%i TRAP\n", __FILE__, __LINE__);                                           \
+    abort();                                                                                       \
   } while (0)
 #define NOCOMMIT (void)0
 
@@ -188,14 +209,14 @@ template <typename F> __Defer__<F> defer_func(F f) { return __Defer__<F>(f); }
 #define PERF_ENTER(name)
 #define PERF_EXIT(name)
 #define OK_FALLTHROUGH (void)0;
-#define TMP_STORAGE_SCOPE                                                                                              \
-  tl_alloc_tmp_enter();                                                                                                \
+#define TMP_STORAGE_SCOPE                                                                          \
+  tl_alloc_tmp_enter();                                                                            \
   defer(tl_alloc_tmp_exit(););
-#define SWAP(x, y)                                                                                                     \
-  do {                                                                                                                 \
-    auto tmp = x;                                                                                                      \
-    x        = y;                                                                                                      \
-    y        = tmp;                                                                                                    \
+#define SWAP(x, y)                                                                                 \
+  do {                                                                                             \
+    auto tmp = x;                                                                                  \
+    x        = y;                                                                                  \
+    y        = tmp;                                                                                \
   } while (0)
 
 #if __linux__
@@ -210,14 +231,18 @@ static inline size_t get_page_size() {
 static inline size_t get_page_size() { return 1 << 12; }
 #endif
 
-static inline size_t page_align_up(size_t n) { return (n + get_page_size() - 1) & (~(get_page_size() - 1)); }
+static inline size_t page_align_up(size_t n) {
+  return (n + get_page_size() - 1) & (~(get_page_size() - 1));
+}
 
 static inline size_t page_align_down(size_t n) { return (n) & (~(get_page_size() - 1)); }
 
 static inline size_t get_num_pages(size_t size) { return page_align_up(size) / get_page_size(); }
 
 #if __linux__
-static inline void protect_pages(void *ptr, size_t num_pages) { mprotect(ptr, num_pages * get_page_size(), PROT_NONE); }
+static inline void protect_pages(void *ptr, size_t num_pages) {
+  mprotect(ptr, num_pages * get_page_size(), PROT_NONE);
+}
 static inline void unprotect_pages(void *ptr, size_t num_pages, bool exec = false) {
   mprotect(ptr, num_pages * get_page_size(), PROT_WRITE | PROT_READ | (exec ? PROT_EXEC : 0));
 }
@@ -228,7 +253,8 @@ static inline void unmap_pages(void *ptr, size_t num_pages) {
 }
 
 static inline void map_pages(void *ptr, size_t num_pages) {
-  void *new_ptr = mmap(ptr, num_pages * get_page_size(), PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+  void *new_ptr =
+      mmap(ptr, num_pages * get_page_size(), PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
   ASSERT_ALWAYS((size_t)new_ptr == (size_t)ptr);
 }
 #elif WIN32
@@ -271,7 +297,8 @@ template <typename T = uint8_t> struct Pool {
     size_t STACK_CAPACITY = 0x20 * sizeof(size_t);
     out.mem_length        = get_num_pages(STACK_CAPACITY + capacity * sizeof(T)) * get_page_size();
 #if __linux__
-    out.ptr = (uint8_t *)mmap(NULL, out.mem_length, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    out.ptr = (uint8_t *)mmap(NULL, out.mem_length, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE,
+                              -1, 0);
     ASSERT_ALWAYS(out.ptr != MAP_FAILED);
 #else
     out.ptr = (uint8_t *)malloc(out.mem_length);
@@ -593,12 +620,14 @@ template <int N> struct inline_string {
   }
 };
 
-template <int N> static inline bool operator==(inline_string<N> const &a, inline_string<N> const &b) {
+template <int N>
+static inline bool operator==(inline_string<N> const &a, inline_string<N> const &b) {
   if (a.len() != b.len()) return false;
   return strncmp(a.buf, b.buf, a.len()) == 0 ? true : false;
 }
 
-template <int N> static inline bool operator!=(inline_string<N> const &a, inline_string<N> const &b) {
+template <int N>
+static inline bool operator!=(inline_string<N> const &a, inline_string<N> const &b) {
   return !(a == b);
 }
 
@@ -722,8 +751,8 @@ static inline string_ref read_file_tmp_stref(char const *filename) {
   return string_ref{data, (size_t)fsize};
 }
 
-static inline void ATTR_USED write_image_rgba32_float_pfm(const char *file_name, void *data, uint32_t width,
-                                                          uint32_t height) {
+static inline void ATTR_USED write_image_rgba32_float_pfm(const char *file_name, void *data,
+                                                          uint32_t width, uint32_t height) {
   FILE *file = fopen(file_name, "wb");
   ASSERT_ALWAYS(file);
   fprintf(file, "PF\n%d %d\n%lf\n", width, height, -1.0f);
@@ -738,7 +767,8 @@ static inline void ATTR_USED write_image_rgba32_float_pfm(const char *file_name,
   fclose(file);
 }
 
-static inline void ATTR_USED write_image_2d_i32_ppm(const char *file_name, void *data, uint32_t pitch, uint32_t width,
+static inline void ATTR_USED write_image_2d_i32_ppm(const char *file_name, void *data,
+                                                    uint32_t pitch, uint32_t width,
                                                     uint32_t height) {
   FILE *file = fopen(file_name, "wb");
   ASSERT_ALWAYS(file);
@@ -765,7 +795,8 @@ static inline void ATTR_USED write_image_2d_i32_ppm(const char *file_name, void 
   fclose(file);
 }
 
-static inline void ATTR_USED write_image_2d_i24_ppm(const char *file_name, void *data, uint32_t pitch, uint32_t width,
+static inline void ATTR_USED write_image_2d_i24_ppm(const char *file_name, void *data,
+                                                    uint32_t pitch, uint32_t width,
                                                     uint32_t height) {
   FILE *file = fopen(file_name, "wb");
   ASSERT_ALWAYS(file);
@@ -785,7 +816,8 @@ static inline void ATTR_USED write_image_2d_i24_ppm(const char *file_name, void 
   fclose(file);
 }
 
-static inline void ATTR_USED write_image_2d_i8_ppm(const char *file_name, void *data, uint32_t pitch, uint32_t width,
+static inline void ATTR_USED write_image_2d_i8_ppm(const char *file_name, void *data,
+                                                   uint32_t pitch, uint32_t width,
                                                    uint32_t height) {
   FILE *file = fopen(file_name, "wb");
   ASSERT_ALWAYS(file);
@@ -822,8 +854,10 @@ struct Allocator {
 
 struct Default_Allocator {
   static void *alloc(size_t size) { return tl_alloc(size); }
-  static void *realloc(void *ptr, size_t old_size, size_t new_size) { return tl_realloc(ptr, old_size, new_size); }
-  static void  free(void *ptr) { tl_free(ptr); }
+  static void *realloc(void *ptr, size_t old_size, size_t new_size) {
+    return tl_realloc(ptr, old_size, new_size);
+  }
+  static void free(void *ptr) { tl_free(ptr); }
 };
 
 //#define SWAP(a, b) do {auto tmp = a; a = b; b = tmp; } while (0)
@@ -954,8 +988,8 @@ struct Array {
   void resize(size_t new_size) {
     if (new_size > capacity) {
       uint64_t new_capacity = new_size;
-      ptr                   = (T *)Allcator_t::realloc(ptr, sizeof(T) * capacity, sizeof(T) * new_capacity);
-      capacity              = new_capacity;
+      ptr      = (T *)Allcator_t::realloc(ptr, sizeof(T) * capacity, sizeof(T) * new_capacity);
+      capacity = new_capacity;
     }
     ASSERT_DEBUG(ptr != NULL);
     size = new_size;
@@ -980,8 +1014,8 @@ struct Array {
   void push(T elem) {
     if (size + 1 > capacity) {
       size_t new_capacity = capacity + grow_k;
-      ptr                 = (T *)Allcator_t::realloc(ptr, sizeof(T) * capacity, sizeof(T) * new_capacity);
-      capacity            = new_capacity;
+      ptr      = (T *)Allcator_t::realloc(ptr, sizeof(T) * capacity, sizeof(T) * new_capacity);
+      capacity = new_capacity;
     }
     ASSERT_DEBUG(capacity >= size + 1);
     ASSERT_DEBUG(ptr != NULL);
@@ -1000,8 +1034,8 @@ struct Array {
     T elem = ptr[size - 1];
     if (size + grow_k < capacity) {
       uint64_t new_capacity = capacity - grow_k;
-      ptr                   = (T *)Allcator_t::realloc(ptr, sizeof(T) * capacity, sizeof(T) * new_capacity);
-      capacity              = new_capacity;
+      ptr      = (T *)Allcator_t::realloc(ptr, sizeof(T) * capacity, sizeof(T) * new_capacity);
+      capacity = new_capacity;
     }
     ASSERT_DEBUG(size != 0);
     size -= 1;
@@ -1068,7 +1102,8 @@ struct SmallArray {
   }
 };
 
-template <typename K, typename Allcator_t = Default_Allocator, size_t grow_k = 0x10, size_t MAX_ATTEMPTS = 0x10>
+template <typename K, typename Allcator_t = Default_Allocator, size_t grow_k = 0x10,
+          size_t MAX_ATTEMPTS = 0x10>
 struct Hash_Set {
   struct Hash_Pair {
     K        key;
@@ -1222,7 +1257,9 @@ template <typename K, typename V> struct Map_Pair {
   bool operator==(Map_Pair const &that) const { return this->key == that.key; }
 };
 
-template <typename K, typename V> u64 hash_of(Map_Pair<K, V> const &item) { return hash_of(item.key); }
+template <typename K, typename V> u64 hash_of(Map_Pair<K, V> const &item) {
+  return hash_of(item.key);
+}
 
 template <typename K, typename V, typename Allcator_t = Default_Allocator, size_t grow_k = 0x10,
           size_t MAX_ATTEMPTS = 0x20>

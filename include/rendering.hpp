@@ -265,11 +265,18 @@ struct MS_State {
 
 enum class Input_Rate { VERTEX, INSTANCE };
 
-enum class Access_Bits : u32 {
-  SHADER_READ  = 0b00001,
-  SHADER_WRITE = 0b00010,
-  MEMORY_WRITE = 0b00100,
-  MEMORY_READ  = 0b01000,
+struct Access_Bits {
+  enum {
+    UNIFORM_READ   = 0x00000008,
+    SHADER_READ    = 0x00000020,
+    SHADER_WRITE   = 0x00000040,
+    TRANSFER_READ  = 0x00000800,
+    TRANSFER_WRITE = 0x00001000,
+    HOST_READ      = 0x00002000,
+    HOST_WRITE     = 0x00004000,
+    MEMORY_READ    = 0x00008000,
+    MEMORY_WRITE   = 0x00010000,
+  };
 };
 
 enum class Image_Layout {
@@ -419,11 +426,12 @@ class Imm_Ctx {
   virtual Resource_ID insert_timestamp()                                                  = 0;
   virtual void image_barrier(Resource_ID image_id, u32 access_flags, Image_Layout layout) = 0;
   virtual void buffer_barrier(Resource_ID buf_id, u32 access_flags)                       = 0;
-  virtual bool get_fence_state(Resource_ID fence_id)                                      = 0;
-  virtual void RS_set_line_width(float width)                                             = 0;
-  virtual void RS_set_depth_bias(float b)                                                 = 0;
-  virtual void IA_set_topology(Primitive topology)                                        = 0;
-  virtual void IA_set_index_buffer(Resource_ID id, u32 offset, Index_t format)            = 0;
+  virtual Resource_ID insert_event()                                                      = 0;
+  virtual bool        get_event_state(Resource_ID id)                                     = 0;
+  virtual void        RS_set_line_width(float width)                                      = 0;
+  virtual void        RS_set_depth_bias(float b)                                          = 0;
+  virtual void        IA_set_topology(Primitive topology)                                 = 0;
+  virtual void        IA_set_index_buffer(Resource_ID id, u32 offset, Index_t format)     = 0;
   virtual void IA_set_vertex_buffer(u32 index, Resource_ID buffer, size_t offset, size_t stride,
                                     Input_Rate rate)                                      = 0;
   virtual void IA_set_attribute(Attribute_Info const &info)                               = 0;
@@ -466,9 +474,12 @@ class Imm_Ctx {
   virtual Image_Info get_image_info(Resource_ID res_id)                                   = 0;
 };
 
+class Pass_Mng;
+
 class IEvent_Consumer {
   public:
   virtual void consume(void *event)   = 0;
+  virtual void init(Pass_Mng *)       = 0;
   virtual void on_init(IFactory *)    = 0;
   virtual void on_release(IFactory *) = 0;
   virtual void on_frame(IFactory *)   = 0;
