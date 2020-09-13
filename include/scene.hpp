@@ -1029,29 +1029,90 @@ class Typed {
   }
 };
 
-class Node;
+struct AABB {
+  float3               min;
+  float3               max;
+  static constexpr f32 EPS = 1.0e-6f;
 
-class Component : public Typed {
-  protected:
-  Node *node = NULL;
-
-  public:
-  DECLARE_TYPE(Component, Typed)
-
-  virtual ~Component() {}
-  virtual void init(Node *n) { node = n; }
-  virtual void release() { delete this; }
+  void init(float3 p) {
+    min = p;
+    max = p;
+  }
+  void unite(float3 p) {
+    min.x = MIN(min.x, p.x);
+    min.y = MIN(min.y, p.y);
+    min.z = MIN(min.z, p.z);
+    max.x = MAX(max.x, p.x);
+    max.y = MAX(max.y, p.y);
+    max.z = MAX(max.z, p.z);
+  }
+  void unite(AABB const &p) {
+    min.x = MIN(min.x, p.min.x);
+    min.y = MIN(min.y, p.min.y);
+    min.z = MIN(min.z, p.min.z);
+    max.x = MAX(max.x, p.max.x);
+    max.y = MAX(max.y, p.max.y);
+    max.z = MAX(max.z, p.max.z);
+  }
+  bool inside(float3 tmin) {
+    return                 //
+        tmin.x >= min.x && //
+        tmin.x <= max.x && //
+        tmin.y >= min.y && //
+        tmin.y <= max.y && //
+        tmin.z >= min.z && //
+        tmin.z <= max.z && //
+        true;
+  }
+  bool collide(float3 ro, float3 rd, float &t, float min_t) {
+    if (inside(ro)) {
+      t = 0.0f;
+      return true;
+    }
+    float3 invd = 1.0f / rd;
+    float  dx_n = (min.x - ro.x) * invd.x;
+    float  dy_n = (min.y - ro.y) * invd.y;
+    float  dz_n = (min.z - ro.z) * invd.z;
+    float  dx_f = (max.x - ro.x) * invd.x;
+    float  dy_f = (max.y - ro.y) * invd.y;
+    float  dz_f = (max.z - ro.z) * invd.z;
+    float  nt   = MAX3(MIN(dx_n, dx_f), MIN(dy_n, dy_f), MIN(dz_n, dz_f));
+    float  ft   = MIN3(MAX(dx_n, dx_f), MAX(dy_n, dy_f), MAX(dz_n, dz_f));
+    if (nt > min_t || nt > ft - EPS) return false;
+    t = nt;
+    return true;
+  }
 };
 
 class Node : public Typed {
+  public:
+  class Component : public Typed {
+protected:
+    Node *node = NULL;
+
+public:
+    DECLARE_TYPE(Component, Typed)
+
+    Component(Node *n) {
+      node = n;
+      node->addComponent(this);
+    }
+    virtual void update() {}
+    virtual ~Component() {}
+    virtual void release() {
+      node->removeComponent(this);
+      delete this;
+    }
+  };
+
   protected:
   u32                 id;
+  float4x4            itransform_cache;
   float4x4            transform_cache;
   Node *              parent;
   Array<Node *>       children;
   Array<Component *>  components;
-  float3              aabb_min;
-  float3              aabb_max;
+  AABB                aabb;
   inline_string<0x10> name;
 
   static u32 gen_id() {
@@ -1072,8 +1133,7 @@ class Node : public Typed {
     parent          = NULL;
     scale           = float3(1.0f, 1.0f, 1.0f);
     offset          = float3(0.0f, 0.0f, 0.0f);
-    aabb_min        = float3(0.0f, 0.0f, 0.0f);
-    aabb_max        = float3(0.0f, 0.0f, 0.0f);
+    aabb            = {};
     rotation        = quat();
     transform_cache = float4x4(1.0f);
   }
@@ -1093,8 +1153,7 @@ class Node : public Typed {
 
   void clone_into(Node *new_node) {
     new_node->transform_cache = this->transform_cache;
-    new_node->aabb_min        = this->aabb_min;
-    new_node->aabb_max        = this->aabb_max;
+    new_node->aabb            = this->aabb;
     new_node->offset          = this->offset;
     new_node->rotation        = this->rotation;
     new_node->scale           = this->scale;
@@ -1102,6 +1161,52 @@ class Node : public Typed {
     if (parent != NULL) {
       parent->add_child(new_node);
     }
+  }
+
+  virtual void restore(List *l) {
+    if (l == NULL) return;
+    if (l->child) {
+      restore(l->child);
+      restore(l->next);
+    } else {
+      if (l->cmp_symbol("offset")) {
+        offset.x = l->get(2)->parse_float();
+        offset.y = l->get(3)->parse_float();
+        offset.z = l->get(4)->parse_float();
+      } else if (l->cmp_symbol("rotation")) {
+        glm::vec3 euler;
+        euler.x = l->get(2)->parse_float();
+        euler.y = l->get(3)->parse_float();
+        euler.z = l->get(4)->parse_float();
+        euler *= PI / 180.0f;
+        rotation = glm::quat(glm::vec3(euler.x, euler.y, euler.z));
+      } else if (l->cmp_symbol("node")) {
+        string_ref name = l->get(1)->symbol;
+        if (Node *node = get_node(name)) {
+          node->restore(l->get(2));
+        }
+      }
+    }
+  }
+  Node *get_node(string_ref n) {
+    if (name.ref() == n) return this;
+    ito(children.size) {
+      if (children[i])
+        if (children[i]->name.ref() == n) return children[i];
+    }
+    return NULL;
+  }
+
+  virtual void save(FILE *f) {
+    fprintf(f, "(node %.*s\n", STRF(name.ref()));
+    fprintf(f, "  (offset float3 %f %f %f)\n", offset.x, offset.y, offset.z);
+    glm::vec3 euler = eulerAngles(rotation);
+    euler *= 180.0f / PI;
+    fprintf(f, "  (rotation float3 %f %f %f)\n", euler.x, euler.y, euler.z);
+    ito(children.size) {
+      if (children[i]) children[i]->save(f);
+    }
+    fprintf(f, ")\n");
   }
 
   Node *translate(float3 dr) {
@@ -1123,15 +1228,14 @@ class Node : public Typed {
   string_ref   get_name() const { return name.ref(); }
   u32          get_id() const { return id; }
   virtual void release() {
-    ito(children.size) children[i]->release();
-    ito(components.size) components[i]->release();
+    ito(children.size) if (children[i]) children[i]->release();
+    ito(components.size) if (components[i]) components[i]->release();
     children.release();
     components.release();
     delete this;
   }
-  void addComponent(Component *c) {
-    components.push(c);
-  }
+  void                     addComponent(Component *c) { components.push(c); }
+  void                     removeComponent(Component *c) { components.replace(c, NULL); }
   template <typename T> T *getComponent() {
     ito(components.size) {
       if (components[i]->isa<T>()) return components[i]->dyn_cast<T>();
@@ -1146,16 +1250,21 @@ class Node : public Typed {
     children.push(node);
     node->set_parent(this);
   }
-  void update_transform(float4x4 const &parent = float4x4(1.0f)) {
-    transform_cache = parent * glm::translate(float4x4(1.0f), offset) * (float4x4)rotation *
-                      glm::scale(float4x4(1.0f), scale);
-    ito(children.size) {
-      Node *child = children[i];
-      child->update_transform(transform_cache);
-    }
+  void update_transform() {
+    float4x4 parent = float4x4(1.0f);
+    if (this->parent) parent = this->parent->get_transform();
+    transform_cache = glm::translate(float4x4(1.0f), offset) * (float4x4)rotation *
+                      glm::scale(float4x4(1.0f), scale) * parent;
+    itransform_cache = inverse(transform_cache);
+    // ito(children.size) {
+    //  Node *child = children[i];
+    //  if (child) child->update_transform(transform_cache);
+    //}
   }
+  float4x4 const &get_itransform() { return itransform_cache; }
   float4x4 const &get_transform() { return transform_cache; }
-  float4x4        get_cofactor() {
+  float3 transform(float3 const &a) { return (transform_cache * float4(a.x, a.y, a.z, 1.0f)).xyz; }
+  float4x4 get_cofactor() {
     mat4 out{};
     mat4 transform = get_transform();
     cofactor(&transform[0][0], &out[0][0]);
@@ -1164,13 +1273,25 @@ class Node : public Typed {
     ito(indent) fprintf(stdout, " ");
     string_ref n = get_name();
     fprintf(stdout, "%.*s\n", STRF(n));
-    ito(children.size) children[i]->dump(indent + 2);
+    ito(children.size) if (children[i]) children[i]->dump(indent + 2);
   }
-  void set_aabb(float3 aabb_min, float3 aabb_max) {
-    this->aabb_min = aabb_min;
-    this->aabb_max = aabb_max;
-  }
+  AABB                 getAABB() { return aabb; }
   Array<Node *> const &get_children() const { return children; }
+  virtual void         update() {
+    ito(components.size) {
+      if (components[i]) {
+        components[i]->update();
+      }
+    }
+    ito(children.size) {
+      if (children[i]) children[i]->update();
+    }
+    aabb.init(offset);
+    ito(children.size) {
+      if (children[i]) aabb.unite(children[i]->getAABB());
+    }
+    update_transform();
+  }
   virtual ~Node() {}
 };
 
@@ -1351,6 +1472,10 @@ struct GPU_Meshlet {
 };
 static_assert(sizeof(GPU_Meshlet) == 68, "Packing error");
 
+struct Ray {
+  float3 o, d;
+};
+
 class Surface {
   public:
   Raw_Mesh_Opaque mesh;
@@ -1398,6 +1523,13 @@ class MeshNode : public Node {
     MeshNode *new_node = create(name.ref());
     Node::clone_into(new_node);
     return new_node;
+  }
+  void update() override {
+    Node::update();
+
+    ito(surfaces.size) {
+      aabb.unite(AABB{transform(surfaces[i]->mesh.min), transform(surfaces[i]->mesh.max)});
+    }
   }
   void release() override { Node::release(); }
 };
@@ -1666,6 +1798,12 @@ struct Camera {
     view = glm::lookAt(pos, look_at, float3(0.0f, 1.0f, 0.0f));
   }
   float4x4 viewproj() { return proj * view; }
+  Ray      gen_ray(float2 uv) {
+    Ray r;
+    r.o = pos;
+    r.d = normalize(look + std::tan(fov * 0.5f) * (right * uv.x * aspect + up * uv.y));
+    return r;
+  }
 };
 
 class IFactory {
@@ -1762,9 +1900,26 @@ public:
     return s;
   }
 
-  Asset_Manager *get_assets() { return assets; }
+  void restore(List *l) {
+    root->restore(l);
+    // if (l == NULL) return;
+    // if (l->child) {
+    // restore(l);
+    // restore(l->next);
+    //} else {
+    // if (l->cmp_symbol("node")) {
+    //}
+    //}
+  }
+  void save(FILE *f) {
+    fprintf(f, "(scene\n");
+    root->save(f);
+    fprintf(f, ")\n");
+  }
 
-  Node *get_node(string_ref name) {
+  Asset_Manager *get_assets() { return assets; }
+  Node *         get_root() { return root; }
+  Node *         get_node(string_ref name) {
     Node *out = NULL;
     traverse([&](Node *node) {
       if (node->get_name() == name) {
@@ -1905,18 +2060,18 @@ class GfxSurface {
   }
 };
 
-class GfxSufraceComponent : public Component {
+class GfxSufraceComponent : public Node::Component {
   Array<GfxSurface *> gfx_surfaces;
 
   public:
   DECLARE_TYPE(GfxSufraceComponent, Component)
 
   ~GfxSufraceComponent() override {}
+  GfxSufraceComponent(Node *n) : Component(n) { gfx_surfaces.init(); }
   static GfxSufraceComponent *create(rd::IFactory *factory, Node *n) {
     ASSERT_DEBUG(n->isa<MeshNode>());
-    GfxSufraceComponent *s = new GfxSufraceComponent;
-    s->init(n);
-    MeshNode *mn = n->dyn_cast<MeshNode>();
+    GfxSufraceComponent *s  = new GfxSufraceComponent(n);
+    MeshNode *           mn = n->dyn_cast<MeshNode>();
     ito(mn->getNumSurfaces()) {
       s->gfx_surfaces.push(GfxSurface::create(factory, mn->getSurface(i)));
     }
@@ -1925,17 +2080,12 @@ class GfxSufraceComponent : public Component {
   }
   u32         getNumSurfaces() { return gfx_surfaces.size; }
   GfxSurface *getSurface(u32 i) { return gfx_surfaces[i]; }
-  void        init(Node *n) override {
-    Component::init(n);
-    gfx_surfaces.init();
-  }
-  void release() override {
+  void        release() override {
     ito(gfx_surfaces.size) gfx_surfaces[i]->release();
     gfx_surfaces.release();
-    delete this;
+    Component::release();
   }
 };
-
 
 struct Topo_Mesh {
   struct Vertex;

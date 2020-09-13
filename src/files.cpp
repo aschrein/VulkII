@@ -295,7 +295,7 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
   defer(cgltf_free(data));
   ASSERT_ALWAYS(cgltf_load_buffers(&options, data, stref_to_tmp_cstr(filename)) ==
                 cgltf_result_success);
-  Hash_Table<string_ref, i32>         loaded_textures;
+  Hash_Table<string_ref, i32>          loaded_textures;
   Hash_Table<cgltf_mesh *, MeshNode *> mesh_table;
   loaded_textures.init();
   mesh_table.init();
@@ -541,7 +541,7 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
     if (node->mesh != NULL) {
       ASSERT_ALWAYS(mesh_table.contains(node->mesh));
       MeshNode *mnode = mesh_table.get(node->mesh);
-      tnode = mnode;
+      tnode           = mnode;
     } else {
       tnode = factory->add_node(stref_s(node->name));
     }
@@ -562,20 +562,22 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
     return tnode;
   };
   Node *root = load_node(&data->nodes[0]);
-
-  vec3 max = vec3(-1.0e10f);
-  vec3 min = vec3(1.0e10f);
+  root->update();
+  vec3 max = root->getAABB().max;
+  vec3 min = root->getAABB().min;
 
   vec3 max_dims = max - min;
 
   // Size normalization hack
   float vk      = 1.0f;
   float max_dim = MAX3(max_dims.x, max_dims.y, max_dims.z);
-  vk            = 50.0f / max_dim;
+  vk            = 10.0f / max_dim;
   vec3 avg      = (max + min) / 2.0f;
 
   //
 
-  root->offset = -avg * vk;
+  root->offset   = -avg * vk;
+  root->rotation = glm::rotate(quat(), PI / 2.0f, float3(0.0f, 0.0f, 1.0f));
+  root->scale    = float3(vk, vk, vk);
   return root;
 }

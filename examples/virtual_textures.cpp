@@ -3,80 +3,9 @@
 
 #include <imgui.h>
 
-Config g_config;
-Camera g_camera;
-Scene *g_scene = Scene::create();
-
-static void init_traverse(List *l) {
-  if (l == NULL) return;
-  if (l->child) {
-    init_traverse(l->child);
-    init_traverse(l->next);
-  } else {
-    if (l->cmp_symbol("camera")) {
-      g_camera.traverse(l->next);
-    } else if (l->cmp_symbol("config")) {
-      g_config.traverse(l->next);
-    }
-  }
-}
-
-static int g_init = []() {
-  TMP_STORAGE_SCOPE;
-  g_camera.init();
-  g_config.init(stref_s(R"(
-(
- (add u32  g_buffer_width 512 (min 4) (max 1024))
- (add u32  g_buffer_height 512 (min 4) (max 1024))
- (add bool forward 1)
- (add bool "depth test" 1)
- (add f32  strand_size 1.0 (min 0.1) (max 16.0))
-)
-)"));
-
-  char *state = read_file_tmp("scene_state");
-
-  if (state != NULL) {
-    TMP_STORAGE_SCOPE;
-    List *cur = List::parse(stref_s(state), Tmp_List_Allocator());
-    init_traverse(cur);
-  }
-
-  g_scene->load_mesh(stref_s("mesh"), stref_s("models/low_poly_ellie/scene.gltf"));
-
-  return 0;
-}();
-
-static_defer({
-  FILE *scene_dump = fopen("scene_state", "wb");
-  fprintf(scene_dump, "(\n");
-  defer(fclose(scene_dump));
-  g_camera.dump(scene_dump);
-  g_config.dump(scene_dump);
-  fprintf(scene_dump, ")\n");
-});
-
-class GizmoPass {
-  public:
-  Gizmo_Layer gizmo_layer;
-
-  public:
-  void init(rd::IFactory *factory) { gizmo_layer.init(factory); }
-  void release(rd::IFactory *factory) { gizmo_layer.release(factory); }
-  void render(rd::IFactory *factory, rd::Imm_Ctx *ctx) {
-    {
-      float dx = 1.0e-1f * g_camera.distance;
-      gizmo_layer.draw_sphere(g_camera.look_at, dx * 0.04f, float3{1.0f, 1.0f, 1.0f});
-      gizmo_layer.draw_cylinder(g_camera.look_at, g_camera.look_at + float3{dx, 0.0f, 0.0f},
-                                dx * 0.04f, float3{1.0f, 0.0f, 0.0f});
-      gizmo_layer.draw_cylinder(g_camera.look_at, g_camera.look_at + float3{0.0f, dx, 0.0f},
-                                dx * 0.04f, float3{0.0f, 1.0f, 0.0f});
-      gizmo_layer.draw_cylinder(g_camera.look_at, g_camera.look_at + float3{0.0f, 0.0f, dx},
-                                dx * 0.04f, float3{0.0f, 0.0f, 1.0f});
-    }
-    gizmo_layer.render(factory, ctx, g_camera.viewproj());
-  }
-};
+Config       g_config;
+Scene *      g_scene     = Scene::create();
+Gizmo_Layer *gizmo_layer = NULL;
 
 template <typename T> class GPUBuffer {
   private:
@@ -101,16 +30,45 @@ template <typename T> class GPUBuffer {
     factory->release_resource(cpu_buffer);
     gpu_buffer.reset();
   }
-  void reset() { cpu_array.reset(); }
-  void flush() {
-    if (gpu_buffer.is_null()) {
+  Resource_ID get() { return gpu_buffer; }
+  void        reset() { cpu_array.reset(); }
+  void        flush(rd::Imm_Ctx *ctx = NULL) {
+    if (gpu_buffer.is_null() || cpu_array.size * sizeof(T) < gpu_buffer_size) {
       if (cpu_buffer) factory->release_resource(cpu_buffer);
-
+      if (gpu_buffer) factory->release_resource(gpu_buffer);
+      gpu_buffer_size = cpu_array.size * sizeof(T);
+      {
+        rd::Buffer_Create_Info info;
+        MEMZERO(info);
+        info.mem_bits = (u32)rd::Memory_Bits::DEVICE_LOCAL;
+        info.usage_bits =
+            (u32)rd::Buffer_Usage_Bits::USAGE_UAV | (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
+        info.size  = cpu_array.size * sizeof(T);
+        gpu_buffer = factory->create_buffer(info);
+      }
+      {
+        rd::Buffer_Create_Info info;
+        MEMZERO(info);
+        info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+        info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
+        info.size       = cpu_array.size * sizeof(T);
+        cpu_array       = factory->create_buffer(info);
+      }
+    }
+    void *ptr = factory->map_buffer(cpu_buffer);
+    memcpy(ptr, cpu_array.ptr, gpu_buffer_size);
+    factory->unmap_buffer(cpu_buffer);
+    if (ctx == NULL) {
+      ctx = factory->start_compute_pass();
+      ctx->copy_buffer(cpu_buffer, 0, gpu_buffer, 0, gpu_buffer_size);
+      factory->end_compute_pass(ctx);
+    } else {
+      ctx->copy_buffer(cpu_buffer, 0, gpu_buffer, 0, gpu_buffer_size);
     }
   }
   void release() {
-    factory->release_resource(gpu_buffer);
-    factory->release_resource(cpu_buffer);
+    if (cpu_buffer) factory->release_resource(cpu_buffer);
+    if (gpu_buffer) factory->release_resource(gpu_buffer);
     cpu_array.release();
   }
 };
@@ -123,6 +81,14 @@ class GBufferPass {
   public:
   void init() { MEMZERO(*this); }
   void render(rd::IFactory *factory) {
+    g_scene->traverse([&](Node *node) {
+      if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
+        if (mn->getComponent<GfxSufraceComponent>() == NULL) {
+          GfxSufraceComponent::create(factory, mn);
+        }
+      }
+    });
+
     u32 width  = g_config.get_u32("g_buffer_width");
     u32 height = g_config.get_u32("g_buffer_height");
     {
@@ -191,7 +157,7 @@ class GBufferPass {
   PIXEL_POSITION   = POSITION;
   PIXEL_NORMAL     = NORMAL;
   PIXEL_TEXCOORD0  = TEXCOORD0;
-  @(EXPORT_POSITION mul4(viewproj, float4(POSITION, 1.0)));
+  @(EXPORT_POSITION mul4(viewproj, mul4(world_transform, float4(POSITION, 1.0))));
 @(END)
 )"),
                                                     NULL, 0));
@@ -225,20 +191,31 @@ class GBufferPass {
       rs_state.front_face   = rd::Front_Face::CCW;
       rs_state.cull_mode    = rd::Cull_Mode::BACK;
       ctx->RS_set_state(rs_state);
-      float4x4 viewproj = g_camera.viewproj();
+      float4x4 viewproj = gizmo_layer->get_camera().viewproj();
       ctx->push_constants(&viewproj, 0, sizeof(float4x4));
       g_scene->traverse([&](Node *node) {
         if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
-          if (mn->getComponent<GfxSufraceComponent>() == NULL) {
-            GfxSufraceComponent::create(factory, mn);
-          }
-          GfxSufraceComponent *gs = mn->getComponent<GfxSufraceComponent>();
+          GfxSufraceComponent *gs    = mn->getComponent<GfxSufraceComponent>();
+          float4x4             model = mn->get_transform();
+          ctx->push_constants(&model, 64, sizeof(model));
           ito(gs->getNumSurfaces()) {
             GfxSurface *s = gs->getSurface(i);
             s->draw(ctx, attribute_to_location);
           }
         }
       });
+      auto g_camera = gizmo_layer->get_camera();
+      {
+        float dx = 1.0e-1f * g_camera.distance;
+        gizmo_layer->draw_sphere(g_camera.look_at, dx * 0.04f, float3{1.0f, 1.0f, 1.0f});
+        gizmo_layer->draw_cylinder(g_camera.look_at, g_camera.look_at + float3{dx, 0.0f, 0.0f},
+                                   dx * 0.04f, float3{1.0f, 0.0f, 0.0f});
+        gizmo_layer->draw_cylinder(g_camera.look_at, g_camera.look_at + float3{0.0f, dx, 0.0f},
+                                   dx * 0.04f, float3{0.0f, 1.0f, 0.0f});
+        gizmo_layer->draw_cylinder(g_camera.look_at, g_camera.look_at + float3{0.0f, 0.0f, dx},
+                                   dx * 0.04f, float3{0.0f, 0.0f, 1.0f});
+      }
+      gizmo_layer->render(factory, ctx);
       factory->end_render_pass(ctx);
     }
   }
@@ -246,25 +223,58 @@ class GBufferPass {
 };
 
 class Event_Consumer : public IGUI_Pass {
-  Resource_ID buf_id = {};
-  // TextEditor  te;
   GBufferPass gbuffer_pass;
+  float3      pos;
 
   public:
   void init(rd::Pass_Mng *pmng) override { //
     IGUI_Pass::init(pmng);
-    g_camera.init();
-    gbuffer_pass.init();
-    /* te.SetText(R"(
- (
-  (add u32  g_buffer_width 512 (min 4) (max 1024))
-  (add u32  g_buffer_height 512 (min 4) (max 1024))
-  (add bool forward 1)
-  (add bool "depth test" 1)
-  (add f32  strand_size 1.0 (min 0.1) (max 16.0))
- )
- )");*/
   }
+  void init_traverse(List *l) {
+    if (l == NULL) return;
+    if (l->child) {
+      init_traverse(l->child);
+      init_traverse(l->next);
+    } else {
+      if (l->cmp_symbol("camera")) {
+        gizmo_layer->get_camera().traverse(l->next);
+      } else if (l->cmp_symbol("config")) {
+        g_config.traverse(l->next);
+      } else if (l->cmp_symbol("scene")) {
+        g_scene->restore(l->next);
+      }
+    }
+  }
+
+  void on_gui_traverse_nodes(Node *node) {
+    ImGui::PushID((size_t)(void *)node);
+    ImGui::LabelText("Name", "%.*s", STRF(node->get_name()));
+    ImGui::DragFloat3("Offset", (float *)&node->offset, 1.0e-2f);
+    glm::vec3 euler = glm::eulerAngles(node->rotation);
+    euler *= 180.0f / PI;
+    ImGui::DragFloat3("Rotation", (float *)&euler, 1.0e-1f);
+    euler *= PI / 180.0f;
+    // float EPS = 1.0e-3f;
+    // if (euler.x < 2.0f * PI + EPS) euler.x += 2.0f * PI;
+    // if (euler.x > 2.0f * PI - EPS) euler.x -= 2.0f * PI;
+    // if (euler.y < 2.0f * PI + EPS) euler.y += 2.0f * PI;
+    // if (euler.y > 2.0f * PI - EPS) euler.y -= 2.0f * PI;
+    // if (euler.z < 2.0f * PI + EPS) euler.z += 2.0f * PI;
+    // if (euler.z > 2.0f * PI - EPS) euler.z -= 2.0f * PI;
+    node->rotation = glm::quat(glm::vec3(euler.x, euler.y, euler.z));
+    // quat(euler.x, float3(1.0f, 0.0f, 0.0f)) *
+    // quat(euler.y, float3(0.0f, 1.0f, 0.0f)) *
+    // quat(euler.z, float3(0.0f, 0.0f, 1.0f));
+    if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
+    }
+    ImGui::Indent();
+    ito(node->get_children().size) {
+      if (node->get_children()[i]) on_gui_traverse_nodes(node->get_children()[i]);
+    }
+    ImGui::Unindent();
+    ImGui::PopID();
+  }
+
   void on_gui(rd::IFactory *factory) override { //
     // bool show = true;
     // ShowExampleAppCustomNodeGraph(&show);
@@ -272,6 +282,9 @@ class Event_Consumer : public IGUI_Pass {
     // ImGui::Begin("Text");
     // te.Render("Editor");
     // ImGui::End();
+    ImGui::Begin("Scene");
+    on_gui_traverse_nodes(g_scene->get_root());
+    ImGui::End();
     ImGui::Begin("Config");
     g_config.on_imgui();
     // ImGui::LabelText("clear pass", "%f ms", hr.clear_timestamp.duration);
@@ -279,58 +292,49 @@ class Event_Consumer : public IGUI_Pass {
     // ImGui::LabelText("resolve pass", "%f ms", hr.resolve_timestamp.duration);
     ImGui::End();
     ImGui::Begin("main viewport");
-
+    gizmo_layer->per_imgui_window();
     auto wsize = get_window_size();
     ImGui::Image(bind_texture(gbuffer_pass.normal_rt, 0, 0, rd::Format::NATIVE),
                  ImVec2(wsize.x, wsize.y));
     auto wpos = ImGui::GetCursorScreenPos();
     // auto iinfo      = factory->get_image_info(hr.hair_img);
     // g_camera.aspect = float(iinfo.height) / iinfo.width;
-    ImGuiIO &io = ImGui::GetIO();
-    if (ImGui::IsWindowHovered()) {
-      auto scroll_y = ImGui::GetIO().MouseWheel;
-      if (scroll_y) {
-        g_camera.distance += g_camera.distance * 2.e-1 * scroll_y;
-        g_camera.distance = clamp(g_camera.distance, 1.0e-3f, 1000.0f);
-      }
-      f32 camera_speed = 2.0f * g_camera.distance;
-      if (ImGui::GetIO().KeysDown[SDL_SCANCODE_LSHIFT]) {
-        camera_speed = 10.0f * g_camera.distance;
-      }
-      float3 camera_diff = float3(0.0f, 0.0f, 0.0f);
-      if (ImGui::GetIO().KeysDown[SDL_SCANCODE_W]) {
-        camera_diff += g_camera.look;
-      }
-      if (ImGui::GetIO().KeysDown[SDL_SCANCODE_S]) {
-        camera_diff -= g_camera.look;
-      }
-      if (ImGui::GetIO().KeysDown[SDL_SCANCODE_A]) {
-        camera_diff -= g_camera.right;
-      }
-      if (ImGui::GetIO().KeysDown[SDL_SCANCODE_D]) {
-        camera_diff += g_camera.right;
-      }
-      if (dot(camera_diff, camera_diff) > 1.0e-3f) {
-        g_camera.look_at += glm::normalize(camera_diff) * camera_speed * (float)timer.dt;
-      }
-      ImVec2 mpos    = ImGui::GetMousePos();
-      i32    cur_m_x = mpos.x;
-      i32    cur_m_y = mpos.y;
-      if (io.MouseDown[0] && last_m_x > 0) {
-        i32 dx = cur_m_x - last_m_x;
-        i32 dy = cur_m_y - last_m_y;
-        g_camera.phi += (float)(dx)*g_camera.aspect * 5.0e-3f;
-        g_camera.theta -= (float)(dy)*5.0e-3f;
-      }
-      last_m_x = cur_m_x;
-      last_m_y = cur_m_y;
-    }
-    g_camera.update();
+
     ImGui::End();
   }
   void on_init(rd::IFactory *factory) override { //
+    TMP_STORAGE_SCOPE;
+    gizmo_layer = Gizmo_Layer::create(factory);
+    new XYZDragGizmo(gizmo_layer, &pos);
+    g_config.init(stref_s(R"(
+(
+ (add u32  g_buffer_width 512 (min 4) (max 1024))
+ (add u32  g_buffer_height 512 (min 4) (max 1024))
+ (add bool forward 1)
+ (add bool "depth test" 1)
+ (add f32  strand_size 1.0 (min 0.1) (max 16.0))
+)
+)"));
+
+    g_scene->load_mesh(stref_s("mesh"), stref_s("models/human_skull_and_neck/scene.gltf"));
+    char *state = read_file_tmp("scene_state");
+
+    if (state != NULL) {
+      TMP_STORAGE_SCOPE;
+      List *cur = List::parse(stref_s(state), Tmp_List_Allocator());
+      init_traverse(cur);
+    }
+    gbuffer_pass.init();
   }
   void on_release(rd::IFactory *factory) override { //
+    FILE *scene_dump = fopen("scene_state", "wb");
+    fprintf(scene_dump, "(\n");
+    defer(fclose(scene_dump));
+    gizmo_layer->get_camera().dump(scene_dump);
+    g_config.dump(scene_dump);
+    g_scene->save(scene_dump);
+    fprintf(scene_dump, ")\n");
+
     g_scene->release();
     IGUI_Pass::release(factory);
   }
@@ -338,6 +342,14 @@ class Event_Consumer : public IGUI_Pass {
     IGUI_Pass::consume(_event);
   }
   void on_frame(rd::IFactory *factory) override { //
+    g_scene->traverse([&](Node *node) {
+      if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
+        if (mn->getComponent<GizmoComponent>() == NULL) {
+          GizmoComponent::create(gizmo_layer, mn);
+        }
+      }
+    });
+    g_scene->get_root()->update();
     gbuffer_pass.render(factory);
     IGUI_Pass::on_frame(factory);
   }

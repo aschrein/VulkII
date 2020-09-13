@@ -56,13 +56,17 @@ ELSE()
   set (INCLUDES "")
 ENDIF()
 
+add_compile_definitions(GLM_FORCE_SWIZZLE)
+
 function(ADD_EXAMPLE example_name example_file)
+
     file(GLOB INCLUDES_SRC
     include/*.h
     )
     add_executable(${example_name}
     ${example_file}
     src/vk_backend.cpp
+    src/dx12_backend.cpp
     src/files.cpp
     3rdparty/imgui/imgui.cpp
     3rdparty/imgui/imgui_widgets.cpp

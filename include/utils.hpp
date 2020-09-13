@@ -977,6 +977,11 @@ struct Array {
     this->capacity = len;
     memcpy(ptr, data, len * sizeof(T));
   }
+  bool contains(T const &item) {
+    ito(size) if (ptr[i] == item) return true;
+    return false;
+  }
+  void replace(T const &item, T const &with) { ito(size) if (ptr[i] == item) ptr[i] = with; }
   u32  get_size() { return this->size; }
   u32  has_items() { return get_size() != 0; }
   void release() {
@@ -1064,6 +1069,10 @@ template <typename T, size_t grow_k = 0x10,
           typename Allcator_t = Default_Allocator> //
 struct AutoArray : public Array<T, grow_k, Allcator_t> {
   AutoArray() { init(); }
+  AutoArray(AutoArray const &) = delete;
+  AutoArray operator=(AutoArray const &) = delete;
+  AutoArray operator=(AutoArray &&) = delete;
+  AutoArray(AutoArray &&)           = delete;
   ~AutoArray() { release(); }
 };
 

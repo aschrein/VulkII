@@ -306,7 +306,6 @@ class IGUI_Pass : public rd::IEvent_Consumer {
       index_buffer        = factory->create_buffer(buf_info);
     }
     {
-
       {
         ImDrawVert *vtx_dst = (ImDrawVert *)factory->map_buffer(vertex_buffer);
 
@@ -460,16 +459,6 @@ class IGUI_Pass : public rd::IEvent_Consumer {
     image_bindings.size = 1;
     factory->end_render_pass(ctx);
   }
-  ImVec2 get_window_size() {
-    auto  wsize       = ImGui::GetWindowSize();
-    float height_diff = 42;
-    if (wsize.y < height_diff + 2) {
-      wsize.y = 2;
-    } else {
-      wsize.y = wsize.y - height_diff;
-    }
-    return wsize;
-  }
   void release(rd::IFactory *rm) {
     ImGui_ImplSDL2_Shutdown();
     ImGui::DestroyContext();
@@ -478,6 +467,17 @@ class IGUI_Pass : public rd::IEvent_Consumer {
     delete this;
   }
 };
+
+static ImVec2 get_window_size() {
+  auto  wsize       = ImGui::GetWindowSize();
+  float height_diff = 42;
+  if (wsize.y < height_diff + 2) {
+    wsize.y = 2;
+  } else {
+    wsize.y = wsize.y - height_diff;
+  }
+  return wsize;
+}
 
 static void init_buffer(rd::IFactory *factory, Resource_ID buf, void const *src, size_t size) {
   rd::Imm_Ctx *          ctx = factory->start_compute_pass();
@@ -858,7 +858,47 @@ struct Raw_Mesh_3p16i_Wrapper {
   }
 };
 
+class Gizmo_Layer;
+
 class Gizmo_Layer {
+  public:
+  class Gizmo : public Typed {
+public:
+    DECLARE_TYPE(Gizmo, Typed)
+
+    Gizmo(Gizmo_Layer *layer) : layer(layer) { layer->add_gizmo(this); }
+
+    virtual AABB getAABB() = 0;
+    virtual void release() {
+      layer->remove_gizmo(this);
+      delete this;
+    }
+    virtual void update() {}
+    virtual void paint() {}
+
+    virtual bool isSelectable() { return true; }
+    virtual bool isHoverable() { return true; }
+
+    // IO callbacks
+    virtual void on_select() {}
+    virtual void on_unselect() {}
+    virtual void on_mouse_enter() {}
+    virtual void on_mouse_hover() {}
+    virtual void on_mouse_leave() {}
+    virtual void on_mouse_down(int mb) {}
+    virtual void on_mouse_drag() {}
+    virtual void on_mouse_up(int mb) {}
+    virtual void on_mouse_wheel(int z) {}
+
+    virtual ~Gizmo() {}
+
+    bool isScheduledForRemoval() { return to_release; }
+    void releaseLater() { to_release = true; }
+
+protected:
+    bool         to_release = false;
+    Gizmo_Layer *layer      = NULL;
+  };
   struct Gizmo_Vertex {
     afloat4 position;
   };
@@ -875,6 +915,8 @@ class Gizmo_Layer {
   struct Gizmo_Push_Constants {
     afloat4x4 viewproj;
   };
+
+  private:
   Array<Gizmo_Instance_Data_CPU>   cylinder_draw_cmds;
   Array<Gizmo_Instance_Data_CPU>   sphere_draw_cmds;
   Array<Gizmo_Instance_Data_CPU>   cone_draw_cmds;
@@ -889,8 +931,30 @@ class Gizmo_Layer {
   Resource_ID gizmo_lines_vs;
   Resource_ID gizmo_lines_ps;
 
-  public:
+  rd::IFactory *rm = NULL;
+  Camera        g_camera;
+  Ray           mouse_ray;
+  float2        mouse_cursor;
+  float2        resolution;
+  enum Mode {
+    NONE = 0,
+    CAMERA_DRAG,
+    GIZMO_DRAG,
+  };
+  Mode               mode = NONE;
+  AutoArray<Gizmo *> gizmos;
+  AutoArray<Gizmo *> selected_gizmos;
+  Gizmo *            hovered_gizmo = NULL;
+  bool               mb[3]         = {};
+  bool               last_mb[3]    = {};
+  int2               mpos          = {};
+  int2               last_mpos     = {};
+  Timer              timer;
+
   void init(rd::IFactory *rm) {
+    this->rm = rm;
+    timer.init();
+    g_camera.init();
     cylinder_draw_cmds.init();
     sphere_draw_cmds.init();
     cone_draw_cmds.init();
@@ -997,7 +1061,55 @@ class Gizmo_Layer {
     gizmo_lines_vs = rm->create_shader_raw(rd::Stage_t::VERTEX, shader_lines, &defines[0], 1);
     gizmo_lines_ps = rm->create_shader_raw(rd::Stage_t::PIXEL, shader_lines, &defines[1], 1);
   }
-  void release(rd::IFactory *rm) {
+  Gizmo *pick(Ray const &ray) {
+    float  t       = 1.0e6;
+    Gizmo *closest = NULL;
+    ito(gizmos.size) {
+      float curt;
+      if (gizmos[i] && gizmos[i]->isHoverable() &&
+          gizmos[i]->getAABB().collide(ray.o, ray.d, curt, t)) {
+        if (curt < t) {
+          closest = gizmos[i];
+          t       = curt;
+        }
+      }
+    }
+    return closest;
+  }
+
+  public:
+  static Gizmo_Layer *create(rd::IFactory *rm) {
+    Gizmo_Layer *gl = new Gizmo_Layer;
+    gl->init(rm);
+    return gl;
+  }
+  void remove_gizmo(Gizmo *g) {
+    if (selected_gizmos.contains(g)) {
+      selected_gizmos.replace(g, NULL);
+      g->on_unselect();
+    }
+    ito(gizmos.size) {
+      if (gizmos[i] == g) gizmos[i] = NULL;
+    }
+    if (hovered_gizmo == g) {
+      hovered_gizmo = g;
+      g->on_mouse_leave();
+    }
+  }
+  void add_gizmo(Gizmo *g) {
+    ito(gizmos.size) {
+      if (gizmos[i] == NULL) {
+        gizmos[i] = g;
+        return;
+      }
+    }
+    gizmos.push(g);
+  }
+  void release() {
+    ito(gizmos.size) {
+      if (gizmos[i]) gizmos[i]->release();
+    }
+    g_camera.release();
     cylinder_draw_cmds.release();
     cone_draw_cmds.release();
     sphere_draw_cmds.release();
@@ -1007,8 +1119,10 @@ class Gizmo_Layer {
     cylinder_wrapper.release(rm);
     rm->release_resource(gizmo_ps);
     rm->release_resource(gizmo_vs);
+    delete this;
   }
-  void draw_cylinder(float3 start, float3 end, float radius, float3 color) {
+  Camera &get_camera() { return g_camera; }
+  void    draw_cylinder(float3 start, float3 end, float radius, float3 color) {
     float3 dr      = end - start;
     float  length  = glm::length(dr);
     float3 dir     = glm::normalize(dr);
@@ -1044,10 +1158,11 @@ class Gizmo_Layer {
     sphere_draw_cmds.push(cmd);
   }
   void draw_cone(float3 start, float3 dir, float radius, float3 color) {
+    float3 normal = normalize(dir);
     float3 up =
-        dir.z > 0.99f ? float3(0.0f, 1.0f, 0.0f) : float3(0.0f, 0.0f, 1.0f);
-    float3   tangent  = glm::normalize(glm::cross(glm::normalize(dir), up));
-    float3   binormal = -glm::cross(glm::normalize(dir), tangent);
+        fabs(normal.z) > 0.99f ? float3(0.0f, 1.0f, 0.0f) : float3(0.0f, 0.0f, 1.0f);
+    float3   tangent  = normalize(cross(normal, up));
+    float3   binormal = -cross(normal, tangent);
     float4x4 tranform = float4x4(
         // clang-format off
       tangent.x,  tangent.y,  tangent.z,  0.0f,
@@ -1065,12 +1180,163 @@ class Gizmo_Layer {
     line_segments.push({p0, color});
     line_segments.push({p1, color});
   }
-  bool on_mouse_down(float3 ray_origin, float3 ray_dir) {}
-  void on_mouse_up(float3 ray_origin, float3 ray_dir) {}
-  void on_mouse_drag(float3 ray_origin, float3 ray_dir) {}
-  void on_pass_begin(rd::IFactory *rm) {}
-  void on_pass_end(rd::IFactory *rm) {}
-  void render(rd::IFactory *f, rd::Imm_Ctx *ctx, float4x4 const &viewproj) {
+
+  void on_mouse_down(int mb) {
+    if (mb == 0) {
+      if (!hovered_gizmo) {
+        clearSelection();
+        mode = CAMERA_DRAG;
+      } else {
+        if (hovered_gizmo->isSelectable()) {
+          if (!selected_gizmos.contains(hovered_gizmo)) {
+            clearSelection();
+            hovered_gizmo->on_select();
+            selected_gizmos.push(hovered_gizmo);
+          }
+          ito(selected_gizmos.size) if (selected_gizmos[i]) selected_gizmos[i]->on_mouse_down(mb);
+          mode = GIZMO_DRAG;
+        }
+      }
+    }
+  }
+  void on_mouse_up(int mb) {
+    if (mb == 0) mode = NONE;
+  }
+  void on_mouse_wheel(int z) {}
+  void on_mouse_move() {
+    float2 uv = float2(mpos.x, mpos.y);
+    uv /= resolution;
+    uv               = 2.0f * uv - float2(1.0f, 1.0f);
+    uv.y             = -uv.y;
+    mouse_cursor     = uv;
+    mouse_ray        = g_camera.gen_ray(uv);
+    Gizmo *new_hover = pick(mouse_ray);
+    if (hovered_gizmo && new_hover != hovered_gizmo) {
+      hovered_gizmo->on_mouse_leave();
+    }
+    if (new_hover && new_hover != hovered_gizmo) {
+      new_hover->on_mouse_enter();
+    }
+    hovered_gizmo = new_hover;
+    if (hovered_gizmo) {
+      hovered_gizmo->on_mouse_hover();
+    }
+    if (mode == GIZMO_DRAG) {
+      ito(selected_gizmos.size) {
+        if (selected_gizmos[i]) selected_gizmos[i]->on_mouse_drag();
+      }
+    } else if (mode == CAMERA_DRAG) {
+      i32 dx = mpos.x - last_mpos.x;
+      i32 dy = mpos.y - last_mpos.y;
+      g_camera.phi += (float)(dx)*g_camera.aspect * 5.0e-3f;
+      g_camera.theta -= (float)(dy)*5.0e-3f;
+    }
+  }
+  void clearSelection() {
+    ito(selected_gizmos.size) {
+      if (selected_gizmos[i]) selected_gizmos[i]->on_unselect();
+    }
+    selected_gizmos.release();
+  }
+  void per_imgui_window() {
+
+    ImGuiIO &io = ImGui::GetIO();
+    if (ImGui::IsWindowHovered()) {
+      ImVec2 imguires  = get_window_size();
+      this->resolution = float2(imguires.x, imguires.y);
+      auto scroll_y    = ImGui::GetIO().MouseWheel;
+      if (scroll_y) {
+        g_camera.distance += g_camera.distance * 2.e-1 * scroll_y;
+        g_camera.distance = clamp(g_camera.distance, 1.0e-3f, 1000.0f);
+      }
+      f32 camera_speed = 2.0f * g_camera.distance;
+      if (ImGui::GetIO().KeysDown[SDL_SCANCODE_LSHIFT]) {
+        camera_speed = 10.0f * g_camera.distance;
+      }
+      float3 camera_diff = float3(0.0f, 0.0f, 0.0f);
+      if (ImGui::GetIO().KeysDown[SDL_SCANCODE_W]) {
+        camera_diff += g_camera.look;
+      }
+      if (ImGui::GetIO().KeysDown[SDL_SCANCODE_S]) {
+        camera_diff -= g_camera.look;
+      }
+      if (ImGui::GetIO().KeysDown[SDL_SCANCODE_A]) {
+        camera_diff -= g_camera.right;
+      }
+      if (ImGui::GetIO().KeysDown[SDL_SCANCODE_D]) {
+        camera_diff += g_camera.right;
+      }
+      if (dot(camera_diff, camera_diff) > 1.0e-3f) {
+        g_camera.look_at += glm::normalize(camera_diff) * camera_speed * (float)timer.dt;
+      }
+      ImVec2 imguimpos = ImGui::GetMousePos();
+      auto   wpos      = ImGui::GetCursorScreenPos();
+      auto   wsize     = ImGui::GetWindowSize();
+      g_camera.aspect  = float(wsize.x) / wsize.y;
+      imguimpos.x -= wpos.x;
+      imguimpos.y -= wpos.y;
+      ito(3) {
+        last_mb[i] = mb[i];
+        mb[i]      = io.MouseDown[i];
+        if (mb[i] && !last_mb[i]) on_mouse_down(i);
+        if (last_mb[i] && !mb[i]) on_mouse_up(i);
+      }
+      last_mpos = mpos;
+      mpos      = int2(imguimpos.x, imguimpos.y);
+      if (mpos != last_mpos) {
+        on_mouse_move();
+      }
+    }
+  }
+  void clearHover() {
+    if (hovered_gizmo) {
+      hovered_gizmo->on_mouse_leave();
+      hovered_gizmo = NULL;
+    }
+  }
+  float2 getMouse() const { return mouse_cursor; }
+  Ray    getMouseRay() const { return mouse_ray; }
+
+  void render(rd::IFactory *f, rd::Imm_Ctx *ctx) {
+    float4x4 viewproj = g_camera.viewproj();
+    if (hovered_gizmo) {
+      auto   aabb       = hovered_gizmo->getAABB();
+      float3 color      = float3(1.0f, 1.0f, 1.0f);
+      float  coordsx[6] = {
+          aabb.min.x,
+          aabb.max.x,
+      };
+      float coordsy[6] = {
+          aabb.min.y,
+          aabb.max.y,
+      };
+      float coordsz[6] = {
+          aabb.min.z,
+          aabb.max.z,
+      };
+      ito(8) {
+        int x = (i >> 0) & 1;
+        int y = (i >> 1) & 1;
+        int z = (i >> 2) & 1;
+        if (x == 0) {
+          draw_line(float3(coordsx[0], coordsy[y], coordsz[z]),
+                    float3(coordsx[1], coordsy[y], coordsz[z]), color);
+        }
+        if (y == 0) {
+          draw_line(float3(coordsx[x], coordsy[0], coordsz[z]),
+                    float3(coordsx[x], coordsy[1], coordsz[z]), color);
+        }
+        if (z == 0) {
+          draw_line(float3(coordsx[x], coordsy[y], coordsz[0]),
+                    float3(coordsx[x], coordsy[y], coordsz[1]), color);
+        }
+      }
+    }
+    timer.update();
+    g_camera.update();
+    ito(gizmos.size) if (gizmos[i]) { gizmos[i]->update(); }
+    ito(gizmos.size) if (gizmos[i] && gizmos[i]->isScheduledForRemoval()) { gizmos[i]->release(); }
+    ito(gizmos.size) if (gizmos[i]) { gizmos[i]->paint(); }
     if (cylinder_draw_cmds.size == 0 && sphere_draw_cmds.size == 0 && cone_draw_cmds.size == 0 &&
         line_segments.size == 0)
       return;
@@ -1181,6 +1447,173 @@ class Gizmo_Layer {
       line_segments.reset();
     }
   }
+};
+
+class DragGizmo : public Gizmo_Layer::Gizmo {
+  public:
+  DECLARE_TYPE(DragGizmo, Gizmo_Layer::Gizmo)
+
+  DragGizmo(Gizmo_Layer *layer, float3 axis, float3 *pos, float offset, float3 color)
+      : Gizmo(layer), offset(offset), axis(normalize(axis)), position(pos), color(color) {
+    // if (axis.z > 0.9)
+    // tangent = normalize(cross(axis, float3(0.0f, 1.0f, 0.0f)));
+    // else
+    // tangent = normalize(cross(axis, float3(0.0f, 0.0f, 1.0f)));
+    // binormal = cross(tangent, axis);
+  }
+  ~DragGizmo() override {}
+  AABB getAABB() override { return aabb; }
+  void release() override { Gizmo::release(); }
+  void update() override {
+    aabb.min = axis * offset + *position - float3(1.0f, 1.0f, 1.0f) * 0.4f;
+    aabb.max = axis * offset + *position + float3(1.0f, 1.0f, 1.0f) * 0.4f;
+  }
+  void paint() override {
+    // float3 color = float3(1.0f, 1.0f, 1.0f);
+    // if (selected) color = float3(1.0f, 0.0f, 0.0f);
+    layer->draw_cone(axis * offset + *position, axis * 0.4f, 0.2f, color);
+  }
+  float3 get_cpa(float3 const &ray_origin, float3 const &ray_dir) {
+    float  b  = dot(ray_dir, axis);
+    float3 w0 = ray_origin - *position;
+    float  d  = dot(ray_dir, w0);
+    float  e  = dot(axis, w0);
+    float  t  = (b * e - d) / (1.0f - b * b);
+    return ray_origin + ray_dir * t;
+  }
+  void setAxis(float3 a) { axis = normalize(a); }
+  // IO callbacks
+  void on_select() override { selected = true; }
+  void on_unselect() override { selected = false; }
+  void on_mouse_enter() override { hovered = true; }
+  void on_mouse_hover() override {}
+  void on_mouse_leave() override { hovered = false; }
+  void on_mouse_down(int mb) override {
+    float3 cpa = get_cpa(layer->getMouseRay().o, layer->getMouseRay().d);
+    old_cpa    = cpa;
+  }
+  void on_mouse_drag() override {
+    float3 cpa = get_cpa(layer->getMouseRay().o, layer->getMouseRay().d);
+    *position += axis * dot(cpa - old_cpa, axis);
+    old_cpa = cpa;
+  }
+  void on_mouse_up(int mb) override {}
+  void on_mouse_wheel(int z) override {}
+  bool isSelected() const { return selected; }
+
+
+  protected:
+  bool    hovered  = false;
+  bool    selected = false;
+  float   offset;
+  float3  old_cpa{};
+  float3  axis;
+  float3  color;
+  float3 *position = NULL;
+  AABB    aabb;
+};
+
+class XYZDragGizmo : public Gizmo_Layer::Gizmo {
+  public:
+  DECLARE_TYPE(XYZDragGizmo, Gizmo_Layer::Gizmo)
+
+  XYZDragGizmo(Gizmo_Layer *layer, float3 *pos) : Gizmo(layer), position(pos) {
+    xdrag = new DragGizmo(layer, float3(1.0f, 0.0f, 0.0f), pos, 1.0f, float3(1.0f, 0.0f, 0.0f));
+    ydrag = new DragGizmo(layer, float3(0.0f, 1.0f, 0.0f), pos, 1.0f, float3(0.0f, 1.0f, 0.0f));
+    zdrag = new DragGizmo(layer, float3(0.0f, 0.0f, 1.0f), pos, 1.0f, float3(0.0f, 0.0f, 1.0f));
+  }
+  ~XYZDragGizmo() override {}
+
+  AABB getAABB() override { return aabb; }
+  void release() override { Gizmo::release(); }
+  void update() override {
+    aabb.min = *position;
+    aabb.max = *position;
+  }
+  void paint() override {}
+  // IO callbacks
+  void on_select() override { selected = true; }
+  void on_unselect() override { selected = false; }
+  void on_mouse_enter() override { hovered = true; }
+  void on_mouse_hover() override {}
+  void on_mouse_leave() override { hovered = false; }
+  void on_mouse_down(int mb) override {}
+  void on_mouse_drag() override {}
+  void on_mouse_up(int mb) override {}
+  void on_mouse_wheel(int z) override {}
+
+  DragGizmo *getX() { return xdrag; }
+  DragGizmo *getY() { return ydrag; }
+  DragGizmo *getZ() { return zdrag; }
+
+  protected:
+  bool       hovered  = false;
+  bool       selected = false;
+  DragGizmo *xdrag, *ydrag, *zdrag;
+  float3 *   position = NULL;
+  AABB       aabb;
+};
+
+class MeshGizmo : public Gizmo_Layer::Gizmo {
+  public:
+  DECLARE_TYPE(MeshGizmo, Gizmo_Layer::Gizmo)
+
+  MeshGizmo(Gizmo_Layer *layer, MeshNode *mn) : Gizmo(layer), mn(mn) {
+    gizmo = new XYZDragGizmo(layer, &mn->offset);
+  }
+  ~MeshGizmo() override {}
+
+  AABB getAABB() override { return aabb; }
+  void release() override { Gizmo::release(); }
+  void update() override {
+    aabb = mn->getAABB();
+    gizmo->getX()->setAxis((mn->get_transform() * float4(1.0f, 0.0f, 0.0f, 0.0f)).xyz);
+    gizmo->getY()->setAxis((mn->get_transform() * float4(0.0f, 1.0f, 0.0f, 0.0f)).xyz);
+    gizmo->getZ()->setAxis((mn->get_transform() * float4(0.0f, 0.0f, 1.0f, 0.0f)).xyz);
+  }
+  bool isSelectable() override { return false; }
+  bool isHoverable() override { return false; }
+  void paint() override {}
+  // IO callbacks
+  void on_select() override { selected = true; }
+  void on_unselect() override { selected = false; }
+  void on_mouse_enter() override { hovered = true; }
+  void on_mouse_hover() override {}
+  void on_mouse_leave() override { hovered = false; }
+  void on_mouse_down(int mb) override {}
+  void on_mouse_drag() override {}
+  void on_mouse_up(int mb) override {}
+  void on_mouse_wheel(int z) override {}
+
+  protected:
+  bool          hovered  = false;
+  bool          selected = false;
+  MeshNode *    mn;
+  AABB          aabb;
+  XYZDragGizmo *gizmo = NULL;
+};
+
+class GizmoComponent : public Node::Component {
+  public:
+  DECLARE_TYPE(GizmoComponent, Component)
+
+  GizmoComponent(Gizmo_Layer *layer, MeshNode *n) : Component(n) {
+    position = n->offset;
+    gizmo    = new MeshGizmo(layer, n);
+  }
+  static GizmoComponent *create(Gizmo_Layer *layer, MeshNode *n) {
+    return new GizmoComponent(layer, n);
+  }
+  void release() override {
+    gizmo->releaseLater();
+    Component::release();
+  }
+  ~GizmoComponent() override {}
+  void update() override {}
+
+  protected:
+  float3     position;
+  MeshGizmo *gizmo = NULL;
 };
 
 #endif // RENDERING_UTILS_HPP

@@ -36,6 +36,7 @@
     }                                                                                              \
   } while (0)
 
+namespace {
 Pool<char> string_storage = Pool<char>::create(1 << 20);
 
 string_ref relocate_cstr(string_ref old) {
@@ -2761,7 +2762,7 @@ struct Resource_Path {
 };
 
 u64 hash_of(Resource_Path const &path) {
-  return hash_of(path.set) ^ hash_of(path.binding) ^ hash_of(path.element);
+  return ::hash_of(path.set) ^ ::hash_of(path.binding) ^ ::hash_of(path.element);
 }
 
 class Vk_Ctx : public rd::Imm_Ctx {
@@ -4398,5 +4399,5 @@ class VkPass_Mng : public rd::Pass_Mng {
   void  set_event_consumer(rd::IEvent_Consumer *consumer) override { this->consumer = consumer; }
   void *get_window_handle() { return (void *)wnd->window; }
 };
-
+} // namespace
 rd::Pass_Mng *rd::Pass_Mng::create(rd::Impl_t) { return new VkPass_Mng; }

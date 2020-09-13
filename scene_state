@@ -1,19 +1,29 @@
 (
 (camera
- (set_phi 0.925797)
- (set_theta 0.835797)
- (set_distance 3.072000)
- (set_look_at 1.315131 6.589251 1.379497)
- (set_aspect 1.000000)
+ (set_phi 0.623540)
+ (set_theta 1.460793)
+ (set_distance 7.458791)
+ (set_look_at 4.160379 8.686846 2.958842)
+ (set_aspect 0.929044)
  (set_fov 1.570796)
  (set_znear 0.001000)
  (set_zfar 1000000.000000)
 )
 (config
- (add u32 "g_buffer_width" 512 (min 4) (max 1024))
+ (add u32 "g_buffer_width" 1024 (min 4) (max 1024))
  (add bool "forward" 1)
  (add f32 "strand_size" 1.000000 (min 0.100000) (max 16.000000))
- (add u32 "g_buffer_height" 512 (min 4) (max 1024))
+ (add u32 "g_buffer_height" 1024 (min 4) (max 1024))
  (add bool "depth test" 1)
+)
+(scene
+(node ROOT
+  (offset float3 0.000000 0.000000 0.000000)
+  (rotation float3 0.000000 -0.000000 0.000000)
+(node mesh
+  (offset float3 0.944749 2.441631 1.396376)
+  (rotation float3 -90.000061 -0.000000 0.000000)
+)
+)
 )
 )
