@@ -433,6 +433,11 @@ struct string_ref {
   const char *ptr;
   size_t      len;
   string_ref  substr(size_t offset, size_t new_len) { return string_ref{ptr + offset, new_len}; }
+  bool        eq(char const *str) const {
+    size_t slen = strlen(str);
+    if (ptr == NULL || str == NULL) return false;
+    return len != slen ? false : strncmp(ptr, str, len) == 0 ? true : false;
+  }
 };
 
 static inline i32 str_match(char const *cur, char const *patt) {
@@ -507,12 +512,13 @@ static inline uint64_t hash_of(string_ref a) {
 
 /** String view of a static string
  */
-static inline string_ref stref_s(char const *static_string) {
+static inline string_ref stref_s(char const *static_string, bool include_null = true) {
   if (static_string == NULL || static_string[0] == '\0') return string_ref{NULL, 0};
   ASSERT_DEBUG(static_string != NULL);
   string_ref out;
   out.ptr = static_string;
   out.len = strlen(static_string);
+  if (!include_null) out.len--;
   ASSERT_DEBUG(out.len != 0);
   return out;
 }
@@ -683,25 +689,27 @@ struct String_Builder {
   void       release() { tmp_buf.release(); }
   void       reset() { tmp_buf.reset(); }
   string_ref get_str() { return string_ref{(char const *)tmp_buf.at(0), tmp_buf.cursor}; }
-  void       putf(char const *fmt, ...) {
+  void       putstr(string_ref str) { putf("%.*s", STRF(str)); }
+  i32        putf(char const *fmt, ...) {
     va_list args;
     va_start(args, fmt);
     i32 len = vsprintf(tmp_buf.back(), fmt, args);
     va_end(args);
     ASSERT_ALWAYS(len > 0);
     tmp_buf.advance(len);
+    return len;
   }
   void put_char(char c) { tmp_buf.put(&c, 1); }
 };
 
 static inline string_ref tmp_format(char const *fmt, ...) {
-  char *  buf = (char *)tl_alloc_tmp(strlen(fmt) * 2);
+  static thread_local char tmp_buf[0x1000];
+  // char *  buf = (char *)tl_alloc_tmp(strlen(fmt) * 2);
   va_list args;
   va_start(args, fmt);
-  i32 len = vsprintf(buf, fmt, args);
+  i32 len = vsnprintf(tmp_buf, sizeof(tmp_buf), fmt, args);
   va_end(args);
-  ASSERT_ALWAYS(len < strlen(fmt) * 2);
-  return stref_s(buf);
+  return stref_tmp(tmp_buf);
 }
 
 #if __linux__
@@ -1341,6 +1349,19 @@ struct Hash_Table {
     return out;
   }
 };
+struct PCG {
+  u64 state = 0x853c49e6748fea9bULL;
+  u64 inc   = 0xda3e39cb94b95bdbULL;
+  u32 next() {
+    uint64_t oldstate   = state;
+    state               = oldstate * 6364136223846793005ULL + inc;
+    uint32_t xorshifted = uint32_t(((oldstate >> 18u) ^ oldstate) >> 27u);
+    int      rot        = oldstate >> 59u;
+    return (xorshifted >> rot) | (xorshifted << ((-rot) & 31));
+  }
+  f64 nextf() { return double(next()) / UINT32_MAX; }
+};
+
 #endif
 
 #ifdef UTILS_TL_IMPL
@@ -1349,7 +1370,7 @@ struct Hash_Table {
 #  include <string.h>
 
 #  ifndef UTILS_TL_TMP_SIZE
-#    define UTILS_TL_TMP_SIZE 1 << 24
+#    define UTILS_TL_TMP_SIZE 1 << 26
 #  endif
 
 struct Thread_Local {

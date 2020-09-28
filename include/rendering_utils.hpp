@@ -752,7 +752,7 @@ void store(ivec2 coord, float4 val) {
     MEMZERO(pc);
     pc.op = 0;
     switch (image->format) {
-    // clang-format off
+      // clang-format off
       case rd::Format::RGBA8_SRGBA:  {  pc.format = 0; } break;
       case rd::Format::RGBA8_UNORM:  {  pc.format = 1; } break;
       case rd::Format::RGB32_FLOAT:  {  pc.format = 2; } break;
@@ -1238,6 +1238,14 @@ protected:
     }
     selected_gizmos.release();
   }
+  void setFocus(Gizmo *g) {
+    clearSelection();
+    clearHover();
+    selected_gizmos.push(g);
+    hovered_gizmo = g;
+    g->on_mouse_enter();
+    g->on_select();
+  }
   void per_imgui_window() {
 
     ImGuiIO &io = ImGui::GetIO();
@@ -1296,41 +1304,43 @@ protected:
   }
   float2 getMouse() const { return mouse_cursor; }
   Ray    getMouseRay() const { return mouse_ray; }
-
+  void   render_linebox(float3 min, float3 max, float3 color) {
+    float coordsx[6] = {
+        min.x,
+        max.x,
+    };
+    float coordsy[6] = {
+        min.y,
+        max.y,
+    };
+    float coordsz[6] = {
+        min.z,
+        max.z,
+    };
+    ito(8) {
+      int x = (i >> 0) & 1;
+      int y = (i >> 1) & 1;
+      int z = (i >> 2) & 1;
+      if (x == 0) {
+        draw_line(float3(coordsx[0], coordsy[y], coordsz[z]),
+                  float3(coordsx[1], coordsy[y], coordsz[z]), color);
+      }
+      if (y == 0) {
+        draw_line(float3(coordsx[x], coordsy[0], coordsz[z]),
+                  float3(coordsx[x], coordsy[1], coordsz[z]), color);
+      }
+      if (z == 0) {
+        draw_line(float3(coordsx[x], coordsy[y], coordsz[0]),
+                  float3(coordsx[x], coordsy[y], coordsz[1]), color);
+      }
+    }
+  }
   void render(rd::IFactory *f, rd::Imm_Ctx *ctx) {
     float4x4 viewproj = g_camera.viewproj();
     if (hovered_gizmo) {
-      auto   aabb       = hovered_gizmo->getAABB();
-      float3 color      = float3(1.0f, 1.0f, 1.0f);
-      float  coordsx[6] = {
-          aabb.min.x,
-          aabb.max.x,
-      };
-      float coordsy[6] = {
-          aabb.min.y,
-          aabb.max.y,
-      };
-      float coordsz[6] = {
-          aabb.min.z,
-          aabb.max.z,
-      };
-      ito(8) {
-        int x = (i >> 0) & 1;
-        int y = (i >> 1) & 1;
-        int z = (i >> 2) & 1;
-        if (x == 0) {
-          draw_line(float3(coordsx[0], coordsy[y], coordsz[z]),
-                    float3(coordsx[1], coordsy[y], coordsz[z]), color);
-        }
-        if (y == 0) {
-          draw_line(float3(coordsx[x], coordsy[0], coordsz[z]),
-                    float3(coordsx[x], coordsy[1], coordsz[z]), color);
-        }
-        if (z == 0) {
-          draw_line(float3(coordsx[x], coordsy[y], coordsz[0]),
-                    float3(coordsx[x], coordsy[y], coordsz[1]), color);
-        }
-      }
+      auto   aabb  = hovered_gizmo->getAABB();
+      float3 color = float3(1.0f, 1.0f, 1.0f);
+      render_linebox(aabb.min, aabb.max, color);
     }
     timer.update();
     g_camera.update();
@@ -1501,7 +1511,6 @@ class DragGizmo : public Gizmo_Layer::Gizmo {
   void on_mouse_wheel(int z) override {}
   bool isSelected() const { return selected; }
 
-
   protected:
   bool    hovered  = false;
   bool    selected = false;
@@ -1558,24 +1567,28 @@ class MeshGizmo : public Gizmo_Layer::Gizmo {
   public:
   DECLARE_TYPE(MeshGizmo, Gizmo_Layer::Gizmo)
 
-  MeshGizmo(Gizmo_Layer *layer, MeshNode *mn) : Gizmo(layer), mn(mn) {
-    gizmo = new XYZDragGizmo(layer, &mn->offset);
-  }
+  MeshGizmo(Gizmo_Layer *layer, MeshNode *mn) : Gizmo(layer), mn(mn) {}
   ~MeshGizmo() override {}
 
   AABB getAABB() override { return aabb; }
   void release() override { Gizmo::release(); }
   void update() override {
     aabb = mn->getAABB();
-    gizmo->getX()->setAxis((mn->get_transform() * float4(1.0f, 0.0f, 0.0f, 0.0f)).xyz);
-    gizmo->getY()->setAxis((mn->get_transform() * float4(0.0f, 1.0f, 0.0f, 0.0f)).xyz);
-    gizmo->getZ()->setAxis((mn->get_transform() * float4(0.0f, 0.0f, 1.0f, 0.0f)).xyz);
+    if (gizmo) {
+      gizmo->getX()->setAxis((mn->get_transform() * float4(1.0f, 0.0f, 0.0f, 0.0f)).xyz);
+      gizmo->getY()->setAxis((mn->get_transform() * float4(0.0f, 1.0f, 0.0f, 0.0f)).xyz);
+      gizmo->getZ()->setAxis((mn->get_transform() * float4(0.0f, 0.0f, 1.0f, 0.0f)).xyz);
+    }
   }
-  bool isSelectable() override { return false; }
-  bool isHoverable() override { return false; }
+  bool isSelectable() override { return gizmo == NULL; }
+  bool isHoverable() override { return gizmo == NULL; }
   void paint() override {}
   // IO callbacks
-  void on_select() override { selected = true; }
+  void on_select() override {
+    selected = true;
+    gizmo    = new XYZDragGizmo(layer, &mn->offset);
+    layer->setFocus(gizmo);
+  }
   void on_unselect() override { selected = false; }
   void on_mouse_enter() override { hovered = true; }
   void on_mouse_hover() override {}
@@ -1615,5 +1628,14 @@ class GizmoComponent : public Node::Component {
   float3     position;
   MeshGizmo *gizmo = NULL;
 };
+static float3 transform(float4x4 const &t, float3 const &v) {
+  float4 r = t * float4(v.xyz, 1.0f);
+  return r.xyz;
+}
 
+template <typename T> static void render_bvh(float4x4 const &t, BVH<T> *bvh, Gizmo_Layer *gl) {
+  bvh->traverse([&](BVH_Node *node) {
+    gl->render_linebox(transform(t, node->min), transform(t, node->max), float3(1.0f, 0.0f, 0.0f));
+  });
+}
 #endif // RENDERING_UTILS_HPP

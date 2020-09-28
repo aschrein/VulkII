@@ -98,19 +98,6 @@ static inline float halton(int i, int base) {
   return v;
 }
 
-struct PCG {
-  u64 state = 0x853c49e6748fea9bULL;
-  u64 inc   = 0xda3e39cb94b95bdbULL;
-  u32 next() {
-    uint64_t oldstate   = state;
-    state               = oldstate * 6364136223846793005ULL + inc;
-    uint32_t xorshifted = uint32_t(((oldstate >> 18u) ^ oldstate) >> 27u);
-    int      rot        = oldstate >> 59u;
-    return (xorshifted >> rot) | (xorshifted << ((-rot) & 31));
-  }
-  f64 nextf() { return double(next()) / UINT32_MAX; }
-};
-
 class Random_Factory {
   public:
   float  rand_unit_float() { return float(pcg.nextf()); }
@@ -144,6 +131,13 @@ class Random_Factory {
     float  phi      = rand.y * PI * 2.0f;
     float3 samplev  = polar_to_cartesian(sinTheta, cosTheta, sin(phi), cos(phi));
     return samplev.x * xbasis + samplev.y * ybasis + samplev.z * zbasis;
+  }
+
+  float3 rand_sphere_center() {
+    float r     = rand_unit_float();
+    float phi   = rand_unit_float() * PI * 2.0f;
+    float theta = rand_unit_float() * PI - PI / 2.0f;
+    return r * polar_to_cartesian(sin(theta), cos(theta), sin(phi), cos(phi));
   }
 
   float3 rand_unit_sphere() {
@@ -923,6 +917,16 @@ struct BVH_Node {
         tmin.z <= max.z && //
         true;
   }
+  bool intersects(float3 center, float radius) {
+    return                            //
+        center.x + radius >= min.x && //
+        center.x - radius <= max.x && //
+        center.y + radius >= min.y && //
+        center.y - radius <= max.y && //
+        center.z + radius >= min.z && //
+        center.z - radius <= max.z && //
+        true;
+  }
   bool inside(float3 tmin) {
     return                 //
         tmin.x >= min.x && //
@@ -1197,16 +1201,16 @@ public:
     return NULL;
   }
 
-  virtual void save(FILE *f) {
-    fprintf(f, "(node %.*s\n", STRF(name.ref()));
-    fprintf(f, "  (offset float3 %f %f %f)\n", offset.x, offset.y, offset.z);
+  virtual void save(String_Builder &sb) {
+    sb.putf("(node \"\"\"%.*s\"\"\"\n", STRF(name.ref()));
+    sb.putf("  (offset float3 %f %f %f)\n", offset.x, offset.y, offset.z);
     glm::vec3 euler = eulerAngles(rotation);
     euler *= 180.0f / PI;
-    fprintf(f, "  (rotation float3 %f %f %f)\n", euler.x, euler.y, euler.z);
+    sb.putf("  (rotation float3 %f %f %f)\n", euler.x, euler.y, euler.z);
     ito(children.size) {
-      if (children[i]) children[i]->save(f);
+      if (children[i]) children[i]->save(sb);
     }
-    fprintf(f, ")\n");
+    sb.putf(")\n");
   }
 
   Node *translate(float3 dr) {
@@ -1320,7 +1324,7 @@ template <typename T> struct BVH_Helper {
   void push(T const &item) {
     items.push(item);
     float3 tmin, tmax;
-    get_aabb(item, tmin, tmax);
+    item.get_aabb(tmin, tmax);
     ito(3) min[i] = MIN(min[i], tmin[i]);
     ito(3) max[i] = MAX(max[i], tmax[i]);
   }
@@ -1342,10 +1346,9 @@ template <typename T> struct BVH_Helper {
         u32           num_items = items.size;
         Sorting_Node *sorted_dims[6];
         ito(6) sorted_dims[i] = (Sorting_Node *)tl_alloc_tmp(sizeof(Sorting_Node) * num_items);
-        T *items              = items.ptr;
         ito(num_items) {
           float3 tmin, tmax;
-          get_aabb(items[i], tmin, tmax);
+          items[i].get_aabb(tmin, tmax);
           jto(3) {
             sorted_dims[j][i].val     = tmin[j];
             sorted_dims[j][i].id      = i;
@@ -1405,7 +1408,7 @@ template <typename T> struct BVH {
       ASSERT_DEBUG(hnode->items.size <= BVH_Node::MAX_ITEMS);
       node->set_num_items(hnode->items.size);
       T *items = item_pool.at(node->items_offset());
-      ito(hnode->items.size) { items->store(i, hnode->items[i]); }
+      ito(hnode->items.size) { items[i] = hnode->items[i]; }
     } else {
       BVH_Node *children = node_pool.alloc(2);
       node->init_branch(hnode->min, hnode->max, children);
@@ -1414,7 +1417,7 @@ template <typename T> struct BVH {
     }
   }
   void init(T *items, u32 num_items) { //
-    BVH_Helper *hroot = new BVH_Helper;
+    BVH_Helper<T> *hroot = new BVH_Helper<T>;
     hroot->init();
     hroot->reserve(num_items);
     defer(hroot->release());
@@ -1436,6 +1439,36 @@ template <typename T> struct BVH {
   void release() {
     item_pool.release();
     node_pool.release();
+    delete this;
+  }
+  template <typename F> void traverse(F fn) { traverse(root, fn); }
+  template <typename F> void traverse(BVH_Node *node, F fn) {
+    if (node->is_leaf()) {
+      fn(node);
+    } else {
+      BVH_Node *children = node->first_child();
+      BVH_Node *left     = children + 0;
+      BVH_Node *right    = children + 1;
+      traverse(left, fn);
+      traverse(right, fn);
+    }
+  }
+  template <typename F> void traverse(float3 ro, float radius, F fn) {
+    if (!root->intersects(ro, radius)) return;
+    traverse(root, ro, radius, fn);
+  }
+  template <typename F> void traverse(BVH_Node *node, float3 ro, float radius, F fn) {
+    if (node->is_leaf()) {
+      T * items     = item_pool.at(node->items_offset());
+      u32 num_items = node->num_items();
+      fn(items, num_items);
+    } else {
+      BVH_Node *children = node->first_child();
+      BVH_Node *left     = children + 0;
+      BVH_Node *right    = children + 1;
+      if (left->intersects(ro, radius)) traverse(left, ro, radius, fn);
+      if (right->intersects(ro, radius)) traverse(right, ro, radius, fn);
+    }
   }
   template <typename F> void traverse(float3 ro, float3 rd, F fn) {
     if (!root->intersects_ray(ro, rd)) return;
@@ -1445,8 +1478,8 @@ template <typename T> struct BVH {
     if (node->is_leaf()) {
       T * items     = item_pool.at(node->items_offset());
       u32 num_items = node->num_items();
-      ASSERT_ALWAYS(num_items <= vfloat3::WIDTH);
-      fn(*items);
+      // ASSERT_ALWAYS(num_items <= vfloat3::WIDTH);
+      fn(items, num_items);
     } else {
       BVH_Node *children = node->first_child();
       BVH_Node *left     = children + 0;
@@ -1454,6 +1487,29 @@ template <typename T> struct BVH {
       if (left->intersects_ray(ro, rd)) traverse(left, ro, rd, fn);
       if (right->intersects_ray(ro, rd)) traverse(right, ro, rd, fn);
     }
+  }
+  float distance(float3 p) {
+    auto  aabb = AABB{root->min, root->max};
+    float size = MAX3(abs(aabb.max.x - aabb.min.x), abs(aabb.max.y - aabb.min.y),
+                      abs(aabb.max.z - aabb.min.z));
+
+    float dr           = size / 10.0f;
+    float r            = dr;
+    bool  found        = false;
+    float min_distance = 1.0e6f;
+    while (!found) {
+      traverse(p, r, [&](Tri *items, u32 num_items) {
+        ito(num_items) {
+          float dist = items[i].distance(p);
+          if (abs(dist) < abs(min_distance)) {
+            min_distance = dist;
+          }
+          found = true;
+        }
+      });
+      r += dr;
+    }
+    return min_distance;
   }
 };
 
@@ -1550,14 +1606,6 @@ struct Config_Item {
     u32 v_u32_max;
     f32 v_f32_max;
   };
-};
-
-struct Tmp_List_Allocator {
-  List *alloc() {
-    List *out = (List *)tl_alloc_tmp(sizeof(List));
-    memset(out, 0, sizeof(List));
-    return out;
-  }
 };
 
 struct Config {
@@ -1901,7 +1949,15 @@ public:
   }
 
   void restore(List *l) {
-    root->restore(l);
+    if (l == NULL) return;
+    if (l->child) {
+      restore(l->child);
+      restore(l->next);
+    } else {
+      if (l->symbol.eq("scene")) {
+        root->restore(l->next);
+      }
+    }
     // if (l == NULL) return;
     // if (l->child) {
     // restore(l);
@@ -1911,10 +1967,10 @@ public:
     //}
     //}
   }
-  void save(FILE *f) {
-    fprintf(f, "(scene\n");
-    root->save(f);
-    fprintf(f, ")\n");
+  void save(String_Builder &sb) {
+    sb.putf("(scene\n");
+    root->save(sb);
+    sb.putf(")\n");
   }
 
   Asset_Manager *get_assets() { return assets; }
@@ -1929,7 +1985,7 @@ public:
     return out;
   }
   template <typename F> void traverse(F fn) { traverse(fn, root); }
-  void                       update() {}
+  void                       update() { root->update(); }
   void                       release() {
     root->release();
     assets->release();
@@ -1950,9 +2006,11 @@ class GfxSurface {
 
   rd::IFactory *factory;
   Surface *     surface;
+  rd::Index_t   index_type;
 
   void init(rd::IFactory *factory, Surface *surface) {
     MEMZERO(*this);
+    this->index_type    = surface->mesh.index_type;
     this->factory       = factory;
     this->surface       = surface;
     total_memory_needed = 0;
@@ -2051,7 +2109,7 @@ class GfxSurface {
       info.type     = attr.type;
       ctx->IA_set_attribute(info);
     }
-    ctx->IA_set_index_buffer(buffer, index_offset, rd::Index_t::UINT32);
+    ctx->IA_set_index_buffer(buffer, index_offset, index_type);
     u32 vertex_cursor = 0;
     u32 index_cursor  = 0;
     ctx->draw_indexed(surface->mesh.num_indices, 1, index_cursor, 0, vertex_cursor);
@@ -2060,21 +2118,93 @@ class GfxSurface {
   }
 };
 
+static float dot2(float3 a) { return dot(a, a); }
+
+struct Tri {
+  u32    surface_id;
+  u32    triangle_id;
+  float3 a;
+  float3 b;
+  float3 c;
+  void   get_aabb(float3 &min, float3 &max) const {
+    ito(3) min[i] = MIN(a[i], MIN(b[i], c[i]));
+    ito(3) max[i] = MAX(a[i], MAX(b[i], c[i]));
+  }
+  float2 get_end_points(u8 dim, float3 min, float3 max) const {
+    float3 sp;
+    ito(i) sp[i] = MIN(a[i], MIN(b[i], c[i]));
+    float3 ep;
+    ito(i) ep[i] = MAX(a[i], MAX(b[i], c[i]));
+
+    bool fully_inside = //
+        sp.x > min.x && //
+        sp.y > min.y && //
+        sp.z > min.z && //
+        ep.x < max.x && //
+        ep.y < max.y && //
+        ep.z < max.z && //
+        true;
+    if (fully_inside) return float2{sp[dim], ep[dim]};
+  }
+  // https://www.iquilezles.org/www/articles/triangledistance/triangledistance.htm
+  float distance(float3 p) {
+    // prepare data
+    float3 v21 = b - a;
+    float3 p1  = p - a;
+    float3 v32 = c - b;
+    float3 p2  = p - b;
+    float3 v13 = a - c;
+    float3 p3  = p - c;
+    float3 nor = cross(v21, v13);
+
+    return -(dot(nor, p1) < 0.0f ? -1.0f : 1.0f) *
+           sqrt( // inside/outside test
+               (sign(dot(cross(v21, nor), p1)) + sign(dot(cross(v32, nor), p2)) +
+                    sign(dot(cross(v13, nor), p3)) <
+                2.0)
+                   ?
+                   // 3 edges
+                   min(min(dot2(v21 * clamp(dot(v21, p1) / dot2(v21), 0.0f, 1.0f) - p1),
+                           dot2(v32 * clamp(dot(v32, p2) / dot2(v32), 0.0f, 1.0f) - p2)),
+                       dot2(v13 * clamp(dot(v13, p3) / dot2(v13), 0.0f, 1.0f) - p3))
+                   :
+                   // 1 face
+                   dot(nor, p1) * dot(nor, p1) / dot2(nor));
+  }
+};
+
 class GfxSufraceComponent : public Node::Component {
   Array<GfxSurface *> gfx_surfaces;
+  BVH<Tri> *          bvh = NULL;
 
   public:
   DECLARE_TYPE(GfxSufraceComponent, Component)
 
+  BVH<Tri> *getBVH() { return bvh; }
   ~GfxSufraceComponent() override {}
   GfxSufraceComponent(Node *n) : Component(n) { gfx_surfaces.init(); }
   static GfxSufraceComponent *create(rd::IFactory *factory, Node *n) {
     ASSERT_DEBUG(n->isa<MeshNode>());
     GfxSufraceComponent *s  = new GfxSufraceComponent(n);
     MeshNode *           mn = n->dyn_cast<MeshNode>();
+    s->bvh                  = new BVH<Tri>;
+    AutoArray<Tri> tri_pool;
     ito(mn->getNumSurfaces()) {
       s->gfx_surfaces.push(GfxSurface::create(factory, mn->getSurface(i)));
+      tri_pool.reserve(tri_pool.size + mn->getSurface(i)->mesh.num_indices / 3);
+      kto(mn->getSurface(i)->mesh.num_indices / 3) {
+        Triangle_Full ftri = mn->getSurface(i)->mesh.fetch_triangle(k);
+        Tri           t;
+        t.surface_id  = i;
+        t.triangle_id = k;
+        t.a           = n->transform(ftri.v0.position);
+        t.b           = n->transform(ftri.v1.position);
+        t.c           = n->transform(ftri.v2.position);
+
+        tri_pool.push(t);
+      }
     }
+    s->bvh->init(&tri_pool[0], tri_pool.size);
     n->addComponent(s);
     return s;
   }
@@ -2083,6 +2213,7 @@ class GfxSufraceComponent : public Node::Component {
   void        release() override {
     ito(gfx_surfaces.size) gfx_surfaces[i]->release();
     gfx_surfaces.release();
+    bvh->release();
     Component::release();
   }
 };

@@ -2,9 +2,9 @@
 #define SCRIPT_HPP
 
 #include "utils.hpp"
+#include <cmath>
 
-static inline bool parse_decimal_int(char const *str, size_t len,
-                                     int32_t *result) {
+static inline bool parse_decimal_int(char const *str, size_t len, int32_t *result) {
   int32_t  final = 0;
   int32_t  pow   = 1;
   int32_t  sign  = 1;
@@ -45,58 +45,117 @@ static inline bool parse_decimal_int(char const *str, size_t len,
   return true;
 }
 
-static inline bool parse_float(char const *str, size_t len, float *result) {
-  float    final = 0.0f;
+template <typename T> static inline bool parse_float(char const *str, size_t len, T *result) {
+  T        final = 0.0;
   uint32_t i     = 0;
-  float    sign  = 1.0f;
+  T        sign  = 1.0;
   if (str[0] == '-') {
-    sign = -1.0f;
+    sign = -1.0;
     i    = 1;
   }
   for (; i < len; ++i) {
     if (str[i] == '.') break;
     switch (str[i]) {
-    case '0': final = final * 10.0f; break;
-    case '1': final = final * 10.0f + 1.0f; break;
-    case '2': final = final * 10.0f + 2.0f; break;
-    case '3': final = final * 10.0f + 3.0f; break;
-    case '4': final = final * 10.0f + 4.0f; break;
-    case '5': final = final * 10.0f + 5.0f; break;
-    case '6': final = final * 10.0f + 6.0f; break;
-    case '7': final = final * 10.0f + 7.0f; break;
-    case '8': final = final * 10.0f + 8.0f; break;
-    case '9': final = final * 10.0f + 9.0f; break;
+    case '\0': goto finish;
+    case '0': final = final * 10.0; break;
+    case '1': final = final * 10.0 + 1.0; break;
+    case '2': final = final * 10.0 + 2.0; break;
+    case '3': final = final * 10.0 + 3.0; break;
+    case '4': final = final * 10.0 + 4.0; break;
+    case '5': final = final * 10.0 + 5.0; break;
+    case '6': final = final * 10.0 + 6.0; break;
+    case '7': final = final * 10.0 + 7.0; break;
+    case '8': final = final * 10.0 + 8.0; break;
+    case '9': final = final * 10.0 + 9.0; break;
     default: return false;
     }
   }
-  i++;
-  float pow = 1.0e-1f;
-  for (; i < len; ++i) {
-    switch (str[i]) {
-    case '0': break;
-    case '1': final += 1.0f * pow; break;
-    case '2': final += 2.0f * pow; break;
-    case '3': final += 3.0f * pow; break;
-    case '4': final += 4.0f * pow; break;
-    case '5': final += 5.0f * pow; break;
-    case '6': final += 6.0f * pow; break;
-    case '7': final += 7.0f * pow; break;
-    case '8': final += 8.0f * pow; break;
-    case '9': final += 9.0f * pow; break;
-    default: return false;
+  if (str[i] == '.') {
+    i++;
+    T pow = 1.0e-1f;
+    for (; i < len; ++i) {
+      switch (str[i]) {
+      case '\0': goto finish;
+      case '0': break;
+      case '1': final += 1.0 * pow; break;
+      case '2': final += 2.0 * pow; break;
+      case '3': final += 3.0 * pow; break;
+      case '4': final += 4.0 * pow; break;
+      case '5': final += 5.0 * pow; break;
+      case '6': final += 6.0 * pow; break;
+      case '7': final += 7.0 * pow; break;
+      case '8': final += 8.0 * pow; break;
+      case '9': final += 9.0 * pow; break;
+      case 'f': goto finish;
+      case 'F': goto finish;
+      case 'e': goto parse_exponent;
+      case 'E': goto parse_exponent;
+      default: return false;
+      }
+      pow *= 1.0e-1;
     }
-    pow *= 1.0e-1f;
+
+  parse_exponent:
+    if (i < len) {
+      if (str[i] != 'e' && str[i] != 'E') return false;
+      i++;
+      i32 exp = -1;
+      i32 l   = 0;
+      for (; l < len - i; l++)
+        if (str[i + l] == 'f' || str[i + l] == 'F') break;
+      if (!parse_decimal_int(str + i, l, &exp)) return false;
+      final = final * std::pow((T)10.0, (T)exp);
+    }
   }
+finish:
   *result = sign * final;
   return true;
 }
 
+static double parse_float(char const *str) {
+  double out;
+  ASSERT_ALWAYS(parse_float(str, strlen(str), &out));
+  return out;
+}
+
+static int __test_float_parsing = [] {
+  ASSERT_ALWAYS(parse_float("0.0") == 0.0);
+  ASSERT_ALWAYS(parse_float("0000000000.0000000000") == 0.0);
+  ASSERT_ALWAYS(parse_float("0.0000000000") == 0.0);
+  ASSERT_ALWAYS(parse_float("-0.0000000000") == 0.0);
+  ASSERT_ALWAYS(int(parse_float("1.12") * 100.0) == 112);
+  ASSERT_ALWAYS(int(parse_float("123.123") * 1000.0) == 123123);
+  ASSERT_ALWAYS(int(parse_float("-1.12e-1") * 1000.0) == -112);
+  ASSERT_ALWAYS(int(parse_float("-5")) == -5);
+  ASSERT_ALWAYS(int(parse_float("-2")) == -2);
+  ASSERT_ALWAYS(int(parse_float("1.12e+1") * 10.0) == 112);
+  ASSERT_ALWAYS(int(parse_float("1.12e+2") * 1.0) == 112);
+  ASSERT_ALWAYS(int(parse_float("1.12e+2f") * 1.0) == 112);
+  ASSERT_ALWAYS(int(parse_float("1.12e+2F") * 1.0) == 112);
+
+  return 0;
+}();
+
 struct List {
   string_ref symbol = {};
-  u32        id     = 0;
-  bool       quoted = false;
   List *     child  = NULL;
   List *     next   = NULL;
+  u32        id     = 0;
+  bool       quoted = false;
+
+  void toString(String_Builder &sb) {
+    if (quoted) sb.putf("\"\"\"");
+    sb.putstr(symbol);
+    if (quoted) sb.putf("\"\"\"");
+    if (child) {
+      sb.putf(" (");
+      child->toString(sb);
+      sb.putf(")");
+    }
+    if (next) {
+      next->toString(sb);
+    }
+  }
   string_ref get_symbol() {
     ASSERT_ALWAYS(nonempty());
     return symbol;
@@ -130,9 +189,7 @@ struct List {
     if (symbol.ptr == NULL) return false;
     return symbol == stref_s(str);
   }
-  bool has_child(char const *name) {
-    return child != NULL && child->cmp_symbol(name);
-  }
+  bool has_child(char const *name) { return child != NULL && child->cmp_symbol(name); }
   template <typename T> void match_children(char const *name, T on_match) {
     if (child != NULL) {
       if (child->cmp_symbol(name)) {
@@ -188,25 +245,21 @@ struct List {
       ASSERT_ALWAYS(cur != NULL);
       if (cur->symbol.ptr != NULL) {
         ASSERT_ALWAYS(cur->symbol.len != 0);
-        fprintf(dotgraph, "%i [label = \"%.*s\", shape = record];\n", cur->id,
-                (int)cur->symbol.len, cur->symbol.ptr);
+        fprintf(dotgraph, "%i [label = \"%.*s\", shape = record];\n", cur->id, (int)cur->symbol.len,
+                cur->symbol.ptr);
       } else {
-        fprintf(dotgraph, "%i [label = \"$\", shape = record, color=red];\n",
-                cur->id);
+        fprintf(dotgraph, "%i [label = \"$\", shape = record, color=red];\n", cur->id);
       }
       if (cur->next == NULL) {
-        fprintf(dotgraph, "%i [label = \"nil\", shape = record, color=blue];\n",
-                null_id);
+        fprintf(dotgraph, "%i [label = \"nil\", shape = record, color=blue];\n", null_id);
         fprintf(dotgraph, "%i -> %i [label = \"next\"];\n", cur->id, null_id);
         null_id++;
       } else
-        fprintf(dotgraph, "%i -> %i [label = \"next\"];\n", cur->id,
-                cur->next->id);
+        fprintf(dotgraph, "%i -> %i [label = \"next\"];\n", cur->id, cur->next->id);
 
       if (cur->child != NULL) {
         if (cur->next != NULL) stack[stack_cursor++] = cur->next;
-        fprintf(dotgraph, "%i -> %i [label = \"child\"];\n", cur->id,
-                cur->child->id);
+        fprintf(dotgraph, "%i -> %i [label = \"child\"];\n", cur->id, cur->child->id);
         cur = cur->child;
       } else {
         cur = cur->next;
@@ -217,8 +270,7 @@ struct List {
     fclose(dotgraph);
   }
   template <typename T>
-  static List *parse(string_ref text, T allocator,
-                     char const **end_of_list = NULL) {
+  static List *parse(string_ref text, T allocator, char const **end_of_list = NULL) {
     List *root = allocator.alloc();
     List *cur  = root;
     TMP_STORAGE_SCOPE;
@@ -355,17 +407,7 @@ struct List {
 };
 
 struct Value {
-  enum class Value_t : i32 {
-    UNKNOWN = 0,
-    I32,
-    F32,
-    SYMBOL,
-    BINDING,
-    LAMBDA,
-    SCOPE,
-    MODE,
-    ANY
-  };
+  enum class Value_t : i32 { UNKNOWN = 0, I32, F32, SYMBOL, BINDING, LAMBDA, SCOPE, MODE, ANY };
   i32 type;
   i32 any_type;
   union {
@@ -425,8 +467,7 @@ struct Symbol_Table {
     Value *    val;
   };
   struct Symbol_Frame {
-    using Table_t =
-        Hash_Table<string_ref, Value *, Default_Allocator, 0x10, 0x10>;
+    using Table_t = Hash_Table<string_ref, Value *, Default_Allocator, 0x10, 0x10>;
     Table_t       table;
     Symbol_Frame *prev;
     void          init() {
@@ -499,9 +540,7 @@ struct Symbol_Table {
       cur = cur->prev;
     }
   }
-  void add_symbol(string_ref name, Value *val) {
-    tail->table.insert(name, val);
-  }
+  void add_symbol(string_ref name, Value *val) { tail->table.insert(name, val); }
 };
 
 //////////////////
@@ -572,6 +611,15 @@ struct Match {
     }
     return val;
   }
+};
+
+struct Tmp_List_Allocator {
+  List *alloc() {
+    List *out = (List *)tl_alloc_tmp(sizeof(List));
+    memset(out, 0, sizeof(List));
+    return out;
+  }
+  char *alloc(size_t size) { return (char *)tl_alloc_tmp(size); }
 };
 
 struct IEvaluator;
@@ -661,54 +709,417 @@ struct IEvaluator {
   }
 };
 
-#define ASSERT_EVAL(x)                                                         \
-  do {                                                                         \
-    if (!(x)) {                                                                \
-      set_error();                                                             \
-      push_error(#x);                                                          \
-      abort();                                                                 \
-      return NULL;                                                             \
-    }                                                                          \
+#define ASSERT_EVAL(x)                                                                             \
+  do {                                                                                             \
+    if (!(x)) {                                                                                    \
+      set_error();                                                                                 \
+      push_error(#x);                                                                              \
+      abort();                                                                                     \
+      return NULL;                                                                                 \
+    }                                                                                              \
   } while (0)
-#define CHECK_ERROR()                                                          \
-  do {                                                                         \
-    if (is_error()) {                                                          \
-      abort();                                                                 \
-      return NULL;                                                             \
-    }                                                                          \
+#define CHECK_ERROR()                                                                              \
+  do {                                                                                             \
+    if (is_error()) {                                                                              \
+      abort();                                                                                     \
+      return NULL;                                                                                 \
+    }                                                                                              \
   } while (0)
+
+namespace expr {
+enum class Type {
+  UNKNOWN = 0,
+  BINOP,
+  CALL,
+  VALUE,
+  SYMBOL,
+  SCOPE,
+  DEFUN,
+  DECL,
+  IF,
+};
+enum class ValueType {
+  UNKNOWN = 0,
+  I8,
+  U8,
+  I16,
+  U16,
+  I32,
+  U32,
+  I64,
+  U64,
+  F32,
+  F64,
+  BOOL,
+};
+struct Value {
+  ValueType type;
+  union {
+    double v_f64;
+    float  v_f32;
+    u32    v_u32;
+    u64    v_u64;
+    i32    v_i32;
+    i64    v_i64;
+    bool   v_bool;
+  };
+};
+struct Expr {
+  union {
+    Expr *child;
+    Expr *lhs;
+    Expr *cond;
+    Value value;
+  };
+  string_ref token;
+  union {
+    Expr *rhs;
+    Expr *argv;
+    Expr *then_scope;
+  };
+  union {
+    Expr *body_scope;
+    Expr *else_scope;
+  };
+  Type type;
+  char lscope, rscope;
+
+  void toString(String_Builder &sb) {
+    if (type == Type::BINOP) {
+      if (lhs) lhs->toString(sb);
+      sb.putstr(token);
+      if (rhs) rhs->toString(sb);
+    } else if (type == Type::SCOPE) {
+      sb.putf("%c", lscope);
+      child->toString(sb);
+      sb.putf("%c", rscope);
+    } else if (type == Type::CALL) {
+      sb.putstr(token);
+      child->toString(sb);
+    } else if (type == Type::SYMBOL) {
+      sb.putstr(token);
+    } else if (type == Type::VALUE) {
+      sb.putstr(token);
+    } else if (type == Type::DEFUN) {
+      sb.putf("defun ");
+      sb.putstr(token);
+      argv->toString(sb);
+      body_scope->toString(sb);
+    } else {
+      UNIMPLEMENTED;
+    }
+  }
+};
+static Expr *tmp_alloc_expr() {
+  Expr *out = (Expr *)tl_alloc_tmp(sizeof(Expr));
+  memset(out, 0, sizeof(Expr));
+  return out;
+}
+static bool isLiteral(char c) { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_'; }
+static bool isPrintable(char c) { return c >= 0x20 && c <= 0x7F; }
+static bool isNumeral(char c) { return c >= '0' && c <= '9'; }
+static void skipSpaces(char const *&cursor) {
+  while (*cursor == ' ' || *cursor == '\n' || *cursor == '\t' || *cursor == '\r') {
+    cursor++;
+  }
+}
+static char        single_char_ops[] = {'+', '-', '*', '/', ',', '>', '<', '^', ';', '=', '.'};
+static char const *two_char_ops[]    = {"<=", ">=", "!=", "+=", "-=", "*=", "/="};
+static int         precedence[0x100];
+static int         prec_init = [] {
+  ito(ARRAYSIZE(precedence)) precedence[i] = -1;
+  // semicolon is used to chain expressions
+  precedence[(int)';'] = 0;
+  precedence[(int)','] = 1;
+  // precedence[(int)':'] = 2;
+  precedence[(int)'='] = 3;
+  precedence[(int)'<'] = 5;
+  precedence[(int)'>'] = 5;
+  precedence[(int)'+'] = 10;
+  precedence[(int)'-'] = 10;
+  precedence[(int)'*'] = 20;
+  precedence[(int)'/'] = 20;
+  precedence[(int)'^'] = 30;
+  precedence[(int)'.'] = 50;
+  return 0;
+}();
+static int getPrecedence(string_ref token) {
+  if (token.len == 1) {
+    ASSERT_DEBUG(precedence[(int)token.ptr[0]] >= 0);
+    return precedence[(int)token.ptr[0]];
+  } else if (token.len == 2) {
+    if (token.eq("<=")    //
+        || token.eq(">=") //
+        || token.eq("!=") //
+        || token.eq("+=") //
+        || token.eq("-=") //
+        || token.eq("*=") //
+        || token.eq("/=") //
+        || token.eq("^=") //
+    )
+      return 5;
+  }
+  UNIMPLEMENTED;
+}
+static bool isLogicOp(string_ref c) {
+  return c.eq(">") || c.eq("<") || c.eq("=") || c.eq(">=") || c.eq("<=") || c.eq("!=");
+}
+static bool isArithmeticOp(string_ref c) {
+  return c.ptr[0] == '+' || c.ptr[0] == '-' || c.ptr[0] == '*' || c.ptr[0] == '/' ||
+         c.ptr[0] == '^';
+}
+static bool isOp(char c) {
+  for (auto o : single_char_ops)
+    if (c == o) return true;
+  return false;
+}
+static bool isOp(string_ref token) {
+  if (token.len == 1) {
+    return isOp(token.ptr[0]);
+  } else if (token.len == 2) {
+    for (auto o : two_char_ops)
+      if (token.eq(o)) return true;
+  }
+  return false;
+}
+static Expr *parse_expression(char const *&cursor);
+static Expr *parse_inner(char const *&cursor, char a, char b) {
+  char const *s = cursor;
+  skipSpaces(s);
+  if (*s == a) {
+    s++;
+    Expr *inner = parse_expression(s);
+    skipSpaces(s);
+    if (inner == NULL || *s != b) return NULL;
+    s++;
+    Expr *expr   = tmp_alloc_expr();
+    expr->type   = Type::SCOPE;
+    expr->lscope = a;
+    expr->rscope = b;
+    expr->child  = inner;
+    cursor       = s;
+    return expr;
+  }
+  return NULL;
+}
+static bool parse_symbol(char const *&cursor, string_ref &token) {
+  char const *cur = cursor;
+  skipSpaces(cur);
+  string_ref cur_token{cur, 0};
+  while (isLiteral(*cur)) {
+    cur++;
+    cur_token.len++;
+  }
+  while (isLiteral(*cur) || isNumeral(*cur)) {
+    cur++;
+    cur_token.len++;
+  }
+  if (cur_token.len > 0) {
+    cursor = cur;
+    token  = cur_token;
+    return true;
+  }
+  return false;
+}
+static Expr *parse_expression(char const *&cursor) {
+  skipSpaces(cursor);
+  Expr *lhs = NULL;
+  if (*cursor == '(') {
+    lhs = parse_inner(cursor, '(', ')');
+    if (lhs == NULL) return NULL;
+  } else if (isLiteral(*cursor)) {
+    string_ref token;
+    if (!parse_symbol(cursor, token)) return NULL;
+    if (token.eq("defun")) {
+      string_ref name;
+      if (!parse_symbol(cursor, name)) return NULL;
+      Expr *argv = parse_inner(cursor, '(', ')');
+      if (argv == NULL) return NULL;
+      Expr *body = parse_inner(cursor, '{', '}');
+      if (body == NULL) return NULL;
+      Expr *def       = tmp_alloc_expr();
+      def->type       = Type::DEFUN;
+      def->token      = name;
+      def->argv       = argv;
+      def->body_scope = body;
+      return def;
+    }
+    skipSpaces(cursor);
+    /*if (*cursor == ':') {
+       string_ref type;
+       if (!parse_symbol(type, type)) return NULL;
+       Expr *decl      = tmp_alloc_expr();
+       def->type       = Type::DECL;
+       def->token      = name;
+       def->rhs        = ;
+       def->body_scope = body;
+       return def;
+     }*/
+    if (*cursor == '(') {
+      Expr *inner = parse_inner(cursor, '(', ')');
+      if (inner == NULL) return NULL;
+      Expr *call  = tmp_alloc_expr();
+      call->type  = Type::CALL;
+      call->token = token;
+      call->child = inner;
+      lhs         = call;
+    } else {
+      lhs        = tmp_alloc_expr();
+      lhs->type  = Type::SYMBOL;
+      lhs->token = token;
+    }
+  } else if (isNumeral(*cursor)) {
+    string_ref cur_token{cursor, 1};
+    cursor++;
+    bool symbol              = false;
+    bool has_dot             = false;
+    bool only_ones_and_zeros = true;
+    while (isLiteral(*cursor) || isNumeral(*cursor) || *cursor == '.') {
+      if (*cursor == '.' && symbol) return NULL;
+      if (*cursor == '.') has_dot = true;
+      if (*cursor != '0' && *cursor != '1') only_ones_and_zeros = false;
+      if (isLiteral(*cursor)) {
+        symbol = true;
+      }
+      cursor++;
+      cur_token.len++;
+    }
+    if (symbol) {
+      lhs        = tmp_alloc_expr();
+      lhs->type  = Type::SYMBOL;
+      lhs->token = cur_token;
+    } else {
+      if (!has_dot && cur_token.len > 1 && cur_token.len <= 4 &&
+          only_ones_and_zeros) { // Parse as a swizzle e.g. 001 100 101.
+        lhs        = tmp_alloc_expr();
+        lhs->type  = Type::SYMBOL;
+        lhs->token = cur_token;
+      } else {
+        double num;
+        bool   suc = parse_float(cur_token.ptr, cur_token.len, &num);
+        if (!suc) return NULL;
+        lhs              = tmp_alloc_expr();
+        lhs->type        = Type::VALUE;
+        lhs->token       = cur_token;
+        lhs->value.type  = ValueType::F64;
+        lhs->value.v_f64 = num;
+      }
+    }
+  }
+  skipSpaces(cursor);
+  if (isOp(*cursor) || isOp({cursor, 2})) {
+    Expr *op  = tmp_alloc_expr();
+    op->type  = Type::BINOP;
+    op->token = string_ref{cursor, 1};
+    op->lhs   = lhs;
+    if (isOp({cursor, 2})) {
+      op->token.len++;
+      if (!isOp(op->token)) return NULL;
+      cursor += 2;
+    } else {
+      cursor++;
+    }
+    Expr *rhs = parse_expression(cursor);
+    op->rhs   = rhs;
+    if (op->lhs && op->rhs && rhs->type == Type::BINOP) {
+      if (getPrecedence(rhs->token) < getPrecedence(op->token)) {
+        Expr *a0 = op->lhs;
+        Expr *a1 = rhs->lhs;
+        Expr *a2 = rhs->rhs;
+        ASSERT_DEBUG(a0 && a1 && a0);
+        SWAP(op->token, rhs->token);
+        rhs->lhs = a0;
+        rhs->rhs = a1;
+        op->lhs  = rhs;
+        op->rhs  = a2;
+      }
+    }
+    return op;
+  }
+  return lhs;
+}
+static bool fold(Expr *expr, double &res) {
+  if (expr->type == Type::BINOP) {
+    double a, b;
+    if (expr->lhs && !fold(expr->lhs, a) || !fold(expr->rhs, b)) return false;
+    if (expr->token.len == 1) {
+      switch (expr->token.ptr[0]) {
+      case '+': res = a + b; return true;
+      case '-': res = (expr->lhs ? a : 0.0) - b; return true;
+      case '*': res = a * b; return true;
+      case '/': res = a / b; return true;
+      case '^': res = ::pow(a, b); return true;
+      default: return false;
+      }
+    }
+    return false;
+  } else if (expr->type == Type::VALUE) {
+    res = expr->value.v_f64;
+    return true;
+  } else if (expr->type == Type::SCOPE)
+    return fold(expr->child, res);
+  return false;
+}
+static void __test_fold(char const *text, double cmp) {
+  TMP_STORAGE_SCOPE;
+  char const *cursor = text;
+  Expr *      expr   = parse_expression(cursor);
+  double      res;
+  ASSERT_ALWAYS(fold(expr, res));
+  ASSERT_ALWAYS(res == cmp);
+}
+static void __test_to_string(char const *text, char const *cmp) {
+  TMP_STORAGE_SCOPE;
+  char const *   cursor = text;
+  Expr *         expr   = parse_expression(cursor);
+  String_Builder sb;
+  sb.init();
+  defer(sb.release());
+  expr->toString(sb);
+  ASSERT_ALWAYS(expr && sb.get_str() == stref_s(cmp));
+}
+static int __test = [] {
+  //__test_fold("(3.2 - 1.2) * 2.0 / 4.0", 1.0);
+  //__test_fold("(3.2 - 1.2) * 2.0 / 2.0 ^ 2.0", 1.0);
+  //__test_fold("(6.0 - (3.0 * 2.0 - 1.0)) * 2.0 / 2.0", 1.0);
+  //__test_fold("3.0 * 2.0 - 1.0", 5.0);
+  //__test_fold("-(-3.0 * (-2.0) + 1.0)", -5.0);
+  //__test_to_string("a = b; 1 = 2 - 1;", "a=b;1=2-1;");
+  //__test_to_string("a : i32 = b; a += c - 1;", "a:i32=b;a+=c-1;");
+  //__test_to_string("a : i32 = b; a += c - 1;", "a:i32=b;a+=c-1;");
+  //__test_to_string("defun foo (a : float3, b : float3) { dot(a, b) }",
+  //"defun foo(a:float3,b:float3){dot(a,b)}");
+  return 0;
+}();
+} // namespace expr
 
 #endif // SCRIPT_HPP
 
 #ifdef SCRIPT_IMPL
 #ifndef SCRIPT_IMPL_GUARD
-#define SCRIPT_IMPL_GUARD
+#  define SCRIPT_IMPL_GUARD
 
-#define ALLOC_VAL() (Value *)alloc_value()
-#define CALL_EVAL(x)                                                           \
-  eval_unwrap(x);                                                              \
-  CHECK_ERROR()
-#define ASSERT_SMB(x)                                                          \
-  ASSERT_EVAL(x != NULL && x->type == (i32)Value::Value_t::SYMBOL);
-#define ASSERT_I32(x)                                                          \
-  ASSERT_EVAL(x != NULL && x->type == (i32)Value::Value_t::I32);
-#define ASSERT_F32(x)                                                          \
-  ASSERT_EVAL(x != NULL && x->type == (i32)Value::Value_t::F32);
-#define ASSERT_ANY(x)                                                          \
-  ASSERT_EVAL(x != NULL && x->type == (i32)Value::Value_t::ANY);
+#  define ALLOC_VAL() (Value *)alloc_value()
+#  define CALL_EVAL(x)                                                                             \
+    eval_unwrap(x);                                                                                \
+    CHECK_ERROR()
+#  define ASSERT_SMB(x) ASSERT_EVAL(x != NULL && x->type == (i32)Value::Value_t::SYMBOL);
+#  define ASSERT_I32(x) ASSERT_EVAL(x != NULL && x->type == (i32)Value::Value_t::I32);
+#  define ASSERT_F32(x) ASSERT_EVAL(x != NULL && x->type == (i32)Value::Value_t::F32);
+#  define ASSERT_ANY(x) ASSERT_EVAL(x != NULL && x->type == (i32)Value::Value_t::ANY);
 
-#define EVAL_SMB(res, id)                                                      \
-  Value *res = eval_unwrap(l->get(id));                                        \
-  ASSERT_SMB(res)
-#define EVAL_I32(res, id)                                                      \
-  Value *res = eval_unwrap(l->get(id));                                        \
-  ASSERT_I32(res)
-#define EVAL_F32(res, id)                                                      \
-  Value *res = eval_unwrap(l->get(id));                                        \
-  ASSERT_F32(res)
-#define EVAL_ANY(res, id)                                                      \
-  Value *res = eval_unwrap(l->get(id));                                        \
-  ASSERT_ANY(res)
+#  define EVAL_SMB(res, id)                                                                        \
+    Value *res = eval_unwrap(l->get(id));                                                          \
+    ASSERT_SMB(res)
+#  define EVAL_I32(res, id)                                                                        \
+    Value *res = eval_unwrap(l->get(id));                                                          \
+    ASSERT_I32(res)
+#  define EVAL_F32(res, id)                                                                        \
+    Value *res = eval_unwrap(l->get(id));                                                          \
+    ASSERT_F32(res)
+#  define EVAL_ANY(res, id)                                                                        \
+    Value *res = eval_unwrap(l->get(id));                                                          \
+    ASSERT_ANY(res)
 
 struct Default_Evaluator final : public IEvaluator {
   void               init() {}
@@ -727,10 +1138,8 @@ struct Default_Evaluator final : public IEvaluator {
     } else if (l->nonempty()) {
       i32  imm32;
       f32  immf32;
-      bool is_imm32 =
-          !l->quoted && parse_decimal_int(l->symbol.ptr, l->symbol.len, &imm32);
-      bool is_immf32 =
-          !l->quoted && parse_float(l->symbol.ptr, l->symbol.len, &immf32);
+      bool is_imm32  = !l->quoted && parse_decimal_int(l->symbol.ptr, l->symbol.len, &imm32);
+      bool is_immf32 = !l->quoted && parse_float(l->symbol.ptr, l->symbol.len, &immf32);
       if (is_imm32) {
         Value *new_val = ALLOC_VAL();
         new_val->i     = imm32;
@@ -951,8 +1360,7 @@ struct Default_Evaluator final : public IEvaluator {
           while (cur != NULL) {
             if (cur->nonempty()) {
               state->symbol_table.add_symbol(
-                  cur->symbol,
-                  state->symbol_table.lookup_value(cur->symbol, old_scope));
+                  cur->symbol, state->symbol_table.lookup_value(cur->symbol, old_scope));
             }
             cur = cur->next;
           }
@@ -1021,18 +1429,14 @@ struct Default_Evaluator final : public IEvaluator {
                 i32    num_chars = 0;
                 Value *val       = args[cur_id];
                 if (c[1] == 'i') {
-                  ASSERT_EVAL(val != NULL &&
-                              val->type == (i32)Value::Value_t::I32);
+                  ASSERT_EVAL(val != NULL && val->type == (i32)Value::Value_t::I32);
                   num_chars = sprintf(tmp_buf + cursor, "%i", val->i);
                 } else if (c[1] == 'f') {
-                  ASSERT_EVAL(val != NULL &&
-                              val->type == (i32)Value::Value_t::F32);
+                  ASSERT_EVAL(val != NULL && val->type == (i32)Value::Value_t::F32);
                   num_chars = sprintf(tmp_buf + cursor, "%f", val->f);
                 } else if (c[1] == 's') {
-                  ASSERT_EVAL(val != NULL &&
-                              val->type == (i32)Value::Value_t::SYMBOL);
-                  num_chars = sprintf(tmp_buf + cursor, "%.*s",
-                                      (i32)val->str.len, val->str.ptr);
+                  ASSERT_EVAL(val != NULL && val->type == (i32)Value::Value_t::SYMBOL);
+                  num_chars = sprintf(tmp_buf + cursor, "%.*s", (i32)val->str.len, val->str.ptr);
                 } else {
                   ASSERT_EVAL(false && "[format]  Unknown format");
                 }
