@@ -752,7 +752,7 @@ void store(ivec2 coord, float4 val) {
     MEMZERO(pc);
     pc.op = 0;
     switch (image->format) {
-      // clang-format off
+    // clang-format off
       case rd::Format::RGBA8_SRGBA:  {  pc.format = 0; } break;
       case rd::Format::RGBA8_UNORM:  {  pc.format = 1; } break;
       case rd::Format::RGB32_FLOAT:  {  pc.format = 2; } break;
@@ -917,10 +917,10 @@ protected:
   };
 
   private:
-  Array<Gizmo_Instance_Data_CPU>   cylinder_draw_cmds;
-  Array<Gizmo_Instance_Data_CPU>   sphere_draw_cmds;
-  Array<Gizmo_Instance_Data_CPU>   cone_draw_cmds;
-  Array<Gizmo_Line_Vertex, 0x1000> line_segments;
+  Array<Gizmo_Instance_Data_CPU, 0x1000> cylinder_draw_cmds;
+  Array<Gizmo_Instance_Data_CPU, 0x1000> sphere_draw_cmds;
+  Array<Gizmo_Instance_Data_CPU, 0x1000> cone_draw_cmds;
+  Array<Gizmo_Line_Vertex, 0x1000>       line_segments;
 
   Raw_Mesh_3p16i_Wrapper icosahedron_wrapper;
   Raw_Mesh_3p16i_Wrapper cylinder_wrapper;

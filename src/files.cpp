@@ -569,9 +569,9 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
   vec3 max_dims = max - min;
 
   // Size normalization hack
-  float vk      = 1.0f;
+  float vk      = 2.0f;
   float max_dim = MAX3(max_dims.x, max_dims.y, max_dims.z);
-  vk            = 10.0f / max_dim;
+  vk            = 1.0f / max_dim;
   vec3 avg      = (max + min) / 2.0f;
 
   //

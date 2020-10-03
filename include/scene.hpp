@@ -136,7 +136,7 @@ class Random_Factory {
   float3 rand_sphere_center() {
     float r     = rand_unit_float();
     float phi   = rand_unit_float() * PI * 2.0f;
-    float theta = rand_unit_float() * PI - PI / 2.0f;
+    float theta = rand_unit_float() * PI;
     return r * polar_to_cartesian(sin(theta), cos(theta), sin(phi), cos(phi));
   }
 

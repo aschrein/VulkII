@@ -67,6 +67,7 @@ using f64 = double;
 #define kto(N) for (uint32_t k = 0; k < N; ++k)
 #define xto(N) for (uint32_t x = 0; x < N; ++x)
 #define yto(N) for (uint32_t y = 0; y < N; ++y)
+#define zto(N) for (uint32_t z = 0; z < N; ++z)
 
 #if __linux__
 // UNIX headers

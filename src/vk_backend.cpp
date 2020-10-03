@@ -2377,10 +2377,10 @@ struct Window {
                                               present_modes);
     VkPresentModeKHR present_mode_of_choice = VK_PRESENT_MODE_FIFO_KHR; // always supported.
     ito(num_present_modes) {
-      if (present_modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR) { // prefer mailbox
-        present_mode_of_choice = VK_PRESENT_MODE_IMMEDIATE_KHR;
-        break;
-      }
+      //if (present_modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR) { // prefer mailbox
+        //present_mode_of_choice = VK_PRESENT_MODE_IMMEDIATE_KHR;
+        //break;
+      //}
     }
     //    usleep(100000);
     VkSurfaceCapabilitiesKHR surface_capabilities;
