@@ -1142,7 +1142,12 @@ struct Shader_Reflection {
   template <typename T> void merge_into(T &table) {
     set_table.iter_pairs([&](u32 set_index, Table<u32, Shader_Descriptor> &binding_table) {
       if (table.contains(set_index)) {
-
+        Table<u32, Shader_Descriptor> &merg = table.get(set_index);
+        binding_table.iter_pairs([&](u32 binding_index, Shader_Descriptor &desc) {
+          if (!merg.contains(binding_index)) {
+            merg.insert(binding_index, desc);
+          }
+        });
       } else {
         table.insert(set_index, binding_table.clone());
       }
@@ -2377,9 +2382,9 @@ struct Window {
                                               present_modes);
     VkPresentModeKHR present_mode_of_choice = VK_PRESENT_MODE_FIFO_KHR; // always supported.
     ito(num_present_modes) {
-      //if (present_modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR) { // prefer mailbox
-        //present_mode_of_choice = VK_PRESENT_MODE_IMMEDIATE_KHR;
-        //break;
+      // if (present_modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR) { // prefer mailbox
+      // present_mode_of_choice = VK_PRESENT_MODE_IMMEDIATE_KHR;
+      // break;
       //}
     }
     //    usleep(100000);

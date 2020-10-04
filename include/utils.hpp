@@ -1082,6 +1082,7 @@ struct AutoArray : public Array<T, grow_k, Allcator_t> {
   AutoArray operator=(AutoArray const &) = delete;
   AutoArray operator=(AutoArray &&) = delete;
   AutoArray(AutoArray &&)           = delete;
+  void cloneFrom(AutoArray const &a) { init(a.ptr, a.size); }
   ~AutoArray() { release(); }
 };
 
@@ -1291,7 +1292,7 @@ struct Hash_Table {
 
   void reserve(size_t size) { set.arr.resize(size); }
 
-  V get(K key) {
+  V &get(K key) {
     i32 id = set.find(Map_Pair<K, V>{key, {}});
     ASSERT_DEBUG(id >= 0);
     return set.arr[id].key.value;

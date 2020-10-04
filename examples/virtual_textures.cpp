@@ -1,11 +1,225 @@
+#include "marching_cubes/marching_cubes.h"
 #include "rendering.hpp"
 #include "rendering_utils.hpp"
 
+#include <atomic>
+//#include <functional>
 #include <imgui.h>
+#include <mutex>
+#include <thread>
+
+#ifndef ZoneScopedS
+#  define ZoneScopedS(x)
+#  define ZoneScoped
+#endif
+
+inline void nop() {
+#if defined(_WIN32)
+  __noop();
+#else
+  __asm__ __volatile__("nop");
+#endif
+}
+inline static uint64_t get_thread_id() {
+  auto id = std::this_thread::get_id();
+  return std::hash<std::thread::id>()(id);
+}
+struct Spin_Lock {
+  std::atomic<bool> flag = {0};
+  void              lock() {
+    for (;;) {
+      if (!flag.exchange(true, std::memory_order_acquire)) {
+        return;
+      }
+      while (flag.load(std::memory_order_relaxed)) {
+        ito(16) nop();
+      }
+    }
+  }
+  void unlock() { flag.store(false, std::memory_order_release); }
+};
+
+// Poor man's queue
+// Not thread safe in all scenarios but kind of works in mine
+// @Cleanup
+template <typename Job_t> struct Queue {
+  template <typename Job_t> struct Batch {
+    Job_t *          job_queue;
+    u32              capacity;
+    std::atomic<u32> head;
+    Spin_Lock        spinlock;
+    void             lock() { spinlock.lock(); }
+    void             unlock() { spinlock.unlock(); }
+    void             init() {
+      ZoneScoped;
+      head      = 0;
+      capacity  = 1 << 18;
+      job_queue = (Job_t *)tl_alloc(sizeof(Job_t) * capacity);
+    }
+    void release() { tl_free(job_queue); }
+
+    bool has_items() { return head.load() != 0; }
+    bool try_dequeue(Job_t &job) {
+      ZoneScoped;
+      lock();
+      defer(unlock());
+      if (!has_items()) return false;
+      u32 old_head = head.fetch_sub(1);
+      job          = job_queue[old_head - 1];
+      return true;
+    }
+    bool try_dequeue(Job_t *jobs, u32 *max_size) {
+      ZoneScoped;
+      lock();
+      defer(unlock());
+      if (!has_items()) {
+        *max_size = 0;
+        return false;
+      }
+      u32 num_items = MIN(*max_size, head.load());
+      u32 old_head  = head.fetch_sub(num_items);
+      memcpy(jobs, job_queue + old_head - num_items, sizeof(Job_t) * num_items);
+      *max_size = num_items;
+      assert(jobs[0].id != 0);
+      return true;
+    }
+    void dequeue(Job_t *out, u32 &count) {
+      ZoneScoped;
+      lock();
+      defer(unlock());
+      if (head < count) {
+        count = head;
+      }
+      u32 old_head = head.fetch_sub(count);
+      memcpy(out, job_queue + head, count * sizeof(out[0]));
+    }
+    void enqueue(Job_t job) {
+      ZoneScoped;
+      lock();
+      defer(unlock());
+      u32 old_head        = head.fetch_add(1);
+      job_queue[old_head] = job;
+      ASSERT_PANIC(head <= capacity);
+    }
+    void enqueue(Job_t const *jobs, u32 num) {
+      ZoneScoped;
+      u32 old_head = 0;
+      //{
+      lock();
+      defer(unlock());
+      old_head = head.fetch_add(num);
+      ASSERT_PANIC(head <= capacity);
+      //}
+      memcpy(job_queue + old_head, jobs, num * sizeof(Job_t));
+    }
+    bool has_job() { return head != 0u; }
+    void reset() { head = 0u; }
+  };
+
+  static constexpr u32 NUM_BATCHES = 512;
+  Batch<Job_t>         batches[NUM_BATCHES];
+  void                 init() {
+    ZoneScoped;
+    ito(NUM_BATCHES) { batches[i].init(); }
+  }
+  void release() {
+    ZoneScoped;
+    ito(NUM_BATCHES) { batches[i].release(); }
+  }
+  bool has_items_any() {
+    ito(NUM_BATCHES) if (batches[i].has_items()) return true;
+    return false;
+  }
+  bool has_items(u32 id) { return batches[id % NUM_BATCHES].has_items(); }
+  bool try_dequeue(u32 id, Job_t &job) { return batches[id % NUM_BATCHES].try_dequeue(job); }
+  bool try_dequeue(u32 id, Job_t *jobs, u32 *max_size) {
+    return batches[id % NUM_BATCHES].try_dequeue(jobs, max_size);
+  }
+  void dequeue(u32 id, Job_t *out, u32 &count) {
+    return batches[id % NUM_BATCHES].dequeue(out, count);
+  }
+  void enqueue(u32 id, Job_t job) { return batches[id % NUM_BATCHES].enqueue(job); }
+  void enqueue(u32 id, Job_t const *jobs, u32 num) {
+    return batches[id % NUM_BATCHES].enqueue(jobs, num);
+  }
+  bool has_job(u32 id) { return batches[id % NUM_BATCHES].has_job(); }
+};
+struct Thread_Job {
+  u32 id;
+  void (*job)(u32);
+};
+struct Thread_Pool {
+  u32                     num_threads = 0;
+  std::thread *           thpool[0x100];
+  std::atomic<bool>       threads_working;
+  std::mutex              cv_mux;
+  std::condition_variable cv;
+  std::mutex              finished_mux;
+  std::condition_variable finished_cv;
+  std::atomic<u32>        workers_in_progress;
+
+  Queue<Thread_Job> queue;
+
+  void init_thread_pool() {
+    threads_working = true;
+    queue.init();
+    num_threads = std::thread::hardware_concurrency();
+#if defined(_WIN32)
+    {
+      SYSTEM_INFO sysinfo;
+      GetSystemInfo(&sysinfo);
+      num_threads = sysinfo.dwNumberOfProcessors;
+    }
+#endif
+
+    fprintf(stdout, "Launching %i threads\n", num_threads);
+    for (u32 thread_id = 0; thread_id < num_threads; thread_id++) {
+      thpool[thread_id] = new std::thread([&, thread_id] {
+      // Set affinity
+#if defined(_WIN32)
+        SetThreadAffinityMask(GetCurrentThread(), (u64)1 << (u64)thread_id);
+#endif // _WIN32
+        u32 batch_hash = thread_id;
+        while (threads_working) {
+          batch_hash = (u32)hash_of(batch_hash);
+          if (queue.has_items(batch_hash) == false) {
+            finished_cv.notify_one();
+            ito(32) nop();
+            if (!threads_working) break;
+            continue;
+          }
+          workers_in_progress++;
+          defer({ workers_in_progress--; });
+          u32        num_jobs = 1;
+          Thread_Job job;
+          if (!queue.try_dequeue(batch_hash, &job, &num_jobs)) continue;
+          job.job(job.id);
+        }
+      });
+      cv.notify_one();
+    }
+  }
+  void release() {
+    wait();
+    threads_working = false;
+
+    ito(num_threads) {
+      cv.notify_all();
+      thpool[i]->join();
+      delete thpool[i];
+    }
+  }
+  void wait() {
+    std::unique_lock<std::mutex> lk(finished_mux);
+    finished_cv.wait(lk,
+                     [&] { return queue.has_items_any() == false && workers_in_progress == 0; });
+  }
+} thread_pool;
 
 template <typename T = f32> struct ReLuActivation {
-  static T f(T i) { return i > (T)0 ? i : (T)0; }
-  static T deriv(T i) { return i > (T)0 ? (T)1 : (T)0; }
+  static T           f(T i) { return i > (T)0 ? i : (T)0; }
+  static T           deriv(T i) { return i > (T)0 ? (T)1 : (T)0; }
+  static char const *str() { return "relu"; }
 };
 
 template <typename T = f32> struct TanhActivation {
@@ -14,17 +228,13 @@ template <typename T = f32> struct TanhActivation {
     T a = std::tanh(i);
     return (T)1 - a * a;
   }
+  static char const *str() { return "tanh"; }
 };
 
 template <typename T = f32> struct NoOpActivation {
-  static T f(T i) { return i; }
-  static T deriv(T i) { return (T)1; }
-};
-
-template <typename T = f32> struct DelayActivation {
-  static constexpr T eps = 1.0e-1f;
-  static T           f(T i) { return i < -eps ? -eps : (i > eps ? eps : i / eps); }
-  static T           deriv(T i) { return i < -eps ? (T)0 : (i > eps ? (T)0 : (T)1 / eps); }
+  static T           f(T i) { return i; }
+  static T           deriv(T i) { return (T)1; }
+  static char const *str() { return ""; }
 };
 
 struct BaseNNLayer {
@@ -57,12 +267,24 @@ struct BaseNNLayer {
           get_pcg().nextf() * 2.0f - 1.0f;
     }
   }
-  u32         getOutputSize() { return output_size; }
-  f32         getOutput(i32 i) { return f(outputs[i]); }
-  virtual f32 f(f32 x)     = 0;
-  virtual f32 deriv(f32 x) = 0;
-  void        init(f32 const *in) { ito(input_size) inputs[i] = in[i]; }
-  void        eval() {
+  u32                  getOutputSize() { return output_size; }
+  f32                  getOutput(i32 i) { return f(outputs[i]); }
+  virtual f32          f(f32 x)     = 0;
+  virtual f32          deriv(f32 x) = 0;
+  virtual char const * fStr() const = 0;
+  virtual BaseNNLayer *clone()      = 0;
+  void                 cloneInto(BaseNNLayer *layer) {
+    layer->inputs.cloneFrom(inputs);
+    layer->input_errors.cloneFrom(input_errors);
+    layer->output_derivs.cloneFrom(output_derivs);
+    layer->outputs.cloneFrom(outputs);
+    layer->coefficients.cloneFrom(coefficients);
+    layer->input_size  = input_size;
+    layer->output_size = output_size;
+    layer->row_size    = row_size;
+  }
+  void init(f32 const *in) { ito(input_size) inputs[i] = in[i]; }
+  void eval() {
     ito(outputs.size) {
       f32 result = (f32)0;
       jto(inputs.size) { result += inputs[j] * coefficients[row_size * i + j]; }
@@ -71,8 +293,8 @@ struct BaseNNLayer {
     };
   }
   float rexp(float x) { return 1.0f - std::exp(-std::abs(x)); }
-  bool  do_update(float x) { return rexp(x) > get_pcg().nextf(); }
-  void  solve(f32 const *error, f32 const dt) {
+  // bool  do_update(float x) { return rexp(x) > get_pcg().nextf(); }
+  void solve(f32 const *error, f32 const dt) {
     ito(outputs.size) output_derivs[i] = deriv(outputs[i]);
     ito(inputs.size) {
       f32 result = (f32)0;
@@ -88,7 +310,8 @@ struct BaseNNLayer {
     ito(outputs.size) {
       f32 dfdx = output_derivs[i];
       jto(inputs.size) {
-        if (do_update(error[i])) coefficients[row_size * i + j] += dt * dfdx * inputs[j] * error[i];
+        // if (do_update(error[i]))
+        coefficients[row_size * i + j] += dt * dfdx * inputs[j] * error[i];
         // fprintf(stdout, "%f ", coefficients[row_size * i + j]);
       }
     }
@@ -100,7 +323,7 @@ struct BaseNNLayer {
     ito(outputs.size) layer->inputs[i] = f(outputs[i]);
   }
   void reset() {
-    inputs[input_size] = get_pcg().nextf();
+    inputs[input_size] = 1.0f;
     ito(coefficients.size) {
       coefficients[i] = // 1.0f;
           get_pcg().nextf() * 2.0f - 1.0f;
@@ -143,8 +366,14 @@ struct BaseNNLayer {
 
 template <typename F = ReLuActivation<f32>> struct NNLayer : public BaseNNLayer {
   NNLayer(u32 input_size, u32 output_size) { BaseNNLayer::__init(input_size, output_size); }
-  f32 f(f32 x) override { return F::f(x); }
-  f32 deriv(f32 x) override { return F::deriv(x); }
+  f32          f(f32 x) override { return F::f(x); }
+  f32          deriv(f32 x) override { return F::deriv(x); }
+  char const * fStr() const override { return F::str(); }
+  BaseNNLayer *clone() override {
+    NNLayer<F> *layer = new NNLayer<F>(input_size, output_size);
+    cloneInto(layer);
+    return layer;
+  }
 };
 
 class NN {
@@ -179,8 +408,6 @@ class NN {
           layers.push(new NNLayer<TanhActivation<f32>>(num_inputs, num_outputs));
         } else if (activation == eNoOp) {
           layers.push(new NNLayer<NoOpActivation<f32>>(num_inputs, num_outputs));
-        } else if (activation == eDelay) {
-          layers.push(new NNLayer<DelayActivation<f32>>(num_inputs, num_outputs));
         } else {
           UNIMPLEMENTED;
         }
@@ -202,6 +429,12 @@ class NN {
     NN *n = new NN;
     n->init(l);
     return n;
+  }
+
+  NN *clone() {
+    NN *out = new NN;
+    ito(layers.size) out->layers.push(layers[i]->clone());
+    return out;
   }
 
   void release() {
@@ -306,6 +539,13 @@ class NN {
 Config       g_config;
 Scene *      g_scene     = Scene::create();
 Gizmo_Layer *gizmo_layer = NULL;
+NN *         nn          = NULL;
+struct TestData {
+  float x, y, z;
+  float dist;
+};
+int             N = 10000;
+Array<TestData> td;
 
 template <typename T> class GPUBuffer {
   private:
@@ -374,22 +614,21 @@ template <typename T> class GPUBuffer {
 };
 
 void build_nn_shader(String_Builder &sb, NN *nn) {
-  sb.putf("void exec_nn(\n");
+  sb.putf("void eval_sdf(\n");
   ito(nn->layers[0]->input_size) {
-    sb.putf("in float input_%i,", i);
+    sb.putf("in float input_%i,\n", i);
     sb.putf("\n");
   }
-  ito(nn->layers[nn->layers.size - 1]->output_size) {
-    sb.putf("out float output_%i", i);
-    if (i != nn->layers[nn->layers.size - 1]->output_size - 1) sb.putf(",");
-    sb.putf("\n");
-  }
+  ito(nn->layers[nn->layers.size - 1]->output_size) { sb.putf("out float output_%i,\n", i); }
+  // if (i != nn->layers[nn->layers.size - 1]->output_size - 1) sb.putf(",");
+  sb.putf("in int exit_layer, in int exit_point");
   sb.putf(") {\n");
   ito(nn->layers.size) {
     auto layer = nn->layers[i];
     jto(layer->input_size) { sb.putf("float n_%i_%i = 0.0;\n", i, j); }
     sb.putf("float n_%i_%i = 1.0;\n", i, layer->input_size);
   }
+  ito(nn->layers[nn->layers.size - 1]->output_size) { sb.putf("output_%i = 0.0;\n", i); }
   ito(nn->layers[0]->input_size) { sb.putf("n_0_%i = input_%i;\n", i, i); }
   int offset = 0;
   ito(nn->layers.size) {
@@ -407,6 +646,9 @@ void build_nn_shader(String_Builder &sb, NN *nn) {
       jto(layer->input_size + 1) {
         sb.putf("n_%i_%i += n_%i_%i * c_%i_%i_%i;\n", i + 1, k, i, j, i, j, k);
       }
+      sb.putf("n_%i_%i = %s(n_%i_%i);\n", i + 1, k, layer->fStr(), i + 1, k);
+      sb.putf("if (exit_layer == %i && exit_point == %i) {output_0 = n_%i_%i; return; }", i, k,
+              i + 1, k);
     }
   }
   {
@@ -416,10 +658,203 @@ void build_nn_shader(String_Builder &sb, NN *nn) {
       jto(layer->input_size + 1) {
         sb.putf("output_%i += n_%i_%i * c_%i_%i_%i;\n", k, i, j, i, j, k);
       }
+      sb.putf("output_%i = %s(output_%i);\n", k, layer->fStr(), k);
     }
   }
-  sb.putf(")\n");
+  sb.putf("}\n");
 }
+
+void render_mesh(Mesh const &mesh, float4x4 const &model, rd::IFactory *factory, rd::Imm_Ctx *ctx) {
+  if (mesh.vertexCount) {
+    ctx->push_state();
+    defer(ctx->pop_state());
+    ctx->VS_set_shader(factory->create_shader_raw(rd::Stage_t::VERTEX, stref_s(R"(
+@(DECLARE_PUSH_CONSTANTS
+  (add_field (type float4x4)  (name world_transform))
+)
+@(DECLARE_UNIFORM_BUFFER
+  (set 0)
+  (binding 0)
+  (add_field (type float4x4)  (name viewproj))
+)
+
+@(DECLARE_INPUT (location 0) (type float3) (name POSITION))
+@(DECLARE_INPUT (location 1) (type float3) (name NORMAL))
+
+@(DECLARE_OUTPUT (location 0) (type float3) (name PIXEL_NORMAL))
+
+@(ENTRY)
+  PIXEL_NORMAL   = NORMAL;
+  @(EXPORT_POSITION mul4(viewproj, mul4(world_transform, float4(POSITION / 16.0 - float3_splat(1.0), 1.0))));
+@(END)
+)"),
+                                                  NULL, 0));
+
+    ctx->PS_set_shader(factory->create_shader_raw(rd::Stage_t::PIXEL, stref_s(R"(
+@(DECLARE_INPUT (location 0) (type float3) (name PIXEL_NORMAL))
+
+@(DECLARE_RENDER_TARGET  (location 0))
+@(ENTRY)
+  @(EXPORT_COLOR 0 abs(float4(PIXEL_NORMAL, 1.0)));
+@(END)
+)"),
+                                                  NULL, 0));
+    {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.mem_bits         = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.usage_bits       = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
+      buf_info.size             = sizeof(float3) * mesh.vertexCount;
+      Resource_ID vertex_buffer = factory->create_buffer(buf_info);
+      factory->release_resource(vertex_buffer);
+      {
+        float3 *vertices = (float3 *)factory->map_buffer(vertex_buffer);
+        memcpy(vertices, mesh.vertices, sizeof(float3) * mesh.vertexCount);
+        factory->unmap_buffer(vertex_buffer);
+      }
+      ctx->IA_set_vertex_buffer(0, vertex_buffer, 0, 12, rd::Input_Rate::VERTEX);
+    }
+    {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.mem_bits         = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.usage_bits       = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
+      buf_info.size             = sizeof(float3) * mesh.vertexCount;
+      Resource_ID vertex_buffer = factory->create_buffer(buf_info);
+      factory->release_resource(vertex_buffer);
+      {
+        float3 *vertices = (float3 *)factory->map_buffer(vertex_buffer);
+        memcpy(vertices, mesh.normals, sizeof(float3) * mesh.vertexCount);
+        factory->unmap_buffer(vertex_buffer);
+      }
+      ctx->IA_set_vertex_buffer(1, vertex_buffer, 0, 12, rd::Input_Rate::VERTEX);
+    }
+    {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.mem_bits        = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.usage_bits      = (u32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER;
+      buf_info.size            = mesh.faceCount * 3 * sizeof(u32);
+      Resource_ID index_buffer = factory->create_buffer(buf_info);
+      factory->release_resource(index_buffer);
+      {
+        u32 *indices = (u32 *)factory->map_buffer(index_buffer);
+        memcpy(indices, mesh.faces, mesh.faceCount * 3 * sizeof(u32));
+        factory->unmap_buffer(index_buffer);
+      }
+      ctx->IA_set_index_buffer(index_buffer, 0, rd::Index_t::UINT32);
+    }
+    {
+      rd::Attribute_Info info;
+      MEMZERO(info);
+      info.binding  = 0;
+      info.format   = rd::Format::RGB32_FLOAT;
+      info.location = 0;
+      info.offset   = 0;
+      info.type     = rd::Attriute_t::POSITION;
+      ctx->IA_set_attribute(info);
+    }
+    {
+      rd::Attribute_Info info;
+      MEMZERO(info);
+      info.binding  = 1;
+      info.format   = rd::Format::RGB32_FLOAT;
+      info.location = 1;
+      info.offset   = 0;
+      info.type     = rd::Attriute_t::NORMAL;
+      ctx->IA_set_attribute(info);
+    }
+    rd::RS_State rs_state;
+    MEMZERO(rs_state);
+    rs_state.polygon_mode = rd::Polygon_Mode::FILL;
+    rs_state.front_face   = rd::Front_Face::CW;
+    rs_state.cull_mode    = rd::Cull_Mode::NONE;
+    ctx->RS_set_state(rs_state);
+    struct PC {
+      float4x4 world_transform;
+    } pc;
+    struct Uniform {
+      afloat4x4 viewproj;
+    };
+    {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.mem_bits          = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.usage_bits        = (u32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER;
+      buf_info.size              = sizeof(Uniform);
+      Resource_ID uniform_buffer = factory->create_buffer(buf_info);
+      factory->release_resource(uniform_buffer);
+      Uniform *ptr  = (Uniform *)factory->map_buffer(uniform_buffer);
+      ptr->viewproj = gizmo_layer->get_camera().viewproj();
+      factory->unmap_buffer(uniform_buffer);
+      ctx->bind_uniform_buffer(0, 0, uniform_buffer, 0, sizeof(Uniform));
+    }
+
+    // ito(nn->layers.size) {
+    // BaseNNLayer *layer = nn->layers[i];
+    // jto(layer->output_size) {
+    // u32 i              = 0;
+    // u32 j              = 0;
+    pc.world_transform = model;
+    /*    pc.g_exit_layer    = i;
+        pc.g_exit_point    = j;*/
+    ctx->push_constants(&pc, 0, sizeof(pc));
+    // gizmo_layer->render_linebox(
+    ctx->draw_indexed(mesh.faceCount * 3, 1, 0, 0, 0);
+    //}
+    //}
+  }
+}
+
+void render_layers(NN *_nn, rd::IFactory *factory, rd::Imm_Ctx *ctx) {
+  int num_meshes = 0;
+  jto(nn->layers.size) {
+    kto(nn->layers[j]->getOutputSize()) { num_meshes++; }
+  }
+  std::atomic<i32> cnt;
+  Mesh *           meshes = new Mesh[num_meshes];
+  defer(delete[] meshes);
+  jto(nn->layers.size) {
+    kto(nn->layers[j]->getOutputSize()) {
+      NN *nn = _nn->clone();
+      defer(nn->release());
+      constexpr int N = 32;
+      float *       f = new float[N * N * N];
+      defer(delete[] f);
+      zto(N) {
+        yto(N) {
+          xto(N) {
+            float _x = (float(x) / (N - 1)) * 2.0f - 1.0f;
+            float _y = (float(y) / (N - 1)) * 2.0f - 1.0f;
+            float _z = (float(z) / (N - 1)) * 2.0f - 1.0f;
+            float res;
+            float in[] = {_x, _y, _z};
+            nn->eval(in, &res);
+            float c                  = nn->layers[j]->getOutput(k);
+            f[z * N * N + y * N + x] = c;
+          }
+        }
+      }
+      Mesh mesh      = march(f, N, N, N, 0.0f);
+      mesh.offset[0] = 2.2f * (j + 1);
+      mesh.offset[1] = 2.2f * (k + 0);
+      mesh.offset[2] = 0.0f;
+      meshes[cnt++]  = mesh;
+    }
+  }
+  ito(num_meshes) {
+    Mesh &mesh = meshes[i];
+    defer({
+      delete[] mesh.vertices;
+      delete[] mesh.faces;
+    });
+    render_mesh(mesh, translate(float4x4(1.0f), float3(mesh.offset[0], mesh.offset[1], 0.0f)),
+                factory, ctx);
+  }
+  // translate(float4x4(1.0f), float3(2.2f * (layer + 1), 2.2f * output, 0.0f))
+}
+
+void __test_thread(u32 id) { printf("thread %i is launched\n", id); }
 
 class GBufferPass {
   public:
@@ -564,37 +999,87 @@ class GBufferPass {
           }
         }
       });
-      {
+      /*if (0) {
+        static int id = 1;
+        ito(1000) {
+          Thread_Job job;
+          job.job = __test_thread;
+          job.id  = id;
+          thread_pool.queue.enqueue(id, &job, 1);
+          id++;
+        }
+        thread_pool.wait();
+      }*/
+      if (0) {
+        render_layers(nn, factory, ctx);
+      }
+      if (g_config.get_bool("render SDF")) {
         ctx->push_state();
         defer(ctx->pop_state());
         ctx->VS_set_shader(factory->create_shader_raw(rd::Stage_t::VERTEX, stref_s(R"(
 @(DECLARE_PUSH_CONSTANTS
-  (add_field (type float4x4)  (name viewproj))
   (add_field (type float4x4)  (name world_transform))
+  (add_field (type int)  (name g_exit_layer))
+  (add_field (type int)  (name g_exit_point))
 )
-
-@(DECLARE_INPUT (location 0) (type float3) (name POSITION))
-
-@(DECLARE_OUTPUT (location 0) (type float3) (name PIXEL_POSITION))
-
-@(ENTRY)
-  PIXEL_POSITION   = mul4(world_transform, float4(POSITION, 1.0)).xyz;
-  @(EXPORT_POSITION mul4(viewproj, mul4(world_transform, float4(POSITION, 1.0))));
-@(END)
-)"),
-                                                      NULL, 0));
-        ctx->PS_set_shader(factory->create_shader_raw(rd::Stage_t::PIXEL, stref_s(R"(
 @(DECLARE_UNIFORM_BUFFER
   (set 0)
   (binding 0)
+  (add_field (type float4x4)  (name viewproj))
   (add_field (type float3) (name camera_pos))
   (add_field (type float3) (name camera_look))
   (add_field (type float3) (name camera_up))
   (add_field (type float3) (name camera_right))
 )
 
-@(DECLARE_INPUT (location 0) (type float3) (name PIXEL_POSITION))
+@(DECLARE_INPUT (location 0) (type float3) (name POSITION))
 
+@(DECLARE_OUTPUT (location 0) (type float3) (name PIXEL_WORLD_POSITION))
+@(DECLARE_OUTPUT (location 1) (type float3) (name PIXEL_OBJECT_POSITION))
+
+@(ENTRY)
+  PIXEL_WORLD_POSITION   = mul4(world_transform, float4(POSITION, 1.0)).xyz;
+  PIXEL_OBJECT_POSITION   = POSITION;
+  @(EXPORT_POSITION mul4(viewproj, mul4(world_transform, float4(POSITION, 1.0))));
+@(END)
+)"),
+                                                      NULL, 0));
+        String_Builder sb;
+        sb.init();
+        defer(sb.release());
+        sb.putf(R"(
+@(DECLARE_BUFFER
+  (type READ_ONLY)
+  (set 0)
+  (binding 1)
+  (type float)
+  (name params)
+)
+
+float relu(float x) {
+  return x < 0.0 ? 0.0 : x;
+}
+)");
+        build_nn_shader(sb, nn);
+
+        sb.putf(R"(
+@(DECLARE_PUSH_CONSTANTS
+  (add_field (type float4x4)  (name world_transform))
+  (add_field (type int)  (name g_exit_layer))
+  (add_field (type int)  (name g_exit_point))
+)
+@(DECLARE_UNIFORM_BUFFER
+  (set 0)
+  (binding 0)
+  (add_field (type float4x4)  (name viewproj))
+  (add_field (type float3) (name camera_pos))
+  (add_field (type float3) (name camera_look))
+  (add_field (type float3) (name camera_up))
+  (add_field (type float3) (name camera_right))
+)
+
+@(DECLARE_INPUT (location 0) (type float3) (name PIXEL_WORLD_POSITION))
+@(DECLARE_INPUT (location 1) (type float3) (name PIXEL_OBJECT_POSITION))
 
 float dot2( in float2 v ) { return dot(v,v); }
 float dot2( in float3 v ) { return dot(v,v); }
@@ -618,91 +1103,13 @@ struct Ray {
 struct Collision {
     float  t;
     float3 pos;
-    float3 normal;
+    float dist;
+    //float3 normal;
 };
 
-float sdRoundBox( float3 p, float3 b, float r )
-{
-  float3 q = abs(p) - b;
-  return length(max(q,0.0)) + min(max(q.x,max(q.y,q.z)),0.0) - r;
-}
-
-float sdRoundCone( float3 p, float r1, float r2, float h )
-{
-  float2 q = float2( length(p.xz), p.y );
-    
-  float b = (r1-r2)/h;
-  float a = sqrt(1.0-b*b);
-  float k = dot(q,float2(-b,a));
-    
-  if( k < 0.0 ) return length(q) - r1;
-  if( k > a*h ) return length(q-float2(0.0,h)) - r2;
-        
-  return dot(q, float2(a,b) ) - r1;
-}
-
-float opSmoothUnion( float d1, float d2, float k ) {
-    float h = clamp( 0.5 + 0.5*(d2-d1)/k, 0.0, 1.0 );
-    return lerp( d2, d1, h ) - k*h*(1.0-h); }
-
-float opU( float d1, float d2 )
-{
-	return opSmoothUnion(d1, d2, 0.1);
-}
-
-float sdHexTower( float3 p, float2 h )
-{
-  const float3 k = float3(-0.8660254, 0.5, 0.57735);
-  p = abs(p);
-  p.xy -= 2.0*min(dot(k.xy, p.xy), 0.0)*k.xy;
-  float2 d = float2(
-       length(p.xy-float2(clamp(p.x,-k.z*h.x,k.z*h.x), h.x))*sign(p.y-h.x),
-       p.z-h.y );
-  return min(max(d.x,d.y),0.0) + length(max(d,0.0)) - 0.2;
-}
-
-float sdHexWheel( float3 p, float2 h )
-{
-  p = p.xzy;
-  const float3 k = float3(-0.8660254, 0.5, 0.57735);
-  p = abs(p);
-  p.xy -= 2.0*min(dot(k.xy, p.xy), 0.0)*k.xy;
-  float2 d = float2(
-       length(p.xy-float2(clamp(p.x,-k.z*h.x,k.z*h.x), h.x))*sign(p.y-h.x),
-       p.z-h.y );
-  return min(max(d.x,d.y),0.0) + length(max(d,0.0)) - 0.2;
-}
-
-float3 rotateZ(float3 p, float phi) {
-    float cosphi = sin(phi);
-    float sinphi = cos(phi);
-    return float3(
-        p.x * cosphi  + p.y * sinphi,
-        -p.x * sinphi + p.y * cosphi,
-        p.z
-    );
-}
-
-float3 rotateX(float3 p, float phi) {
-    float cosphi = sin(phi);
-    float sinphi = cos(phi);
-    return float3(
-        p.x * cosphi  + p.z * sinphi,
-        p.y,
-         -p.x * sinphi + p.z * cosphi
-    );
-}
-
 float eval_sdf(float3 ro) {
-    float res = 1.0e20;
-    float iTime = 0.0;
-    res = opU(res, sdRoundBox(ro - float3(0.0, 0.0, 0.0), float3(2.0, 1.0, 0.2), 0.2));
-    res = opU(res, sdHexTower(rotateZ(ro - float3(0.0, 0.0, 0.8), iTime), float2(0.8, 0.2)));
-    res = opU(res, sdHexWheel(rotateX(ro - float3(1.5, 1.5, -0.5), iTime), float2(0.2, 0.2)));
-    res = opU(res, sdHexWheel(rotateX(ro - float3(-1.5, 1.5, -0.5), iTime), float2(0.2, 0.2)));
-    res = opU(res, sdHexWheel(rotateX(ro - float3(-1.5, -1.5, -0.5), iTime), float2(0.2, 0.2)));
-    res = opU(res, sdHexWheel(rotateX(ro - float3(1.5,-1.5, -0.5), iTime), float2(0.2, 0.2)));
-    res = opU(res, sdRoundCone(rotateZ(ro - float3(0.0, 0.0, 0.8), iTime), 0.1, 0.2, 2.0));
+    float res = 0;
+    eval_sdf(ro.x, ro.y, ro.z, res, g_exit_layer, g_exit_point);
     return res;
 }
 
@@ -719,17 +1126,18 @@ Collision scene(
     float3 rd) {
     Collision col;
     col.t = 99999.0;
-    const uint MAX_ITER = 64u;
+    const uint MAX_ITER = 32u;
     float tmin = 1.0e-2;
-    float tmax = 1000.0;
+    float tmax = 8.0;
     float t = tmin;
     for (uint i = 0u; i < MAX_ITER; i++) {
         float3 p = ro + rd * t;
         float d = eval_sdf(p);
-        if (d < 1.0e-2) {
+        col.dist = d;
+        if (d < 1.0e-3) {
             col.t = t;
             col.pos = p;
-            col.normal = eval_normal(p);
+            //col.normal = eval_normal(p);
             break;
         }
         t += d;
@@ -748,19 +1156,24 @@ Collision scene(
   // cam.up    = camera_up;
   // cam.right = camera_right;
   Ray r;
-  r.o = camera_pos;
-  r.d = normalize(PIXEL_POSITION - camera_pos);
+  r.o = PIXEL_OBJECT_POSITION;
+  r.d = normalize(PIXEL_WORLD_POSITION - camera_pos);
   Collision col = scene(r.o, r.d);
   if (col.t > 1000.0)
       discard;
     
   float4 color = float4(
-          0.5 + 0.5 * col.normal,
+          float3(abs(col.pos)),
           1.0);
+  //float res;
+  //eval_sdf( PIXEL_OBJECT_POSITION.x,
+  //          PIXEL_OBJECT_POSITION.y,
+  //          PIXEL_OBJECT_POSITION.z, res, g_exit_layer, g_exit_point);
+  //float4 color = float4(abs(res));
   @(EXPORT_COLOR 0 color);
 @(END)
-)"),
-                                                      NULL, 0));
+)");
+        ctx->PS_set_shader(factory->create_shader_raw(rd::Stage_t::PIXEL, sb.get_str(), NULL, 0));
         {
           rd::Buffer_Create_Info buf_info;
           MEMZERO(buf_info);
@@ -819,17 +1232,16 @@ Collision scene(
         rs_state.cull_mode    = rd::Cull_Mode::NONE;
         ctx->RS_set_state(rs_state);
         struct PC {
-          float4x4 viewproj;
           float4x4 world_transform;
+          i32      g_exit_layer;
+          i32      g_exit_point;
         } pc;
-        pc.viewproj        = gizmo_layer->get_camera().viewproj();
-        pc.world_transform = float4x4(1.0f);
-        ctx->push_constants(&pc, 0, sizeof(pc));
         struct Uniform {
-          float3 camera_pos;
-          float3 camera_look;
-          float3 camera_up;
-          float3 camera_right;
+          afloat4x4 viewproj;
+          afloat3   camera_pos;
+          afloat3   camera_look;
+          afloat3   camera_up;
+          afloat3   camera_right;
         };
         {
           rd::Buffer_Create_Info buf_info;
@@ -844,12 +1256,64 @@ Collision scene(
           ptr->camera_look  = gizmo_layer->get_camera().look;
           ptr->camera_up    = gizmo_layer->get_camera().up;
           ptr->camera_right = gizmo_layer->get_camera().right;
+          ptr->viewproj     = gizmo_layer->get_camera().viewproj();
           factory->unmap_buffer(uniform_buffer);
           ctx->bind_uniform_buffer(0, 0, uniform_buffer, 0, sizeof(Uniform));
         }
-        ctx->draw_indexed(36, 1, 0, 0, 0);
+        {
+          int size = 0;
+          ito(nn->layers.size) {
+            auto layer = nn->layers[i];
+            jto(layer->input_size + 1) {
+              kto(layer->output_size) { size++; }
+            }
+          }
+          rd::Buffer_Create_Info buf_info;
+          MEMZERO(buf_info);
+          buf_info.mem_bits         = (u32)rd::Memory_Bits::HOST_VISIBLE;
+          buf_info.usage_bits       = (u32)rd::Buffer_Usage_Bits::USAGE_UAV;
+          buf_info.size             = size * sizeof(float);
+          Resource_ID params_buffer = factory->create_buffer(buf_info);
+          factory->release_resource(params_buffer);
+          float *ptr = (float *)factory->map_buffer(params_buffer);
+          ito(nn->layers.size) {
+            auto layer = nn->layers[i];
+            jto(layer->input_size + 1) {
+              kto(layer->output_size) {
+                ptr[0] = layer->coefficients[layer->row_size * k + j];
+                ptr++;
+              }
+            }
+          }
+          factory->unmap_buffer(params_buffer);
+          ctx->bind_storage_buffer(0, 1, params_buffer, 0, sizeof(float) * size);
+        }
+        // ito(nn->layers.size)
+        {
+
+          // BaseNNLayer *layer = nn->layers[i];
+          // jto(layer->output_size)
+          {
+            pc.world_transform =
+                translate(float4x4(1.0f), float3(2.2f * (nn->layers.size + 1), 0.0f, 0.0f));
+            pc.g_exit_layer = -1;
+            pc.g_exit_point = -1;
+            ctx->push_constants(&pc, 0, sizeof(pc));
+            // gizmo_layer->render_linebox(
+            ctx->draw_indexed(36, 1, 0, 0, 0);
+          }
+        }
       }
       auto g_camera = gizmo_layer->get_camera();
+      ito(nn->layers.size) {
+        BaseNNLayer *layer = nn->layers[i];
+        jto(layer->output_size) {
+          float3 world_offset = float4(2.2f * (i + 1), 2.2f * j, 0.0f, 0.0f);
+          gizmo_layer->render_linebox(world_offset - float3(1.0f, 1.0f, 1.0f),
+                                      world_offset + float3(1.0f, 1.0f, 1.0f),
+                                      float3(0.0f, 0.0f, 0.0f));
+        }
+      }
       {
         float dx = 1.0e-1f * g_camera.distance;
         gizmo_layer->draw_sphere(g_camera.look_at, dx * 0.04f, float3{1.0f, 1.0f, 1.0f});
@@ -863,19 +1327,170 @@ Collision scene(
       gizmo_layer->render(factory, ctx);
       factory->end_render_pass(ctx);
     }
+    if (g_config.get_bool("render network")) {
+      auto           ctx = factory->start_compute_pass();
+      String_Builder sb;
+      sb.init();
+      defer(sb.release());
+      sb.putf(R"(
+@(DECLARE_BUFFER
+  (type READ_ONLY)
+  (set 0)
+  (binding 1)
+  (type float)
+  (name params)
+)
+
+float relu(float x) {
+  return x < 0.0 ? 0.0 : x;
+}
+)");
+      build_nn_shader(sb, nn);
+
+      sb.putf(R"(
+@(DECLARE_PUSH_CONSTANTS
+  (add_field (type float4)  (name world_offset))
+  (add_field (type float4)  (name scale))
+  (add_field (type int)     (name g_exit_layer))
+  (add_field (type int)     (name g_exit_point))
+)
+
+@(DECLARE_UNIFORM_BUFFER
+  (set 0)
+  (binding 0)
+  (add_field (type float4x4)  (name viewproj))
+  (add_field (type float3)    (name camera_pos))
+  (add_field (type float3)    (name camera_look))
+  (add_field (type float3)    (name camera_up))
+  (add_field (type float3)    (name camera_right))
+)
+
+@(DECLARE_IMAGE
+  (type WRITE_ONLY)
+  (dim 2D)
+  (set 0)
+  (binding 2)
+  (format RGBA32_FLOAT)
+  (name out_image)
+)
+
+@(GROUP_SIZE 8 8 8)
+@(ENTRY)
+  int2 dim = imageSize(out_image);
+  //if (GLOBAL_THREAD_INDEX.x > dim.x || GLOBAL_THREAD_INDEX.y > dim.y)
+  //  return;
+  float res = 0;
+  float3 ro = float3(GLOBAL_THREAD_INDEX.xyz) * scale.xyz - float3_splat(1.0);
+  eval_sdf(ro.x, ro.y, ro.z, res, g_exit_layer, g_exit_point);
+  if (res > 0.0 && res < 1.0e-2) {
+    int N    = 1;
+/*float3 dr = 1.0 * scale.xyz / float(N * 2 + 1); 
+for (int x = -N; x <= N; x++) {
+for (int y = -N; y <= N; y++) {
+for (int z = -N; z <= N; z++) {
+ro = float3(x, y, z) * dr + float3(GLOBAL_THREAD_INDEX.xyz) * scale.xyz - float3_splat(1.0);
+eval_sdf(ro.x, ro.y, ro.z, res, g_exit_layer, g_exit_point);
+if (abs(res) > 1.0e-4)
+continue;*/
+          float4 pp = mul4(viewproj, float4(ro + world_offset.xyz, 1.0));
+          pp.xyz /= pp.w;
+          if (pp.x > 1.0 || pp.x < -1.0 || pp.y > 1.0 || pp.y < -1.0)
+            return;
+          i32 x = i32(0.5 + dim.x * (pp.x + 1.0) / 2.0);
+          i32 y = i32(0.5 + dim.y * (pp.y + 1.0) / 2.0);
+          for (int ix = x - 1; ix <= x + 1; ix++)
+          for (int iy = y - 1; iy <= y + 1; iy++)
+          image_store(out_image, int2(ix, iy), float4(0.0, 0.0, 0.0, 1.0));
+/*
+}
+}
+}
+*/
+    
+  }
+@(END)
+)");
+      ctx->CS_set_shader(factory->create_shader_raw(rd::Stage_t::COMPUTE, sb.get_str(), NULL, 0));
+      struct PC {
+        float4 world_offset;
+        float4 scale;
+        i32    g_exit_layer;
+        i32    g_exit_point;
+      } pc;
+      struct Uniform {
+        afloat4x4 viewproj;
+        afloat3   camera_pos;
+        afloat3   camera_look;
+        afloat3   camera_up;
+        afloat3   camera_right;
+      };
+      {
+        rd::Buffer_Create_Info buf_info;
+        MEMZERO(buf_info);
+        buf_info.mem_bits          = (u32)rd::Memory_Bits::HOST_VISIBLE;
+        buf_info.usage_bits        = (u32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER;
+        buf_info.size              = sizeof(Uniform);
+        Resource_ID uniform_buffer = factory->create_buffer(buf_info);
+        factory->release_resource(uniform_buffer);
+        Uniform *ptr      = (Uniform *)factory->map_buffer(uniform_buffer);
+        ptr->camera_pos   = gizmo_layer->get_camera().pos;
+        ptr->camera_look  = gizmo_layer->get_camera().look;
+        ptr->camera_up    = gizmo_layer->get_camera().up;
+        ptr->camera_right = gizmo_layer->get_camera().right;
+        ptr->viewproj     = gizmo_layer->get_camera().viewproj();
+        factory->unmap_buffer(uniform_buffer);
+        ctx->bind_uniform_buffer(0, 0, uniform_buffer, 0, sizeof(Uniform));
+      }
+
+      int size = 0;
+      ito(nn->layers.size) {
+        auto layer = nn->layers[i];
+        jto(layer->input_size + 1) {
+          kto(layer->output_size) { size++; }
+        }
+      }
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.mem_bits         = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.usage_bits       = (u32)rd::Buffer_Usage_Bits::USAGE_UAV;
+      buf_info.size             = size * sizeof(float);
+      Resource_ID params_buffer = factory->create_buffer(buf_info);
+      factory->release_resource(params_buffer);
+      float *ptr = (float *)factory->map_buffer(params_buffer);
+      ito(nn->layers.size) {
+        auto layer = nn->layers[i];
+        jto(layer->input_size + 1) {
+          kto(layer->output_size) {
+            ptr[0] = layer->coefficients[layer->row_size * k + j];
+            ptr++;
+          }
+        }
+      }
+      factory->unmap_buffer(params_buffer);
+      ctx->bind_storage_buffer(0, 1, params_buffer, 0, sizeof(float) * size);
+      ctx->image_barrier(normal_rt, (u32)rd::Access_Bits::SHADER_WRITE,
+                         rd::Image_Layout::SHADER_READ_WRITE_OPTIMAL);
+      ctx->bind_rw_image(0, 2, 0, normal_rt, rd::Image_Subresource::top_level(),
+                         rd::Format::NATIVE);
+      ito(nn->layers.size) {
+        BaseNNLayer *layer = nn->layers[i];
+        jto(layer->output_size) {
+          pc.world_offset = float4(2.2f * (i + 1), 2.2f * j, 0.0f, 0.0f);
+          pc.scale        = float4(1.0f, 1.0f, 1.0f, 0.0f) / 16.0f;
+          pc.g_exit_layer = i;
+          pc.g_exit_point = j;
+          ctx->push_constants(&pc, 0, sizeof(pc));
+          ctx->dispatch(4, 4, 4);
+        }
+      }
+      factory->end_compute_pass(ctx);
+    }
   }
   void release(rd::IFactory *factory) { factory->release_resource(normal_rt); }
 };
 
 class Event_Consumer : public IGUI_Pass {
   GBufferPass gbuffer_pass;
-  NN *        nn = NULL;
-  struct TestData {
-    float x, y, z;
-    float dist;
-  };
-  int             N = 10000;
-  Array<TestData> td;
 
   public:
   void init(rd::Pass_Mng *pmng) override { //
@@ -993,11 +1608,12 @@ class Event_Consumer : public IGUI_Pass {
 // ImGui::LabelText("pre  pass", "%f ms", hr.prepass_timestamp.duration);
 // ImGui::LabelText("resolve pass", "%f ms", hr.resolve_timestamp.duration);
 #if 1
-    if (0) {
+    if (1) {
       static PCG pcg;
 
       static float rate             = 0.03f;
       static float regrate          = 0.00f;
+      static float regrate2         = 0.00f;
       static int   inters_per_frame = 1000;
       float        res;
 
@@ -1006,10 +1622,12 @@ class Event_Consumer : public IGUI_Pass {
         nn->eval(&td[iter].x, &res);
         float error = (td[iter].dist - res);
         nn->solve(&error, rate / 10.0f);
-        nn->regulateL1(regrate / 10.0f);
+        nn->regulateL1(regrate / 1000.0f);
+        nn->regulateL2(regrate2 / 1000.0f);
       }
       ImGui::DragFloat("learning rate", &rate, 1.0e-3f);
-      ImGui::DragFloat("reg rate", &regrate, 1.0e-3f);
+      ImGui::DragFloat("reg rate L1", &regrate, 1.0e-3f);
+      ImGui::DragFloat("reg rate L2", &regrate2, 1.0e-3f);
 
       // ImGui::DragFloat("error", &error);
       ImGui::DragInt("iters per frame", &inters_per_frame);
@@ -1042,32 +1660,30 @@ class Event_Consumer : public IGUI_Pass {
  (add u32  g_buffer_width 512 (min 4) (max 1024))
  (add u32  g_buffer_height 512 (min 4) (max 1024))
  (add bool forward 1)
+ (add bool "render SDF" 1)
+ (add bool "render network" 1)
  (add bool "depth test" 1)
  (add f32  strand_size 1.0 (min 0.1) (max 16.0))
 )
 )"));
 
-    g_scene->load_mesh(stref_s("mesh"), stref_s("models/human_bust_sculpt/torus.gltf"));
+    g_scene->load_mesh(stref_s("mesh"), stref_s("models/human_bust_sculpt/cube.gltf"));
 
     gbuffer_pass.init();
 
     List *l = List::parse(stref_s(R"(
-  (layer 3 4 Tanh)
-  (layer 4 8 Tanh)
-  (layer 8 8 Tanh)
-  (layer 8 8 Tanh)
-  (layer 8 8 Tanh)
-  (layer 8 8 Tanh)
-  (layer 8 4 Tanh)
-  (layer 4 1 Tanh)
+  (layer 3 8 ReLu)
+  (layer 8 8 ReLu)
+  (layer 8 8 ReLu)
+  (layer 8 8 ReLu)
+  (layer 8 8 ReLu)
+  (layer 8 8 ReLu)
+  (layer 8 1 Tanh)
   )"),
                           Tmp_List_Allocator{});
     ASSERT_ALWAYS(l);
     nn = NN::create(l);
-    String_Builder sb;
-    sb.init();
-    defer(sb.release());
-    build_nn_shader(sb, nn);
+
     td.init(N);
     // defer(td.release());
     PCG            pcg;
@@ -1076,7 +1692,8 @@ class Event_Consumer : public IGUI_Pass {
     // assert(img);
     // defer(img->release());
     g_scene->update();
-    if (0) {
+    // thread_pool.init_thread_pool();
+    if (1) {
       g_scene->traverse([&](Node *node) {
         if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
           if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
@@ -1093,12 +1710,23 @@ class Event_Consumer : public IGUI_Pass {
               kto(mn->getSurface(i)->mesh.num_indices / 3) {
 
                 Triangle_Full ftri = mn->getSurface(i)->mesh.fetch_triangle(k);
-                int           N    = 128;
+                int           N    = 1 << 10;
 
-                float3 v = ftri.v0.position;
-                v        = transform(t, v);
+                float3 v0 = ftri.v0.position;
+                float3 v1 = ftri.v1.position;
+                float3 v2 = ftri.v2.position;
+
                 jto(N) {
-                  float3   p = v + rf.rand_sphere_center() * size;
+                  float t0 = pcg.nextf();
+                  float t1 = pcg.nextf();
+                  if (t1 > 1.0 - t0) {
+                    t1 = 1.0 - t1;
+                    t0 = 1.0 - t0;
+                  }
+                  float  t2  = 1.0f - t0 - t1;
+                  float3 v   = v0 * t0 + v1 * t1 + v2 * t2;
+                  v          = transform(t, v);
+                  float3   p = v + rf.rand_sphere_center() * size / 1.0f;
                   TestData item;
                   item.x    = p.x;
                   item.y    = p.y;
@@ -1141,6 +1769,7 @@ class Event_Consumer : public IGUI_Pass {
     // defer(nn->release());
   }
   void on_release(rd::IFactory *factory) override { //
+    // thread_pool.release();
     FILE *scene_dump = fopen("scene_state", "wb");
     fprintf(scene_dump, "(\n");
     defer(fclose(scene_dump));
@@ -1169,29 +1798,35 @@ class Event_Consumer : public IGUI_Pass {
         }
       }
     });
-    if (0) {
+    if (1) {
       float stride = 2.2;
       ito(td.size) {
         gizmo_layer->draw_sphere(float3{td[i].x, td[i].y, td[i].z}, 0.01f,
                                  float3{td[i].dist, 0.0f, -td[i].dist});
       }
       float3 offset = float3(stride, 0.0f, 0.0f);
-      zto(33) {
-        yto(33) {
-          xto(33) {
-            float _x = (float(x) / 32.0) * 2.0f - 1.0f;
-            float _y = (float(y) / 32.0) * 2.0f - 1.0f;
-            float _z = (float(z) / 32.0) * 2.0f - 1.0f;
-            float res;
-            float in[] = {_x, _y, _z};
-            nn->eval(in, &res);
-            float EPS = 2.0e-2;
-            jto(nn->layers.size) {
-              kto(nn->layers[j]->getOutputSize()) {
-                float c = nn->layers[j]->getOutput(k);
-                if (abs(c) < EPS)
-                  gizmo_layer->draw_sphere(offset + float3{_x + stride * j, _y + stride * k, _z},
-                                           0.04f, float3{c, 0.0f, -c});
+      if (0) {
+        zto(33) {
+          yto(33) {
+            xto(33) {
+              float _x = (float(x) / 32.0) * 2.0f - 1.0f;
+              float _y = (float(y) / 32.0) * 2.0f - 1.0f;
+              float _z = (float(z) / 32.0) * 2.0f - 1.0f;
+              float res;
+              float in[] = {_x, _y, _z};
+              nn->eval(in, &res);
+              float EPS = 2.0e-2;
+              // jto(nn->layers.size)
+              {
+                u32 j = nn->layers.size - 1;
+                // kto(nn->layers[j]->getOutputSize())
+                {
+                  u32   k = nn->layers[j]->getOutputSize() - 1;
+                  float c = nn->layers[j]->getOutput(k);
+                  if (abs(c) < EPS)
+                    gizmo_layer->draw_sphere(offset + float3{_x + stride * j, _y + stride * k, _z},
+                                             0.04f, float3{c, 0.0f, -c});
+                }
               }
             }
           }
