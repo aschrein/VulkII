@@ -134,10 +134,33 @@ class Random_Factory {
   }
 
   float3 rand_sphere_center() {
-    float r     = rand_unit_float();
-    float phi   = rand_unit_float() * PI * 2.0f;
-    float theta = rand_unit_float() * PI;
-    return r * polar_to_cartesian(sin(theta), cos(theta), sin(phi), cos(phi));
+    vec2   rand     = vec2(rand_unit_float(), rand_unit_float());
+    float  cosTheta = rand.x * 2.0f - 1.0f;
+    float  sinTheta = std::sqrt(1.0f - cosTheta * cosTheta);
+    float  phi      = rand.y * PI * 2.0f;
+    float3 samplev  = polar_to_cartesian(sinTheta, cosTheta, sin(phi), cos(phi));
+    float  r        = rand_unit_float();
+    return r * samplev;
+  }
+
+  float3 rand_sphere_center_r2() {
+    vec2   rand     = vec2(rand_unit_float(), rand_unit_float());
+    float  cosTheta = rand.x * 2.0f - 1.0f;
+    float  sinTheta = std::sqrt(1.0f - cosTheta * cosTheta);
+    float  phi      = rand.y * PI * 2.0f;
+    float3 samplev  = polar_to_cartesian(sinTheta, cosTheta, sin(phi), cos(phi));
+    float  r        = rand_unit_float();
+    return r * r * samplev;
+  }
+
+  float3 rand_sphere_center_r3() {
+    vec2   rand     = vec2(rand_unit_float(), rand_unit_float());
+    float  cosTheta = rand.x * 2.0f - 1.0f;
+    float  sinTheta = std::sqrt(1.0f - cosTheta * cosTheta);
+    float  phi      = rand.y * PI * 2.0f;
+    float3 samplev  = polar_to_cartesian(sinTheta, cosTheta, sin(phi), cos(phi));
+    float  r        = rand_unit_float();
+    return r * r * r * samplev;
   }
 
   float3 rand_unit_sphere() {

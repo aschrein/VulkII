@@ -563,21 +563,21 @@ Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
   };
   Node *root = load_node(&data->nodes[0]);
   root->update();
-  vec3 max = root->getAABB().max;
-  vec3 min = root->getAABB().min;
+  //vec3 max = root->getAABB().max;
+  //vec3 min = root->getAABB().min;
 
-  vec3 max_dims = max - min;
+  //vec3 max_dims = max - min;
 
-  // Size normalization hack
-  float vk      = 2.0f;
-  float max_dim = MAX3(max_dims.x, max_dims.y, max_dims.z);
-  vk            = 1.0f / max_dim;
-  vec3 avg      = (max + min) / 2.0f;
+  //// Size normalization hack
+  //float vk      = 2.0f;
+  //float max_dim = MAX3(max_dims.x, max_dims.y, max_dims.z);
+  //vk            = 1.0f / max_dim;
+  //vec3 avg      = (max + min) / 2.0f;
 
-  //
+  ////
 
-  root->offset   = -avg * vk;
-  root->rotation = glm::rotate(quat(), PI / 2.0f, float3(0.0f, 0.0f, 1.0f));
-  root->scale    = float3(vk, vk, vk);
+  //root->offset   = -avg * vk;
+  //root->rotation = glm::rotate(quat(), PI / 2.0f, float3(0.0f, 0.0f, 1.0f));
+  //root->scale    = float3(vk, vk, vk);
   return root;
 }

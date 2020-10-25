@@ -1582,6 +1582,10 @@ struct Resource_Array {
       T &item = items[i];
       if (item.is_alive()) ((Parent_t *)this)->release_item(item);
     }
+    ito(limbo_items.size) {
+      T &item = items[limbo_items[i].item_index];
+      ((Parent_t *)this)->release_item(item);
+    }
     items.release();
     free_items.release();
     limbo_items.release();
@@ -1870,6 +1874,7 @@ struct Window {
   }
 
   void release() {
+    vkDeviceWaitIdle(device);
     shader_cache.release();
     pipeline_cache.release();
     compute_pipeline_cache.release();
@@ -1888,6 +1893,7 @@ struct Window {
     semaphores.release();
     ito(mem_chunks.size) mem_chunks[i].release(device);
     mem_chunks.release();
+    ito(sc_image_count) vkDestroyCommandPool(device, cmd_pools[i], NULL);
     vkDeviceWaitIdle(device);
     vkDestroyQueryPool(device, query_pool, NULL);
     ito(sc_image_count) vkDestroySemaphore(device, sc_free_sem[i], NULL);

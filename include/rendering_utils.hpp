@@ -16,6 +16,8 @@
 
 #endif
 
+f32 max3(float3 const &a) { return MAX3(a.x, a.y, a.z); }
+
 static void setup_default_state(rd::Imm_Ctx *ctx, u32 num_rts = 1) {
   rd::Blend_State bs;
   MEMZERO(bs);

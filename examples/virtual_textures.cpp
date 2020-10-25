@@ -647,7 +647,7 @@ void build_nn_shader(String_Builder &sb, NN *nn) {
         sb.putf("n_%i_%i += n_%i_%i * c_%i_%i_%i;\n", i + 1, k, i, j, i, j, k);
       }
       sb.putf("n_%i_%i = %s(n_%i_%i);\n", i + 1, k, layer->fStr(), i + 1, k);
-      sb.putf("if (exit_layer == %i && exit_point == %i) {output_0 = n_%i_%i; return; }", i, k,
+      sb.putf("if (exit_layer == %i && exit_point == %i) {output_0 = n_%i_%i; return; }\n", i, k,
               i + 1, k);
     }
   }
@@ -1662,22 +1662,27 @@ class Event_Consumer : public IGUI_Pass {
  (add bool forward 1)
  (add bool "render SDF" 1)
  (add bool "render network" 1)
+ (add bool "render samples" 1)
  (add bool "depth test" 1)
  (add f32  strand_size 1.0 (min 0.1) (max 16.0))
 )
 )"));
 
-    g_scene->load_mesh(stref_s("mesh"), stref_s("models/human_bust_sculpt/cube.gltf"));
+    // g_scene->load_mesh(stref_s("mesh"), stref_s("models/human_bust_sculpt/monkey.gltf"));
+    g_scene->load_mesh(stref_s("mesh"), stref_s("models/scene.gltf"));
 
     gbuffer_pass.init();
 
     List *l = List::parse(stref_s(R"(
-  (layer 3 8 ReLu)
-  (layer 8 8 ReLu)
-  (layer 8 8 ReLu)
-  (layer 8 8 ReLu)
-  (layer 8 8 ReLu)
-  (layer 8 8 ReLu)
+  (layer 3 8 Tanh)
+  (layer 8 8 Tanh)
+  (layer 8 8 Tanh)
+  (layer 8 8 Tanh)
+  (layer 8 8 Tanh)
+  (layer 8 8 Tanh)
+  (layer 8 8 Tanh)
+  (layer 8 8 Tanh)
+  (layer 8 8 Tanh)
   (layer 8 1 Tanh)
   )"),
                           Tmp_List_Allocator{});
@@ -1700,33 +1705,24 @@ class Event_Consumer : public IGUI_Pass {
             if (mn->getComponent<GfxSufraceComponent>() == NULL) {
               GfxSufraceComponent::create(factory, mn);
             }
-            auto *c    = mn->getComponent<GfxSufraceComponent>();
-            float size = 0.0f;
-            auto  aabb = mn->getAABB();
-            size       = MAX3(abs(aabb.max.x - aabb.min.x), abs(aabb.max.y - aabb.min.y),
+            auto *c       = mn->getComponent<GfxSufraceComponent>();
+            float size    = 0.0f;
+            auto  aabb    = mn->getAABB();
+            size          = MAX3(abs(aabb.max.x - aabb.min.x), abs(aabb.max.y - aabb.min.y),
                         abs(aabb.max.z - aabb.min.z));
-            auto t     = mn->get_transform();
-            ito(mn->getNumSurfaces()) {
-              kto(mn->getSurface(i)->mesh.num_indices / 3) {
-
-                Triangle_Full ftri = mn->getSurface(i)->mesh.fetch_triangle(k);
-                int           N    = 1 << 10;
-
-                float3 v0 = ftri.v0.position;
-                float3 v1 = ftri.v1.position;
-                float3 v2 = ftri.v2.position;
-
-                jto(N) {
-                  float t0 = pcg.nextf();
-                  float t1 = pcg.nextf();
-                  if (t1 > 1.0 - t0) {
-                    t1 = 1.0 - t1;
-                    t0 = 1.0 - t0;
-                  }
-                  float  t2  = 1.0f - t0 - t1;
-                  float3 v   = v0 * t0 + v1 * t1 + v2 * t2;
-                  v          = transform(t, v);
-                  float3   p = v + rf.rand_sphere_center() * size / 1.0f;
+            auto   t      = mn->get_transform();
+            int    N      = 128;
+            float  dx     = (mn->getAABB().max - mn->getAABB().min).x / N;
+            float  dy     = (mn->getAABB().max - mn->getAABB().min).y / N;
+            float  dz     = (mn->getAABB().max - mn->getAABB().min).z / N;
+            float3 origin = mn->getAABB().min;
+            zto(N) {
+              yto(N) {
+                xto(N) {
+                  float    rx = origin.x + dx * x;
+                  float    ry = origin.x + dy * y;
+                  float    rz = origin.x + dz * z;
+                  float3   p(rx, ry, rz);
                   TestData item;
                   item.x    = p.x;
                   item.y    = p.y;
@@ -1736,6 +1732,41 @@ class Event_Consumer : public IGUI_Pass {
                 }
               }
             }
+            // ito(mn->getNumSurfaces()) {
+            //  if (mn->getSurface(i)->mesh.num_indices < 3) continue;
+            //  int N = (1 << 17) / (mn->getSurface(i)->mesh.num_indices / 3);
+            //  if (N < 1) {
+            //    abort();
+            //  }
+            //  kto(mn->getSurface(i)->mesh.num_indices / 3) {
+
+            //    Triangle_Full ftri = mn->getSurface(i)->mesh.fetch_triangle(k);
+
+            //    float3 v0 = ftri.v0.position;
+            //    float3 v1 = ftri.v1.position;
+            //    float3 v2 = ftri.v2.position;
+
+            //    jto(N) {
+            //      float t0 = pcg.nextf();
+            //      float t1 = pcg.nextf();
+            //      if (t1 > 1.0 - t0) {
+            //        t1 = 1.0 - t1;
+            //        t0 = 1.0 - t0;
+            //      }
+            //      float  t2  = 1.0f - t0 - t1;
+            //      float3 v   = v0 * t0 + v1 * t1 + v2 * t2;
+            //      v          = transform(t, v);
+            //      float3   p = v + rf.rand_sphere_center_r3() * size / 1.0f;
+            //      TestData item;
+            //      item.x    = p.x;
+            //      item.y    = p.y;
+            //      item.z    = p.z;
+            //      item.dist = c->getBVH()->distance(p);
+            //      td.push(item);
+            //    }
+            //  }
+
+            //}
           }
         }
       });
@@ -1798,10 +1829,10 @@ class Event_Consumer : public IGUI_Pass {
         }
       }
     });
-    if (1) {
+    if (g_config.get_bool("render samples")) {
       float stride = 2.2;
       ito(td.size) {
-        gizmo_layer->draw_sphere(float3{td[i].x, td[i].y, td[i].z}, 0.01f,
+        gizmo_layer->draw_sphere(float3{td[i].x, td[i].y, td[i].z}, 0.002f,
                                  float3{td[i].dist, 0.0f, -td[i].dist});
       }
       float3 offset = float3(stride, 0.0f, 0.0f);
