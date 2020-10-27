@@ -1,0 +1,8 @@
+commit 284d84ecf7faaffef5a5afd9cd6207edc5a63779
+Merge: f90424da d3f1a9b5
+Author: Yann Collet <Cyan4973@users.noreply.github.com>
+Date:   Mon Oct 26 15:16:04 2020 -0700
+
+    Merge pull request #2370 from facebook/libzstd_autoconf
+    
+    Automatic configuration detection
