@@ -2210,33 +2210,38 @@ class GfxSufraceComponent : public Node::Component {
     ASSERT_DEBUG(n->isa<MeshNode>());
     GfxSufraceComponent *s  = new GfxSufraceComponent(n);
     MeshNode *           mn = n->dyn_cast<MeshNode>();
-    s->bvh                  = new BVH<Tri>;
-    AutoArray<Tri> tri_pool;
     ito(mn->getNumSurfaces()) {
       s->gfx_surfaces.push(GfxSurface::create(factory, mn->getSurface(i)));
+    }
+    n->addComponent(s);
+    return s;
+  }
+  void buildBVH() {
+    bvh = new BVH<Tri>;
+    AutoArray<Tri> tri_pool;
+    MeshNode *     mn = node->dyn_cast<MeshNode>();
+    ito(mn->getNumSurfaces()) {
       tri_pool.reserve(tri_pool.size + mn->getSurface(i)->mesh.num_indices / 3);
       kto(mn->getSurface(i)->mesh.num_indices / 3) {
         Triangle_Full ftri = mn->getSurface(i)->mesh.fetch_triangle(k);
         Tri           t;
         t.surface_id  = i;
         t.triangle_id = k;
-        t.a           = n->transform(ftri.v0.position);
-        t.b           = n->transform(ftri.v1.position);
-        t.c           = n->transform(ftri.v2.position);
+        t.a           = node->transform(ftri.v0.position);
+        t.b           = node->transform(ftri.v1.position);
+        t.c           = node->transform(ftri.v2.position);
 
         tri_pool.push(t);
       }
     }
-    s->bvh->init(&tri_pool[0], tri_pool.size);
-    n->addComponent(s);
-    return s;
+    bvh->init(&tri_pool[0], tri_pool.size);
   }
   u32         getNumSurfaces() { return gfx_surfaces.size; }
   GfxSurface *getSurface(u32 i) { return gfx_surfaces[i]; }
   void        release() override {
     ito(gfx_surfaces.size) gfx_surfaces[i]->release();
     gfx_surfaces.release();
-    bvh->release();
+    if (bvh) bvh->release();
     Component::release();
   }
 };

@@ -95,6 +95,49 @@ class IGUI_Pass : public rd::IEvent_Consumer {
       SDL_MouseMotionEvent *m = (SDL_MouseMotionEvent *)event;
     }
   }
+  void on_gui_traverse_nodes(List *l, int &id) {
+    if (l == NULL) return;
+    id++;
+    ImGui::PushID(id);
+    defer(ImGui::PopID());
+    if (l->child) {
+      ImGui::Indent();
+      on_gui_traverse_nodes(l->child, id);
+      ImGui::Unindent();
+      on_gui_traverse_nodes(l->next, id);
+    } else {
+      if (l->next == NULL) return;
+      if (l->cmp_symbol("scene")) {
+        on_gui_traverse_nodes(l->next, id);
+        return;
+      } else if (l->cmp_symbol("node")) {
+        ImGui::LabelText("Node", "%.*s", STRF(l->get(1)->symbol));
+        on_gui_traverse_nodes(l->get(2), id);
+        return;
+      }
+
+      string_ref  type = l->next->symbol;
+      char const *name = stref_to_tmp_cstr(l->symbol);
+      if (type == stref_s("float3")) {
+        float x    = l->get(2)->parse_float();
+        float y    = l->get(3)->parse_float();
+        float z    = l->get(4)->parse_float();
+        float f[3] = {x, y, z};
+        if (ImGui::DragFloat3(name, (float *)&f[0], 1.0e-2f)) {
+          // if (f[0] != x) {
+          // DebugBreak();
+          //}
+          l->get(2)->symbol = tmp_format("%f", f[0]);
+          l->get(3)->symbol = tmp_format("%f", f[1]);
+          l->get(4)->symbol = tmp_format("%f", f[2]);
+        }
+      } else if (type == stref_s("model")) {
+        ImGui::LabelText("model", stref_to_tmp_cstr(l->get(2)->symbol));
+      } else {
+        UNIMPLEMENTED;
+      }
+    }
+  }
   void init(rd::Pass_Mng *pmng) override {
     this->pmng = pmng;
     image_bindings.init();
@@ -1306,6 +1349,7 @@ protected:
   }
   float2 getMouse() const { return mouse_cursor; }
   Ray    getMouseRay() const { return mouse_ray; }
+  void   reserveLines(size_t cnt) { line_segments.reserve(cnt); }
   void   render_linebox(float3 min, float3 max, float3 color) {
     float coordsx[6] = {
         min.x,

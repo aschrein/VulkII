@@ -15,6 +15,7 @@ ELSE()
   message(STATUS "$ENV{VULKAN_SDK}/include")
 ENDIF()
 add_subdirectory(3rdparty/meshoptimizer)
+add_subdirectory(3rdparty/zstd/build/cmake)
 
 IF (WIN32)
   set(SDL2_PATH ${CMAKE_SOURCE_DIR}/bin/SDL2)
@@ -41,6 +42,7 @@ IF (WIN32)
     string(REPLACE "/MDd" "/MD" ${CompilerFlag} "${${CompilerFlag}}")
   endforeach()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Od /GR- /EHs- /EHc- /D _HAS_ITERATOR_DEBUGGING=0 /D _ITERATOR_DEBUG_LEVEL=0")
+  
 ELSE()
   set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
   set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} \
@@ -100,6 +102,7 @@ function(ADD_EXAMPLE example_name example_file)
     target_link_libraries(${example_name}
     ${Vulkan_LIBRARY}
     meshoptimizer
+    libzstd_shared
     ${LIBS}
     )
 

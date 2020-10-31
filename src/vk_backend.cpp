@@ -83,7 +83,6 @@ struct Ref_Cnt : public Slot {
 };
 
 struct Mem_Chunk : public Ref_Cnt {
-  static constexpr u32 PAGE_SIZE = 1 << 20;
 
   VkDeviceMemory        mem              = VK_NULL_HANDLE;
   VkMemoryPropertyFlags prop_flags       = 0;
@@ -97,15 +96,15 @@ struct Mem_Chunk : public Ref_Cnt {
     fprintf(stdout, "  cursor : %i\n", cursor);
     fprintf(stdout, "}\n");
   }
-  void init(VkDevice device, u32 num_pages, u32 heap_index, VkMemoryPropertyFlags prop_flags,
+  void init(VkDevice device, u32 size, u32 heap_index, VkMemoryPropertyFlags prop_flags,
             u32 type_bits) {
     VkMemoryAllocateInfo info;
     MEMZERO(info);
     info.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    info.allocationSize  = num_pages * PAGE_SIZE;
+    info.allocationSize  = size;
     info.memoryTypeIndex = heap_index;
     VK_ASSERT_OK(vkAllocateMemory(device, &info, nullptr, &mem));
-    this->size             = num_pages;
+    this->size             = size;
     this->prop_flags       = prop_flags;
     this->memory_type_bits = type_bits;
     this->cursor           = 0;
@@ -115,28 +114,28 @@ struct Mem_Chunk : public Ref_Cnt {
     memset(this, 0, sizeof(*this));
   }
   bool is_empty() const { return mem == VK_NULL_HANDLE; }
-  bool has_space(u32 req_size) {
+  bool has_space(u32 alignment, u32 req_size) {
     if (mem == VK_NULL_HANDLE) return false;
     if (ref_cnt == 0) cursor = 0;
-    return cursor + ((req_size + PAGE_SIZE - 1) / PAGE_SIZE) <= size;
+    return req_size + ((cursor + alignment - 1) & ~(alignment - 1)) <= size;
   }
   u32 alloc(u32 alignment, u32 req_size) {
     if (ref_cnt == 0) cursor = 0;
-    ASSERT_DEBUG((alignment & (alignment - 1)) == 0);                          // PoT
-    ASSERT_DEBUG(alignment < PAGE_SIZE || (alignment & (PAGE_SIZE - 1)) == 0); // PoT
-    if (alignment > PAGE_SIZE) {
-      u32 page_alignment = alignment / PAGE_SIZE;
-      // ASSERT_DEBUG(((alignment - 1) & PAGE_SIZE) == 0); // 4kb bytes is
-      // enough to align
-      if (cursor != 0) { // Need to align
-        cursor = (cursor + page_alignment - 1) & (page_alignment - 1);
-      }
+    ASSERT_DEBUG((alignment & (alignment - 1)) == 0); // PoT
+    // ASSERT_DEBUG(alignment < PAGE_SIZE || (alignment & (PAGE_SIZE - 1)) == 0); // PoT
+    // if (alignment > PAGE_SIZE) {
+    // u32 page_alignment = alignment / PAGE_SIZE;
+    // ASSERT_DEBUG(((alignment - 1) & PAGE_SIZE) == 0); // 4kb bytes is
+    // enough to align
+    if (cursor != 0) { // Need to align
+      cursor = ((cursor + alignment - 1) & ~(alignment - 1));
     }
+    //}
     u32 offset = cursor;
-    cursor += ((req_size + PAGE_SIZE - 1) / PAGE_SIZE);
+    cursor += req_size;
     ASSERT_DEBUG(cursor <= size);
     ref_cnt++;
-    return offset * PAGE_SIZE;
+    return offset;
   }
 };
 
@@ -1918,18 +1917,18 @@ struct Window {
       Mem_Chunk &chunk = mem_chunks[i];
       if ((chunk.prop_flags & prop_flags) == prop_flags &&
           (chunk.memory_type_bits & memory_type_bits) == memory_type_bits) {
-        if (chunk.has_space(size)) {
+        if (chunk.has_space(alignment, size)) {
           return i;
         }
       }
     }
     // if failed create a new one
     Mem_Chunk new_chunk;
-    u32       num_pages = 1 << 16;
-    if (num_pages * Mem_Chunk::PAGE_SIZE < size) {
-      num_pages = (size + Mem_Chunk::PAGE_SIZE - 1) / Mem_Chunk::PAGE_SIZE;
+    u32       alloc_size = 1 << 16;
+    if (alloc_size < size) {
+      alloc_size = (size + alloc_size - 1) & ~(alloc_size - 1);
     }
-    new_chunk.init(device, num_pages, find_mem_type(memory_type_bits, prop_flags), prop_flags,
+    new_chunk.init(device, alloc_size, find_mem_type(memory_type_bits, prop_flags), prop_flags,
                    memory_type_bits);
     ito(mem_chunks.size) { // look for a free memory chunk slot
       Mem_Chunk &chunk = mem_chunks[i];
@@ -1938,7 +1937,7 @@ struct Window {
         return i;
       }
     }
-    ASSERT_DEBUG(new_chunk.has_space(size));
+    ASSERT_DEBUG(new_chunk.has_space(alignment, size));
     mem_chunks.push(new_chunk);
     return mem_chunks.size - 1;
   }

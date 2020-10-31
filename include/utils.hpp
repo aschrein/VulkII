@@ -1014,7 +1014,8 @@ struct Array {
       memset(ptr, 0, sizeof(T) * capacity);
     }
   }
-  void reserve(size_t new_capacity) {
+  void reserve(size_t cnt) {
+    size_t new_capacity = size + cnt;
     if (new_capacity > capacity) {
       ptr      = (T *)Allcator_t::realloc(ptr, sizeof(T) * capacity, sizeof(T) * new_capacity);
       capacity = new_capacity;
