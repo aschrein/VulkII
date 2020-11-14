@@ -496,6 +496,7 @@ template <typename T> static void swap(T &a, T &b) {
 }
 
 static inline uint64_t hash_of(uint32_t u) { return hash_of((uint64_t)u); }
+static inline uint64_t hash_of(int32_t u) { return hash_of((uint64_t)u); }
 static inline uint64_t hash_of(uint16_t u) { return hash_of((uint64_t)u); }
 
 template <typename T> static uint64_t hash_of(T *ptr) { return hash_of((size_t)ptr); }
@@ -552,7 +553,7 @@ static inline string_ref stref_tmp(char const *tmp_string) {
   return out;
 }
 
-static inline string_ref stref_concat(string_ref a, string_ref b) {
+static inline string_ref stref_concat_tmp(string_ref a, string_ref b) {
   string_ref out;
   out.len = a.len + b.len;
   ASSERT_DEBUG(out.len != 0);
@@ -598,6 +599,21 @@ static inline int32_t stref_find_last(string_ref a, char b) {
     if (a.ptr[i] == b) last_pos = (i32)i;
   }
   return last_pos;
+}
+
+static inline string_ref stref_substring(string_ref a, string_ref pattern) {
+  i32 f = stref_find(a, pattern);
+  if (f < 0) return a;
+  return string_ref{a.ptr, (size_t)f};
+}
+
+static inline u32 smallest_pot(u32 x) {
+  if ((x & (x - 1)) == 0) return x;
+  for (int i = 1; i < 32; i *= 2) {
+    x = x | (x >> i);
+  }
+  x = x + 1;
+  return x;
 }
 
 static inline string_ref get_dir(string_ref path) {

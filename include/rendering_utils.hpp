@@ -16,6 +16,53 @@
 
 #endif
 
+#include "3rdparty/renderdoc_app.h"
+
+struct RenderDoc_CTX {
+  RENDERDOC_API_1_4_1 *renderdoc_api = NULL;
+  bool                 dll_not_found = false;
+  void                 init() {
+    if (dll_not_found) return;
+    if (renderdoc_api == NULL) {
+      HMODULE mod = GetModuleHandle("renderdoc.dll");
+      if (mod) {
+        pRENDERDOC_GetAPI getApi = (pRENDERDOC_GetAPI)GetProcAddress(mod, "RENDERDOC_GetAPI");
+        if (getApi) {
+          if (getApi(eRENDERDOC_API_Version_1_4_1, (void **)&renderdoc_api) == 1) {
+
+          } else {
+            fprintf(stderr, "[RenderDoc] failed to retieve API functions!\n");
+          }
+        } else {
+          fprintf(stderr, "[RenderDoc] GetAPI not found!\n");
+        }
+      } else {
+        dll_not_found = true;
+        fprintf(stderr, "[RenderDoc] module not found!\n");
+      }
+    }
+  }
+  void start() {
+    if (renderdoc_api && renderdoc_api->IsFrameCapturing()) return;
+#ifdef WIN32
+    if (renderdoc_api == NULL) {
+      if (dll_not_found) return;
+      init();
+    }
+#endif
+    if (renderdoc_api) {
+      renderdoc_api->StartFrameCapture(NULL, NULL);
+    }
+  }
+
+  void end() {
+    if (renderdoc_api) {
+      if (!renderdoc_api->IsFrameCapturing()) return;
+      renderdoc_api->EndFrameCapture(NULL, NULL);
+    }
+  }
+};
+
 f32 max3(float3 const &a) { return MAX3(a.x, a.y, a.z); }
 
 static void setup_default_state(rd::Imm_Ctx *ctx, u32 num_rts = 1) {
@@ -978,6 +1025,7 @@ protected:
 
   rd::IFactory *rm = NULL;
   Camera        g_camera;
+  bool          update_mouse_ray = true;
   Ray           mouse_ray;
   float2        mouse_cursor;
   float2        resolution;
@@ -995,6 +1043,8 @@ protected:
   int2               mpos          = {};
   int2               last_mpos     = {};
   Timer              timer;
+  bool               keys[0x100]      = {};
+  bool               last_keys[0x100] = {};
 
   void init(rd::IFactory *rm) {
     this->rm = rm;
@@ -1188,6 +1238,19 @@ protected:
     cmd.transform = tranform * glm::scale(float4x4(1.0f), float3(radius, radius, length));
     cylinder_draw_cmds.push(cmd);
   }
+
+  void draw_ss_circle(float3 o, float radius, float3 color) {
+    int    N         = 16;
+    float3 last_pos  = o + g_camera.right * radius;
+    float  delta_phi = 2.0f * PI / N;
+    for (int i = 1; i <= N; i++) {
+      float  s       = sinf(delta_phi * i);
+      float  c       = cosf(delta_phi * i);
+      float3 new_pos = o + (s * g_camera.up + c * g_camera.right) * radius;
+      draw_line(last_pos, new_pos, color);
+      last_pos = new_pos;
+    }
+  }
   void draw_sphere(float3 start, float radius, float3 color) {
 
     Gizmo_Instance_Data_CPU cmd;
@@ -1248,13 +1311,14 @@ protected:
     if (mb == 0) mode = NONE;
   }
   void on_mouse_wheel(int z) {}
+  Ray  getMouseRay() { return mouse_ray; }
   void on_mouse_move() {
     float2 uv = float2(mpos.x, mpos.y);
     uv /= resolution;
-    uv               = 2.0f * uv - float2(1.0f, 1.0f);
-    uv.y             = -uv.y;
-    mouse_cursor     = uv;
-    mouse_ray        = g_camera.gen_ray(uv);
+    uv           = 2.0f * uv - float2(1.0f, 1.0f);
+    uv.y         = -uv.y;
+    mouse_cursor = uv;
+    if (update_mouse_ray) mouse_ray = g_camera.gen_ray(uv);
     Gizmo *new_hover = pick(mouse_ray);
     if (hovered_gizmo && new_hover != hovered_gizmo) {
       hovered_gizmo->on_mouse_leave();
@@ -1334,6 +1398,12 @@ protected:
         if (mb[i] && !last_mb[i]) on_mouse_down(i);
         if (last_mb[i] && !mb[i]) on_mouse_up(i);
       }
+      ito(0x100) {
+        last_keys[i] = keys[i];
+        keys[i]      = ImGui::GetIO().KeysDown[i];
+      }
+      if (keys[SDL_SCANCODE_SPACE] && !last_keys[SDL_SCANCODE_SPACE])
+        update_mouse_ray = !update_mouse_ray;
       last_mpos = mpos;
       mpos      = int2(imguimpos.x, imguimpos.y);
       if (mpos != last_mpos) {
@@ -1380,6 +1450,12 @@ protected:
                   float3(coordsx[x], coordsy[y], coordsz[1]), color);
       }
     }
+  }
+  void reset() {
+    cylinder_draw_cmds.reset();
+    cone_draw_cmds.reset();
+    sphere_draw_cmds.reset();
+    line_segments.reset();
   }
   void render(rd::IFactory *f, rd::Imm_Ctx *ctx) {
     float4x4 viewproj = g_camera.viewproj();

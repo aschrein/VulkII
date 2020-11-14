@@ -264,6 +264,7 @@ VkFormat to_vk(rd::Format format) {
   case rd::Format::RGB32_FLOAT     : return VK_FORMAT_R32G32B32_SFLOAT    ;
   case rd::Format::RG32_FLOAT      : return VK_FORMAT_R32G32_SFLOAT       ;
   case rd::Format::R32_FLOAT       : return VK_FORMAT_R32_SFLOAT          ;
+  case rd::Format::R16_FLOAT       : return VK_FORMAT_R16_SFLOAT          ;
   case rd::Format::D32_FLOAT       : return VK_FORMAT_D32_SFLOAT          ;
   case rd::Format::R32_UINT        : return VK_FORMAT_R32_UINT            ;
   case rd::Format::R16_UINT        : return VK_FORMAT_R16_UINT            ;
@@ -352,6 +353,7 @@ struct Image : public Slot {
     }
   }
   void barrier(VkCommandBuffer cmd, VkAccessFlags new_access_flags, VkImageLayout new_layout) {
+    // if (new_access_flags == access_flags && new_layout == layout) return;
     VkImageMemoryBarrier bar;
     MEMZERO(bar);
     bar.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -440,6 +442,8 @@ static Array<u32> compile_glsl(VkDevice device, string_ref text, shaderc_shader_
 #ifndef NDEBUG
   shaderc_compile_options_set_generate_debug_info(options);
 #endif
+  // shaderc_compile_options_set_optimization_level(options,
+  // shaderc_optimization_level_performance);
   shaderc_compile_options_set_target_spirv(options, shaderc_spirv_version_1_3);
   shaderc_compile_options_set_target_env(options, shaderc_target_env_vulkan,
                                          shaderc_env_version_vulkan_1_2);
@@ -530,6 +534,8 @@ static void execute_preprocessor(List *l, char const *list_end, String_Builder &
         return stref_s("rgba32f");
       } else if (format == stref_s("R32_UINT")) {
         return stref_s("r32ui");
+      } else if (format == stref_s("R16_FLOAT")) {
+        return stref_s("r16f");
       } else if (format == stref_s("RGBA8_SRGBA")) {
         return stref_s("rgba8");
       } else {
@@ -540,6 +546,9 @@ static void execute_preprocessor(List *l, char const *list_end, String_Builder &
       // uimage2D
       static char buf[0x100];
       if (format == stref_s("RGBA32_FLOAT")) {
+        snprintf(buf, sizeof(buf), "image%.*s", STRF(dim));
+        return stref_s(buf);
+      } else if (format == stref_s("R16_FLOAT")) {
         snprintf(buf, sizeof(buf), "image%.*s", STRF(dim));
         return stref_s(buf);
       } else if (format == stref_s("R32_UINT")) {
@@ -730,6 +739,14 @@ static void preprocess_shader(String_Builder &builder, string_ref body) {
 #define bitcast_f32_to_u32(x)  floatBitsToUint(x)
 #define bitcast_u32_to_f32(x)  uintBitsToFloat(x)
 #define mul4(x, y)  (x * y)
+#define saturate(x) (x < 0.0 ? 0.0 : (x > 1.0 ? 1.0 : x))
+
+bvec3 greater(vec3 a, vec3 b) {
+  return bvec3(a.x > b.x, a.y > b.y, a.z > b.z);
+}
+bool any(bvec3 a) {
+  return a.x || a.y || a.z;
+}
 
 #define image_load(image, coords) imageLoad(image, ivec2(coords))
 #define image_store(image, coords, data) imageStore(image, ivec2(coords), data)
@@ -1094,11 +1111,11 @@ struct Descriptor_Pool {
   VkDescriptorPool pool;
   void             init(VkDevice device) {
     VkDescriptorPoolSize aPoolSizes[] = {
-        {VK_DESCRIPTOR_TYPE_SAMPLER, 10000},                //
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 10000}, //
-        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 10000},          //
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 10000},         //
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 10000},         //
+        {VK_DESCRIPTOR_TYPE_SAMPLER, 100000},                //
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 100000}, //
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 100000},          //
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 100000},         //
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 100000},         //
     };
     VkDescriptorPoolCreateInfo info;
     MEMZERO(info);
@@ -2512,7 +2529,6 @@ struct Window {
                                                  &num_queue_family_properties, NULL);
         vkGetPhysicalDeviceQueueFamilyProperties(
             physdevice_handles[i], &num_queue_family_properties, queue_family_properties);
-
         jto(num_queue_family_properties) {
 
           VkBool32 sup = VK_FALSE;
@@ -2528,6 +2544,12 @@ struct Window {
           if (sup && (queue_family_properties[j].queueFlags & VK_QUEUE_TRANSFER_BIT)) {
             transfer_queue_id = j;
           }
+        }
+        VkPhysicalDeviceProperties Properties;
+        vkGetPhysicalDeviceProperties(physdevice_handles[i], &Properties);
+        if (Properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+          if (graphics_device_id != NULL)
+            break; // Just stop right there if we've found a discrete gpu
         }
       }
     }
@@ -2600,7 +2622,6 @@ struct Window {
     enabled_features.shaderSampledImageArrayDynamicIndexing  = VK_TRUE;
     enabled_features.shaderStorageBufferArrayDynamicIndexing = VK_TRUE;
     enabled_features.shaderStorageImageArrayDynamicIndexing  = VK_TRUE;
-    enabled_features.shaderSampledImageArrayDynamicIndexing  = VK_TRUE;
     device_create_info.pEnabledFeatures                      = &enabled_features;
 
     VK_ASSERT_OK(vkCreateDevice(graphics_device_id, &device_create_info, NULL, &device));
@@ -2819,7 +2840,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
     }
   };
 
-  template <typename K, typename V> using Table = Hash_Table<K, V, Default_Allocator, 0x10>;
+  template <typename K, typename V> using Table = Hash_Table<K, V, Default_Allocator, 0x1000>;
   Table<Resource_Path, Resource_Binding> deferred_bindings;
   VkDescriptorSet                        set_cache[0x10];
   u64                                    set_dirty_flags;
@@ -3205,8 +3226,10 @@ class Vk_Ctx : public rd::Imm_Ctx {
           vkCmdBindVertexBuffers(cmd, j, 1, &dd.vbos[j].buffer, &dd.vbos[j].offset);
         }
         if (pc_dirty_range != 0) {
-          vkCmdPushConstants(cmd, gw.pipeline_layout, VK_SHADER_STAGE_ALL_GRAPHICS, 0,
-                             pc_dirty_range, pcs);
+          if (gw.push_constants_size != 0) {
+            vkCmdPushConstants(cmd, gw.pipeline_layout, VK_SHADER_STAGE_ALL_GRAPHICS, 0,
+                               MIN(pc_dirty_range, gw.push_constants_size), pcs);
+          }
           pc_dirty_range = 0;
         }
         switch (dd.type) {
@@ -4331,6 +4354,7 @@ class VkFactory : public rd::IFactory {
     ctx->init(rd::Pass_t::COMPUTE, wnd, {0});
     return ctx;
   }
+  void wait_idle() { vkDeviceWaitIdle(wnd->device); }
   void end_compute_pass(rd::Imm_Ctx *_ctx) override {
     Vk_Ctx *    ctx = (Vk_Ctx *)_ctx;
     Resource_ID f   = wnd->create_fence(false);

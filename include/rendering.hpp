@@ -58,6 +58,7 @@ enum class Format : u32 {
   RG32_FLOAT,
   R32_FLOAT,
   R32_UINT,
+  R16_FLOAT,
   R16_UINT,
   D32_FLOAT,
 };
@@ -412,6 +413,7 @@ class IFactory {
   virtual void     end_compute_pass(Imm_Ctx *ctx)                         = 0;
   virtual bool     get_timestamp_state(Resource_ID)                       = 0;
   virtual double   get_timestamp_ms(Resource_ID t0, Resource_ID t1)       = 0;
+  virtual void     wait_idle()                                            = 0;
 };
 
 class Imm_Ctx {

@@ -1091,9 +1091,9 @@ struct AABB {
         tmin.z <= max.z && //
         true;
   }
-  bool collide(float3 ro, float3 rd, float &t, float min_t) {
+  bool collide(float3 ro, float3 rd, float &near_t, float &far_t) {
     if (inside(ro)) {
-      t = 0.0f;
+      near_t = 0.0f;
       return true;
     }
     float3 invd = 1.0f / rd;
@@ -1105,8 +1105,10 @@ struct AABB {
     float  dz_f = (max.z - ro.z) * invd.z;
     float  nt   = MAX3(MIN(dx_n, dx_f), MIN(dy_n, dy_f), MIN(dz_n, dz_f));
     float  ft   = MIN3(MAX(dx_n, dx_f), MAX(dy_n, dy_f), MAX(dz_n, dz_f));
-    if (nt > min_t || nt > ft - EPS) return false;
-    t = nt;
+    if (nt < 0.0f) return false;
+    if (nt > far_t || nt > ft - EPS) return false;
+    near_t = nt;
+    far_t  = ft;
     return true;
   }
 };
@@ -1736,6 +1738,9 @@ struct Config {
   u32 &get_u32(char const *name) {
     string_t _name;
     _name.init(stref_s(name));
+    if (!items.contains(_name)) {
+      items.insert(_name, {Config_Item::U32});
+    }
     ASSERT_DEBUG(items.contains(_name));
     return items.get_ref(_name).v_u32;
   }
@@ -1743,6 +1748,9 @@ struct Config {
   f32 &get_f32(char const *name) {
     string_t _name;
     _name.init(stref_s(name));
+    if (!items.contains(_name)) {
+      items.insert(_name, {Config_Item::F32});
+    }
     ASSERT_DEBUG(items.contains(_name));
     return items.get_ref(_name).v_f32;
   }
@@ -1750,6 +1758,9 @@ struct Config {
   bool &get_bool(char const *name) {
     string_t _name;
     _name.init(stref_s(name));
+    if (!items.contains(_name)) {
+      items.insert(_name, {Config_Item::BOOL});
+    }
     ASSERT_DEBUG(items.contains(_name));
     return items.get_ref(_name).v_bool;
   }
