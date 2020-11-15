@@ -1631,6 +1631,22 @@ struct Config_Item {
     u32 v_u32_max;
     f32 v_f32_max;
   };
+  static Config_Item make_f32(f32 v, f32 min, f32 max) {
+    Config_Item out;
+    out.type      = F32;
+    out.v_f32     = v;
+    out.v_f32_min = min;
+    out.v_f32_max = max;
+    return out;
+  }
+  static Config_Item make_u32(u32 v, u32 min, u32 max) {
+    Config_Item out;
+    out.type      = U32;
+    out.v_u32     = v;
+    out.v_u32_min = min;
+    out.v_u32_max = max;
+    return out;
+  }
 };
 
 struct Config {
@@ -1735,21 +1751,21 @@ struct Config {
     });
   }
 
-  u32 &get_u32(char const *name) {
+  u32 &get_u32(char const *name, u32 def = 0, u32 min = 0, u32 max = 10) {
     string_t _name;
     _name.init(stref_s(name));
     if (!items.contains(_name)) {
-      items.insert(_name, {Config_Item::U32});
+      items.insert(_name, Config_Item::make_u32(def, min, max));
     }
     ASSERT_DEBUG(items.contains(_name));
     return items.get_ref(_name).v_u32;
   }
 
-  f32 &get_f32(char const *name) {
+  f32 &get_f32(char const *name, f32 def = 0.0f, f32 min = -10.0f, f32 max = 10.0f) {
     string_t _name;
     _name.init(stref_s(name));
     if (!items.contains(_name)) {
-      items.insert(_name, {Config_Item::F32});
+      items.insert(_name, Config_Item::make_f32(def, min, max));
     }
     ASSERT_DEBUG(items.contains(_name));
     return items.get_ref(_name).v_f32;

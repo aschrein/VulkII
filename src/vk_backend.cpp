@@ -265,6 +265,8 @@ VkFormat to_vk(rd::Format format) {
   case rd::Format::RG32_FLOAT      : return VK_FORMAT_R32G32_SFLOAT       ;
   case rd::Format::R32_FLOAT       : return VK_FORMAT_R32_SFLOAT          ;
   case rd::Format::R16_FLOAT       : return VK_FORMAT_R16_SFLOAT          ;
+  case rd::Format::R16_UNORM       : return VK_FORMAT_R16_UNORM;
+  case rd::Format::R8_UNORM        : return VK_FORMAT_R8_UNORM;
   case rd::Format::D32_FLOAT       : return VK_FORMAT_D32_SFLOAT          ;
   case rd::Format::R32_UINT        : return VK_FORMAT_R32_UINT            ;
   case rd::Format::R16_UINT        : return VK_FORMAT_R16_UINT            ;
@@ -296,6 +298,7 @@ rd::Format from_vk(VkFormat format) {
   case VK_FORMAT_D32_SFLOAT          : return rd::Format::D32_FLOAT       ;
   case VK_FORMAT_R32_UINT            : return rd::Format::R32_UINT        ;
   case VK_FORMAT_R16_UINT            : return rd::Format::R16_UINT        ;
+  case VK_FORMAT_R8_UNORM            : return rd::Format::R8_UNORM        ;
   default: UNIMPLEMENTED;
   }
   // clang-format on

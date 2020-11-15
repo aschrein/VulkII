@@ -3,6 +3,7 @@
 
 #include "rendering.hpp"
 #include "scene.hpp"
+#include "simplefont.h"
 #include "utils.hpp"
 
 #ifdef __linux__
@@ -19,9 +20,13 @@
 #include "3rdparty/renderdoc_app.h"
 
 struct RenderDoc_CTX {
-  RENDERDOC_API_1_4_1 *renderdoc_api = NULL;
-  bool                 dll_not_found = false;
-  void                 init() {
+  RENDERDOC_API_1_4_1 * renderdoc_api = NULL;
+  bool                  dll_not_found = false;
+  static RenderDoc_CTX &get() {
+    static RenderDoc_CTX ctx;
+    return ctx;
+  }
+  void init() {
     if (dll_not_found) return;
     if (renderdoc_api == NULL) {
       HMODULE mod = GetModuleHandle("renderdoc.dll");
@@ -917,6 +922,31 @@ struct Raw_Mesh_3p16i_Wrapper {
     rm->release_resource(index_buffer);
     MEMZERO(*this);
   }
+  void init(rd::IFactory *rm, float3 const *positions, u16 const *indices, u32 num_indices,
+            u32 num_vertices) {
+    this->num_indices  = num_indices;
+    this->num_vertices = num_vertices;
+    {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
+      buf_info.size       = u32(sizeof(float3) * num_vertices);
+      vertex_buffer       = rm->create_buffer(buf_info);
+      memcpy(rm->map_buffer(vertex_buffer), &positions[0], sizeof(float3) * num_vertices);
+      rm->unmap_buffer(vertex_buffer);
+    }
+    {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER;
+      buf_info.size       = u32(sizeof(u16) * num_indices);
+      index_buffer        = rm->create_buffer(buf_info);
+      memcpy(rm->map_buffer(index_buffer), &indices[0], sizeof(u16) * num_indices);
+      rm->unmap_buffer(index_buffer);
+    }
+  }
   void init(rd::IFactory *rm, Raw_Mesh_3p16i const &model) {
     num_indices  = model.indices.size * 3;
     num_vertices = model.positions.size;
@@ -1013,15 +1043,28 @@ protected:
   Array<Gizmo_Instance_Data_CPU, 0x1000> sphere_draw_cmds;
   Array<Gizmo_Instance_Data_CPU, 0x1000> cone_draw_cmds;
   Array<Gizmo_Line_Vertex, 0x1000>       line_segments;
+  Pool<char>                             char_storage = {};
+  struct _String2D {
+    char *   c_str;
+    uint32_t len;
+    float    x, y, z;
+    float3   color;
+  };
+  Array<_String2D, 0x1000> strings = {};
 
-  Raw_Mesh_3p16i_Wrapper icosahedron_wrapper;
-  Raw_Mesh_3p16i_Wrapper cylinder_wrapper;
-  Raw_Mesh_3p16i_Wrapper cone_wrapper;
+  Raw_Mesh_3p16i_Wrapper icosahedron_wrapper = {};
+  Raw_Mesh_3p16i_Wrapper cylinder_wrapper    = {};
+  Raw_Mesh_3p16i_Wrapper cone_wrapper        = {};
+  Raw_Mesh_3p16i_Wrapper glyph_wrapper       = {};
 
   Resource_ID gizmo_vs;
   Resource_ID gizmo_ps;
   Resource_ID gizmo_lines_vs;
   Resource_ID gizmo_lines_ps;
+  Resource_ID font_ps      = {};
+  Resource_ID font_vs      = {};
+  Resource_ID font_sampler = {};
+  Resource_ID font_texture = {};
 
   rd::IFactory *rm = NULL;
   Camera        g_camera;
@@ -1051,9 +1094,11 @@ protected:
     timer.init();
     g_camera.init();
     cylinder_draw_cmds.init();
+    char_storage = Pool<char>::create(1 * (1 << 20));
     sphere_draw_cmds.init();
     cone_draw_cmds.init();
     line_segments.init();
+    strings.init();
     {
       auto mesh = subdivide_cone(8, 1.0f, 1.0f);
       cone_wrapper.init(rm, mesh);
@@ -1068,6 +1113,18 @@ protected:
       auto mesh = subdivide_cylinder(8, 1.0f, 1.0f);
       cylinder_wrapper.init(rm, mesh);
       mesh.release();
+    }
+    {
+      float pos[] = {
+          0.0f, 0.0f, 0.0f, //
+          1.0f, 0.0f, 0.0f, //
+          1.0f, 1.0f, 0.0f, //
+          0.0f, 0.0f, 0.0f, //
+          1.0f, 1.0f, 0.0f, //
+          0.0f, 1.0f, 0.0f, //
+      };
+      u16 indices[] = {0, 1, 2, 3, 4, 5, 6};
+      glyph_wrapper.init(rm, (float3 *)pos, indices, 6, 6);
     }
     static string_ref            shader    = stref_s(R"(
 @(DECLARE_PUSH_CONSTANTS
@@ -1155,6 +1212,117 @@ protected:
 )");
     gizmo_lines_vs = rm->create_shader_raw(rd::Stage_t::VERTEX, shader_lines, &defines[0], 1);
     gizmo_lines_ps = rm->create_shader_raw(rd::Stage_t::PIXEL, shader_lines, &defines[1], 1);
+    {
+      rd::Image_Create_Info info;
+      MEMZERO(info);
+      info.width    = simplefont_bitmap_width;
+      info.height   = simplefont_bitmap_height;
+      info.depth    = 1;
+      info.layers   = 1;
+      info.levels   = 1;
+      info.mem_bits = (u32)rd::Memory_Bits::DEVICE_LOCAL;
+      info.usage_bits =
+          (u32)rd::Image_Usage_Bits::USAGE_SAMPLED | (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
+      info.format  = rd::Format::R8_UNORM;
+      font_texture = rm->create_image(info);
+
+      Resource_ID staging_buf{};
+      defer(rm->release_resource(staging_buf));
+      // RenderDoc_CTX::get().start();
+      {
+        rd::Buffer_Create_Info buf_info;
+        MEMZERO(buf_info);
+        buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+        buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
+        buf_info.size       = simplefont_bitmap_width * simplefont_bitmap_height;
+        staging_buf         = rm->create_buffer(buf_info);
+        u8 *ptr             = (u8 *)rm->map_buffer(staging_buf);
+        // memcpy(ptr, &simplefont_bitmap[0], buf_info.size);
+        yto(simplefont_bitmap_height) {
+          xto(simplefont_bitmap_width) {
+            ptr[simplefont_bitmap_width * y + x] = simplefont_bitmap[y][x] == ' ' ? 0 : 0xffu;
+          }
+        }
+        rm->unmap_buffer(staging_buf);
+        auto ctx = rm->start_compute_pass();
+        ctx->image_barrier(font_texture, (u32)rd::Access_Bits::MEMORY_WRITE,
+                           rd::Image_Layout::TRANSFER_DST_OPTIMAL);
+        ctx->copy_buffer_to_image(staging_buf, 0, font_texture, rd::Image_Copy::top_level());
+        rm->end_compute_pass(ctx);
+      }
+      // RenderDoc_CTX::get().end();
+    }
+    static const char *font_shader = R"(
+@(DECLARE_PUSH_CONSTANTS
+  (add_field (type float2)    (name glyph_uv_size))
+  (add_field (type float2)    (name glyph_size))
+  (add_field (type float2)    (name viewport_size))
+)
+
+#ifdef VERTEX
+
+@(DECLARE_INPUT (location 0) (type float3) (name vertex_position))
+@(DECLARE_INPUT (location 1) (type float3) (name instance_offset))
+@(DECLARE_INPUT (location 2) (type float2) (name instance_uv_offset))
+@(DECLARE_INPUT (location 3) (type float3) (name instance_color))
+
+@(DECLARE_OUTPUT (location 0) (type float2) (name uv))
+@(DECLARE_OUTPUT (location 1) (type float3) (name color))
+
+@(ENTRY)
+  color = instance_color;
+  uv = instance_uv_offset + (vertex_position.xy * vec2(1.0, -1.0) + vec2(0.0, 1.0)) * glyph_uv_size;
+  float4 sspos =  float4(vertex_position.xy * glyph_size + instance_offset.xy, 0.0, 1.0);
+  int pixel_x = int(viewport_size.x * (sspos.x * 0.5 + 0.5));
+  int pixel_y = int(viewport_size.y * (sspos.y * 0.5 + 0.5));
+  sspos.x = 2.0 * (float(pixel_x)) / viewport_size.x - 1.0;
+  sspos.y = 2.0 * (float(pixel_y)) / viewport_size.y - 1.0;
+  sspos.z = instance_offset.z;
+  @(EXPORT_POSITION sspos);
+@(END)
+#endif
+#ifdef PIXEL
+
+@(DECLARE_INPUT (location 0) (type float2) (name uv))
+@(DECLARE_INPUT (location 1) (type float3) (name color))
+@(DECLARE_IMAGE
+  (type SAMPLED)
+  (dim 2D)
+  (set 0)
+  (binding 0)
+  (name font_texture)
+)
+@(DECLARE_SAMPLER
+  (set 0)
+  (binding 1)
+  (name my_sampler)
+)
+@(DECLARE_RENDER_TARGET
+  (location 0)
+)
+@(ENTRY)
+  if (texture(sampler2D(font_texture, my_sampler), uv).x < 0.5)
+    discard;
+  @(EXPORT_COLOR 0
+    float4(color.xyz, 1.0)
+  );
+@(END)
+#endif
+)";
+    font_vs = rm->create_shader_raw(rd::Stage_t::VERTEX, stref_s(font_shader), &defines[0], 1);
+    font_ps = rm->create_shader_raw(rd::Stage_t::PIXEL, stref_s(font_shader), &defines[1], 1);
+
+    rd::Sampler_Create_Info info;
+    MEMZERO(info);
+    info.address_mode_u = rd::Address_Mode::CLAMP_TO_EDGE;
+    info.address_mode_v = rd::Address_Mode::CLAMP_TO_EDGE;
+    info.address_mode_w = rd::Address_Mode::CLAMP_TO_EDGE;
+    info.mag_filter     = rd::Filter::NEAREST;
+    info.min_filter     = rd::Filter::NEAREST;
+    info.mip_mode       = rd::Filter::NEAREST;
+    info.anisotropy     = false;
+    info.max_anisotropy = 16.0f;
+    font_sampler        = rm->create_sampler(info);
   }
   Gizmo *pick(Ray const &ray) {
     float  t       = 1.0e6;
@@ -1206,6 +1374,8 @@ protected:
     }
     g_camera.release();
     cylinder_draw_cmds.release();
+    char_storage.release();
+    strings.release();
     cone_draw_cmds.release();
     sphere_draw_cmds.release();
     line_segments.release();
@@ -1238,7 +1408,28 @@ protected:
     cmd.transform = tranform * glm::scale(float4x4(1.0f), float3(radius, radius, length));
     cylinder_draw_cmds.push(cmd);
   }
-
+  void draw_string(float3 position, float3 color, char const *fmt, ...) {
+    char    buf[0x100];
+    va_list args;
+    va_start(args, fmt);
+    i32 len = vsprintf(buf, fmt, args);
+    va_end(args);
+    draw_string(stref_s(buf), position, color);
+  }
+  void draw_string(string_ref str, float3 position, float3 color) {
+    if (str.len == 0) return;
+    char *dst = char_storage.alloc(str.len + 1);
+    memcpy(dst, str.ptr, str.len);
+    dst[str.len] = '\0';
+    _String2D internal_string;
+    internal_string.color = color;
+    internal_string.c_str = dst;
+    internal_string.len   = (uint32_t)str.len;
+    internal_string.x     = position.x;
+    internal_string.y     = position.y;
+    internal_string.z     = position.z;
+    strings.push(internal_string);
+  }
   void draw_ss_circle(float3 o, float radius, float3 color) {
     int    N         = 16;
     float3 last_pos  = o + g_camera.right * radius;
@@ -1457,7 +1648,8 @@ protected:
     sphere_draw_cmds.reset();
     line_segments.reset();
   }
-  void render(rd::IFactory *f, rd::Imm_Ctx *ctx) {
+  void render(rd::IFactory *f, rd::Imm_Ctx *ctx, u32 width, u32 height) {
+    defer(char_storage.reset());
     float4x4 viewproj = g_camera.viewproj();
     if (hovered_gizmo) {
       auto   aabb  = hovered_gizmo->getAABB();
@@ -1469,8 +1661,8 @@ protected:
     ito(gizmos.size) if (gizmos[i]) { gizmos[i]->update(); }
     ito(gizmos.size) if (gizmos[i] && gizmos[i]->isScheduledForRemoval()) { gizmos[i]->release(); }
     ito(gizmos.size) if (gizmos[i]) { gizmos[i]->paint(); }
-    if (cylinder_draw_cmds.size == 0 && sphere_draw_cmds.size == 0 && cone_draw_cmds.size == 0 &&
-        line_segments.size == 0)
+    if (strings.size == 0 && cylinder_draw_cmds.size == 0 && sphere_draw_cmds.size == 0 &&
+        cone_draw_cmds.size == 0 && line_segments.size == 0)
       return;
     if (cylinder_draw_cmds.size != 0 || sphere_draw_cmds.size != 0 || cone_draw_cmds.size != 0) {
       ctx->push_state();
@@ -1537,6 +1729,142 @@ protected:
       cylinder_wrapper.draw(ctx, num_cylinders, cylinder_offset);
       icosahedron_wrapper.draw(ctx, num_spheres, sphere_offset);
       cone_wrapper.draw(ctx, num_cones, cone_offset);
+    }
+    if (strings.size != 0) {
+      ctx->push_state();
+      defer(ctx->pop_state());
+      defer(strings.reset());
+      rd::RS_State rs_state;
+      MEMZERO(rs_state);
+      rs_state.polygon_mode = rd::Polygon_Mode::FILL;
+      rs_state.front_face   = rd::Front_Face::CW;
+      rs_state.cull_mode    = rd::Cull_Mode::NONE;
+      ctx->RS_set_state(rs_state);
+      struct Glyph_Instance {
+        float x, y, z;
+        float u, v;
+        float r, g, b;
+      };
+      float    glyph_uv_width  = (float)simplefont_bitmap_glyphs_width / simplefont_bitmap_width;
+      float    glyph_uv_height = (float)simplefont_bitmap_glyphs_height / simplefont_bitmap_height;
+      float4x4 viewproj        = g_camera.viewproj();
+      float    glyph_pad_ss    = 2.0f / width;
+      uint32_t max_num_glyphs  = 0;
+      uint32_t num_strings     = strings.size;
+      kto(num_strings) { max_num_glyphs += (uint32_t)strings[k].len; }
+      TMP_STORAGE_SCOPE;
+      Glyph_Instance *glyphs =
+          (Glyph_Instance *)tl_alloc_tmp(sizeof(Glyph_Instance) * max_num_glyphs);
+      uint32_t num_glyphs          = 0;
+      f32      glyphs_screen_width = 2.0f * 1.0f * (float)(simplefont_bitmap_glyphs_width) / width;
+      f32 glyphs_screen_height = 2.0f * 1.0f * (float)(simplefont_bitmap_glyphs_height) / height;
+      kto(num_strings) {
+        _String2D string = strings[k];
+        if (string.len == 0) continue;
+
+        float3 p = {string.x, string.y, string.z};
+        // float  x0 = glm::dot(viewproj[0], float4{p.x, p.y, p.z, 1.0f});
+        // float  x1 = glm::dot(viewproj[1], float4{p.x, p.y, p.z, 1.0f});
+        // float    x2       = glm::dot(viewproj[2], float4{p.x, p.y, p.z, 1.0f});
+        // float  x3       = glm::dot(viewproj[3], float4{p.x, p.y, p.z, 1.0f});
+        // float2 ss       = float2{x0, x1} / x3;
+        float4 pp       = viewproj * float4{p.x, p.y, p.z, 1.0f};
+        float  z        = pp.z / pp.w;
+        float2 ss       = pp.xy / pp.ww;
+        float  min_ss_x = ss.x;
+        float  min_ss_y = ss.y;
+        float  max_ss_x = ss.x + (glyphs_screen_width + glyph_pad_ss) * string.len;
+        float  max_ss_y = ss.y + glyphs_screen_height;
+        if (z < 0.0f || z > 1.0f || min_ss_x > 1.0f || min_ss_y > 1.0f || max_ss_x < -1.0f ||
+            max_ss_y < -1.0f)
+          continue;
+
+        ito(string.len) {
+          uint32_t c = (uint32_t)string.c_str[i];
+
+          // Printable characters only
+          c            = clamp(c, 0x20u, 0x7eu);
+          uint32_t row = (c - 0x20) / simplefont_bitmap_glyphs_per_row;
+          uint32_t col = (c - 0x20) % simplefont_bitmap_glyphs_per_row;
+          float    v0 =
+              ((float)row * (simplefont_bitmap_glyphs_height + simplefont_bitmap_glyphs_pad_y * 2) +
+               simplefont_bitmap_glyphs_pad_y) /
+              simplefont_bitmap_height;
+          float u0 =
+              ((float)col * (simplefont_bitmap_glyphs_width + simplefont_bitmap_glyphs_pad_x * 2) +
+               simplefont_bitmap_glyphs_pad_x) /
+              simplefont_bitmap_width;
+          Glyph_Instance glyph;
+          glyph.u              = u0;
+          glyph.v              = v0;
+          glyph.x              = ss.x + (glyphs_screen_width + glyph_pad_ss) * i;
+          glyph.y              = ss.y;
+          glyph.z              = z;
+          glyph.r              = string.color.r;
+          glyph.g              = string.color.g;
+          glyph.b              = string.color.b;
+          glyphs[num_glyphs++] = glyph;
+        }
+      }
+      if (num_glyphs == 0) goto skip_strings;
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.mem_bits                 = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.usage_bits               = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
+      buf_info.size                     = num_glyphs * sizeof(Glyph_Instance);
+      Resource_ID gizmo_instance_buffer = f->create_buffer(buf_info);
+      rm->release_resource(gizmo_instance_buffer);
+      Glyph_Instance *ptr = (Glyph_Instance *)f->map_buffer(gizmo_instance_buffer);
+      memcpy(ptr, glyphs, buf_info.size);
+      f->unmap_buffer(gizmo_instance_buffer);
+      ctx->IA_set_topology(rd::Primitive::TRIANGLE_LIST);
+      ctx->IA_set_vertex_buffer(1, gizmo_instance_buffer, 0, sizeof(Glyph_Instance),
+                                rd::Input_Rate::INSTANCE);
+      rd::Attribute_Info info;
+      MEMZERO(info);
+      info.binding  = 0;
+      info.format   = rd::Format::RGB32_FLOAT;
+      info.location = 0;
+      info.offset   = 0;
+      info.type     = rd::Attriute_t::POSITION;
+      ctx->IA_set_attribute(info);
+      MEMZERO(info);
+      info.binding  = 1;
+      info.format   = rd::Format::RGB32_FLOAT;
+      info.location = 1;
+      info.offset   = 0;
+      info.type     = rd::Attriute_t::TEXCOORD0;
+      ctx->IA_set_attribute(info);
+      MEMZERO(info);
+      info.binding  = 1;
+      info.format   = rd::Format::RG32_FLOAT;
+      info.location = 2;
+      info.offset   = 12;
+      info.type     = rd::Attriute_t::TEXCOORD1;
+      ctx->IA_set_attribute(info);
+      MEMZERO(info);
+      info.binding  = 1;
+      info.format   = rd::Format::RGB32_FLOAT;
+      info.location = 3;
+      info.offset   = 20;
+      info.type     = rd::Attriute_t::TEXCOORD2;
+      ctx->IA_set_attribute(info);
+      struct PC {
+        float2 glyph_uv_size;
+        float2 glyph_size;
+        float2 viewport_size;
+      } pc;
+      pc.glyph_uv_size = {glyph_uv_width, glyph_uv_height};
+      pc.glyph_size    = {glyphs_screen_width, -glyphs_screen_height};
+      pc.viewport_size = {(f32)width, (f32)height};
+      ctx->VS_set_shader(font_vs);
+      ctx->PS_set_shader(font_ps);
+      ctx->push_constants(&pc, 0, sizeof(pc));
+      ctx->bind_sampler(0, 1, font_sampler);
+      ctx->bind_image(0, 0, 0, font_texture, rd::Image_Subresource::top_level(),
+                      rd::Format::NATIVE);
+      glyph_wrapper.draw(ctx, num_glyphs, 0);
+    skip_strings:;
     }
     if (line_segments.size != 0) {
       ctx->push_state();

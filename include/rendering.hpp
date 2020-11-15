@@ -59,6 +59,8 @@ enum class Format : u32 {
   R32_FLOAT,
   R32_UINT,
   R16_FLOAT,
+  R16_UNORM,
+  R8_UNORM,
   R16_UINT,
   D32_FLOAT,
 };

@@ -10,10 +10,9 @@
 #include <mutex>
 #include <thread>
 
-Config        g_config;
-Scene *       g_scene       = Scene::create();
-Gizmo_Layer * gizmo_layer   = NULL;
-RenderDoc_CTX renderdoc_ctx = {};
+Config       g_config;
+Scene *      g_scene     = Scene::create();
+Gizmo_Layer *gizmo_layer = NULL;
 
 inline float  saturate(float s) { return s > 1.0f ? 1.0f : (s < 0.0f ? 0.0f : s); }
 inline float3 saturate(float3 s) {
@@ -22,9 +21,10 @@ inline float3 saturate(float3 s) {
   s.z = saturate(s.z);
   return s;
 }
-f32 normalize_sdf(f32 v, f32 scale) {
-  return saturate(v / scale * 0.5f + 0.5f);  
+f32 normalize_sdf(f32 v, f32 voxel_size) {
+  return saturate(v / (voxel_size * sqrtf(3.0f)) * 0.5f + 0.5f);
 }
+u16 pack_sdf(f32 v) { return u16(double(saturate(v)) * double((1u << 16u) - 1u) + 0.5f); }
 struct SDF_float8x8x8 {
   f32  sdf[8 * 8 * 8];
   void render_viz(float3 const &min, float3 const &max) {
@@ -34,12 +34,93 @@ struct SDF_float8x8x8 {
         xto(8) {
           float3 p     = min + size * float3(f32(x) / 7.0f, f32(y) / 7.0f, f32(z) / 7.0f);
           float  dist  = sdf[x + y * 8 + z * 8 * 8];
+          dist         = dist * 2.0f - 1.0f;
           float4 color = float4(1.0f, 0.0f, 0.0f, 1.0f) * saturate(dist) +
                          float4(0.0f, 0.0f, 1.0f, 1.0f) * saturate(-dist);
           gizmo_layer->draw_sphere(p, 0.1f, color.xyz);
         }
       }
     }
+  }
+  void render_values_viz(float3 const &min, float3 const &max) {
+    float3 size       = max - min;
+    float  dist_scale = size.x;
+    char   buf[0x100];
+    zto(8) {
+      yto(8) {
+        xto(8) {
+          float3 p    = min + size * float3(f32(x) / 7.0f, f32(y) / 7.0f, f32(z) / 7.0f);
+          float  dist = sdf[x + y * 8 + z * 8 * 8];
+          dist        = dist * 2.0f - 1.0f;
+          dist *= sqrtf(3.0f);
+          // dist *= dist_scale;
+          snprintf(buf, sizeof(buf), "%f", dist);
+          gizmo_layer->draw_string(stref_s(buf), p, float3(1.0f, 1.0f, 1.0f));
+        }
+      }
+    }
+  }
+  float sample_debug(float3 const &min, float3 const &max, float3 const &wp, float3 p) {
+    p = p * 0.5f + float3(0.5f, 0.5f, 0.5f);
+    p = saturate(p) * 7.0f;
+
+    int x[2];
+    int y[2];
+    int z[2];
+
+    float wx[2];
+    float wy[2];
+    float wz[2];
+
+    x[0]  = int(p.x);
+    wx[0] = p.x - x[0];
+    x[1]  = int(p.x + 1.0f);
+    wx[1] = x[1] - p.x;
+
+    y[0]  = int(p.y);
+    wy[0] = p.y - y[0];
+    y[1]  = int(p.y + 1.0f);
+    wy[1] = y[1] - p.y;
+
+    z[0]            = int(p.z);
+    wz[0]           = p.z - z[0];
+    z[1]            = int(p.z + 1.0f);
+    wz[1]           = z[1] - p.z;
+    float  f        = 0.0f;
+    f32    vals[8]  = {};
+    float3 size     = (max - min);
+    float3 new_size = size / 7.0f;
+    ito(8) {
+      i32 ix = ((i >> 0) & 1);
+      i32 iy = ((i >> 1) & 1);
+      i32 iz = ((i >> 2) & 1);
+      {
+        float3 new_center = min + float3(f32(x[ix]), f32(y[iy]), f32(z[iz])) * new_size;
+        gizmo_layer->draw_line(wp, new_center, float3(1.0f, 0.0f, 0.0f));
+        gizmo_layer->draw_string((wp + new_center) * 0.5f, float3(1.0f, 0.0f, 0.0f), "%f",
+                                 (1.0f - wx[ix]) * (1.0f - wy[iy]) * (1.0f - wz[iz]));
+      }
+      if (x[ix] == 8 || y[iy] == 8 || z[iz] == 8) continue;
+      vals[i] = sdf[x[ix] + y[iy] * 8 + z[iz] * 8 * 8];
+    }
+    ito(8) {
+      i32 ix = ((i >> 0) & 1);
+      i32 iy = ((i >> 1) & 1);
+      i32 iz = ((i >> 2) & 1);
+      f += vals[i] * (1.0f - wx[ix]) * (1.0f - wy[iy]) * (1.0f - wz[iz]);
+    }
+    f = (f * 2.0f - 1.0f) * sqrtf(3.0f);
+    /*if (f < 0.0f) {
+      ito(8) {
+        i32 ix = ((i >> 0) & 1);
+        i32 iy = ((i >> 1) & 1);
+        i32 iz = ((i >> 2) & 1);
+        fprintf(stdout, "%f * %f\n", vals[i], (1.0f - wx[ix]) * (1.0f - wy[iy]) * (1.0f - wz[iz]));
+      }
+      fprintf(stdout, "= %f\n", f);
+    }*/
+
+    return f;
   }
   float sample(float3 p) {
     p = p * 0.5f + float3(0.5f, 0.5f, 0.5f);
@@ -63,19 +144,26 @@ struct SDF_float8x8x8 {
     y[1]  = int(p.y + 1.0f);
     wy[1] = y[1] - p.y;
 
-    z[0]    = int(p.z);
-    wz[0]   = p.z - z[0];
-    z[1]    = int(p.z + 1.0f);
-    wz[1]   = z[1] - p.z;
-    float f = 0.0f;
+    z[0]          = int(p.z);
+    wz[0]         = p.z - z[0];
+    z[1]          = int(p.z + 1.0f);
+    wz[1]         = z[1] - p.z;
+    float f       = 0.0f;
+    f32   vals[8] = {};
     ito(8) {
       i32 ix = ((i >> 0) & 1);
       i32 iy = ((i >> 1) & 1);
       i32 iz = ((i >> 2) & 1);
       if (x[ix] == 8 || y[iy] == 8 || z[iz] == 8) continue;
-      f += sdf[x[ix] + y[iy] * 8 + z[iz] * 8 * 8] * (1.0f - wx[ix]) * (1.0f - wy[iy]) *
-           (1.0f - wz[iz]);
+      vals[i] = sdf[x[ix] + y[iy] * 8 + z[iz] * 8 * 8];
     }
+    ito(8) {
+      i32 ix = ((i >> 0) & 1);
+      i32 iy = ((i >> 1) & 1);
+      i32 iz = ((i >> 2) & 1);
+      f += vals[i] * (1.0f - wx[ix]) * (1.0f - wy[iy]) * (1.0f - wz[iz]);
+    }
+    f = (f * 2.0f - 1.0f) * sqrtf(3.0f);
     return f;
   }
 }; // 32 bits / voxel
@@ -85,12 +173,17 @@ struct SDF_float8x8x8_minmax {
   f32  min_val;
   f32  max_val;
   f32  avg_val;
+  f32  voxel_size;
   f32  sdf[8 * 8 * 8];
   bool is_surface() { return min_val < 0.0 && max_val > 0.0; }
 }; // 32 bits / voxel
 
 struct SDF_half8x8x8 {
   half_float::half sdf[8 * 8 * 8];
+}; // 16 bits / voxel
+
+struct SDF_u168x8x8 {
+  u16 sdf[8 * 8 * 8];
 }; // 16 bits / voxel
 
 struct SDF_byte8x8x8 {
@@ -174,11 +267,15 @@ struct SDF_Node {
            fflush(stdout);
            ASSERT_ALWAYS(index_set.contains(ix + iy * size.x + iz * size.x * size.y) == false);
            index_set.insert(ix + iy * size.x + iz * size.x * size.y);*/
-
           auto &block = blocks[ix + iy * size.x + iz * size.x * size.y];
+
           if (block.is_surface()) {
             leafs[i] = sdf_full.size + 1;
-            sdf_full.push(*(SDF_float8x8x8 *)&block.sdf[0]);
+            SDF_float8x8x8 nb;
+            jto(8 * 8 * 8) {
+              nb.sdf[j] = normalize_sdf(block.sdf[j], block.aabb.max.x - block.aabb.min.x);
+            }
+            sdf_full.push(nb);
             // memcpy(&leafs[i]->sdf[0], &block.sdf[0], sizeof(SDF_float8x8x8));
           }
         }
@@ -220,7 +317,8 @@ struct SDF_Node {
     }
   }
   void render(Gizmo_Layer *gl, float3 const &min, float3 const &max) {
-    gl->render_linebox(min, max, float3(0.0f, 0.0f, 0.0f));
+    if (g_config.get_bool("render_tree_interim"))
+      gl->render_linebox(min, max, float3(0.0f, 1.0f, 0.0f));
     float3 size   = (max - min) / 2.0f;
     float3 center = min + size;
     if (is_leaf) {
@@ -246,7 +344,7 @@ struct SDF_Node {
     }
   }
 
-  void pack(Array<SDF_float8x8x8> &sdf_full, Array<u32> &nodes, Array<SDF_half8x8x8> &sdf_pack) {
+  void pack(Array<SDF_float8x8x8> &sdf_full, Array<u32> &nodes, Array<SDF_u168x8x8> &sdf_pack) {
     if (is_leaf) {
       u32 key    = LEAF_BIT;
       u32 offset = sdf_pack.size;
@@ -256,8 +354,8 @@ struct SDF_Node {
       ito(8) {
         if (leafs[i] == NULL) continue;
         mask |= (1 << 0);
-        SDF_half8x8x8 hv;
-        jto(8 * 8 * 8) { hv.sdf[j] = sdf_full[leafs[i] - 1].sdf[j]; }
+        SDF_u168x8x8 hv;
+        jto(8 * 8 * 8) { hv.sdf[j] = pack_sdf(sdf_full[leafs[i] - 1].sdf[j]); }
         sdf_pack.push(hv);
       }
       key = key | ((mask & ITEMS_FILTER_MASK) << ITEMS_FILTER_SHIFT);
@@ -321,57 +419,84 @@ struct SDF_Node {
   };
   bool getIntersection(SDF_float8x8x8 *sdfs, float3 const &min, float3 const &max, Ray const &ray,
                        Collision &out) {
-    if (!AABB{min, max}.collide(ray.o, ray.d, out.near_t, out.far_t)) {
+    Collision tmp = out;
+    if (!AABB{min, max}.collide(ray.o, ray.d, tmp.near_t, tmp.far_t)) {
       return false;
     }
+    if (g_config.get_bool("viz_tree_traversal"))
+      gizmo_layer->render_linebox(min, max, float3(1.0f, 1.0f, 0.0f));
     float3 size   = (max - min) / 2.0f;
     float3 center = min + size;
     if (is_leaf) {
       bool found = false;
       ito(8) {
         if (leafs[i] == NULL) continue;
-        i32       ix         = ((i >> 0) & 1) * 2 - 1;
-        i32       iy         = ((i >> 1) & 1) * 2 - 1;
-        i32       iz         = ((i >> 2) & 1) * 2 - 1;
-        float3    new_size   = size / 2.0f;
-        float3    new_center = center + float3(f32(ix), f32(iy), f32(iz)) * new_size;
-        Collision tmp        = out;
+
+        i32    ix         = ((i >> 0) & 1) * 2 - 1;
+        i32    iy         = ((i >> 1) & 1) * 2 - 1;
+        i32    iz         = ((i >> 2) & 1) * 2 - 1;
+        float3 new_size   = size / 2.0f;
+        float3 new_center = center + float3(f32(ix), f32(iy), f32(iz)) * new_size;
+        if (g_config.get_bool("viz_tree_traversal"))
+          gizmo_layer->render_linebox(min, max, float3(1.0f, 0.0f, 0.0f));
+        Collision tmp = out;
         if (AABB{new_center - new_size, new_center + new_size}.collide(ray.o, ray.d, tmp.near_t,
                                                                        tmp.far_t)) {
+          if (g_config.get_bool("viz_raymarch_aabb_colisions")) {
+            gizmo_layer->draw_ss_circle(ray.o + ray.d * tmp.near_t, 0.01f,
+                                        float3(0.0f, 0.0f, 1.0f));
+            gizmo_layer->draw_ss_circle(ray.o + ray.d * tmp.far_t, 0.02f, float3(0.0f, 0.5f, 1.0f));
+          }
           float3 wro   = ray.o + ray.d * tmp.near_t;
           float3 oro   = wro - new_center;
-          float  scale = new_size.x * 2.0f;
+          float  scale = size.x;
           oro /= new_size.x;
-          oro += float3(1.0f / 16.0f, 1.0f / 16.0f, 1.0f / 16.0f);
-          oro *= 1.0f - 1.0f / 8.0f;
+          /*oro += float3(1.0f / 16.0f, 1.0f / 16.0f, 1.0f / 16.0f);
+          oro *= 1.0f - 1.0f / 8.0f;*/
           float3 rd   = ray.d;
           float  dist = 1.0e6f;
-          if (g_config.get_bool("viz_raymarch"))
-            sdfs[leafs[i]].render_viz(new_center - new_size, new_center + new_size);
+          if (g_config.get_bool("viz_raymarch_probes"))
+            sdfs[leafs[i] - 1].render_viz(new_center - new_size, new_center + new_size);
+          if (g_config.get_bool("viz_raymarch_probes_values"))
+            sdfs[leafs[i] - 1].render_values_viz(new_center - new_size, new_center + new_size);
+          f32   margin      = g_config.get_f32("raymarch_margin", 1.0e-3f, 0.0f, 1.0e-1f);
+          float t           = tmp.near_t + 1.0e-3f;
+          bool  local_found = false;
           // ray march to find intersection
-          for (int i = 0; i < g_config.get_u32("cpu_sdf_iterations"); i++) {
+          jto(g_config.get_u32("cpu_sdf_iterations")) {
             // if (oro.x > 1.0f || oro.x < -1.0f || oro.y > 1.0f || oro.y < -1.0f || oro.z > 1.0f ||
             //    oro.z < -1.0f) {
             //  dist = 1.0f;
             //  break;
             //}
-            if (tmp.near_t >= tmp.far_t) {
-              dist = 1.0f;
+
+            if (g_config.get_bool("viz_raymarch_interpolate_debug"))
+              dist = sdfs[leafs[i] - 1].sample_debug(new_center - new_size, new_center + new_size,
+                                                     wro, oro);
+            else
+              dist = sdfs[leafs[i] - 1].sample(oro);
+            dist *= (1.0f + g_config.get_f32("raymarch_correction", 0.0f, -1.0f, 1.0f));
+            if (g_config.get_bool("viz_raymarch_circles"))
+              gizmo_layer->draw_ss_circle(wro, dist * scale, float3(0.0f, 1.0f, 0.0f));
+            if (g_config.get_bool("viz_raymarch_probes_values"))
+              gizmo_layer->draw_string(wro, float3(0.0f, 1.0f, 0.0f), "%f", dist);
+            if (abs(dist) < margin) {
+              local_found = true;
               break;
             }
-            dist = sdfs[leafs[i]].sample(oro);
-            if (g_config.get_bool("viz_raymarch"))
-              gizmo_layer->draw_ss_circle(wro, dist, float3(0.0f, 1.0f, 0.0f));
-            if (abs(dist) < 1.0e-2f) break;
-            tmp.near_t += dist;
-            oro += rd * dist / scale;
-            wro += rd * dist;
+            t += dist * scale;
+            if (t <= tmp.near_t || t >= tmp.far_t) {
+              local_found = false;
+              break;
+            }
+            oro += rd * dist * 2.0f;
+            wro += rd * dist * scale;
           }
-          if (dist < 1.0e-2f) {
-            out.near_t   = tmp.near_t;
-            out.far_t    = tmp.near_t;
+          if (local_found) {
+            // out.near_t   = t;
+            // out.far_t    = t;
             out.position = wro;
-            out.node     = leafs[i];
+            out.node     = leafs[i] - 1;
             found        = true;
           }
         }
@@ -407,7 +532,7 @@ struct SDF_Root_Node {
 
   Array<SDF_float8x8x8> sdf_full = {};
   Array<u32>            nodes    = {};
-  Array<SDF_half8x8x8>  sdf      = {};
+  Array<SDF_u168x8x8>   sdf      = {};
 
   void render(Gizmo_Layer *gl) {
     gl->render_linebox(real_aabb.min, real_aabb.max, float3(0.0f, 0.0f, 1.0f));
@@ -968,6 +1093,7 @@ struct Raw_SDF_Volume {
                                   offset_z * out->voxel_size);
           block.aabb.max =
               block.aabb.min + 7.0f * float3(out->voxel_size, out->voxel_size, out->voxel_size);
+          block.voxel_size = out->voxel_size;
           ito(8) {
             jto(8) {
               kto(8) {
@@ -1205,6 +1331,7 @@ struct Instance_Params {
   (add_field (type float4x4)  (name viewproj))
   (add_field (type float3)    (name camera_pos))
   (add_field (type int)       (name mode))
+  (add_field (type int)       (name sdf_iterations))
 )
 
 @(DECLARE_INPUT (location 0) (type float3) (name POSITION))
@@ -1220,7 +1347,7 @@ struct Instance_Params {
   PIXEL_WORLD_POSITION    = POSITION * scale + offset;
   PIXEL_OBJECT_POSITION   = POSITION;
   PIXEL_TEXTURE_ID        = params[INSTANCE_INDEX].texture_index;
-  PIXEL_SCALE             = scale;
+  PIXEL_SCALE             = (scale * 2.0);
   @(EXPORT_POSITION
      mul4(viewproj, float4(PIXEL_WORLD_POSITION, 1.0))
   );
@@ -1247,6 +1374,7 @@ struct Instance_Params {
   (add_field (type float4x4)  (name viewproj))
   (add_field (type float3)    (name camera_pos))
   (add_field (type int)       (name mode))
+  (add_field (type int)       (name sdf_iterations))
 )
 @(DECLARE_INPUT (location 0) (type float3) (name PIXEL_WORLD_POSITION))
 @(DECLARE_INPUT (location 1) (type float3) (name PIXEL_OBJECT_POSITION))
@@ -1268,15 +1396,35 @@ float eval_sdf(float3 p) {
               ),
               p, 0.0
             ).x;
-  return sdf;
+  return (sdf * 2.0f - 1.0f) * sqrt(3.0);
 }
 
 float3 eval_normal(float3 pos) {
-    float2 e = float2(1.0,-1.0)*0.01;
-    return normalize( e.xyy*eval_sdf( pos + e.xyy ) + 
-					  e.yyx*eval_sdf( pos + e.yyx ) + 
-					  e.yxy*eval_sdf( pos + e.yxy ) + 
-					  e.xxx*eval_sdf( pos + e.xxx ) );
+    float3 e = float3(1.0, 0.0, -1.0) * 1.0 / 8.0;
+    float3 n = float3_splat(0.0);
+    if (pos.x > 0.0)
+      n += e.zyy * eval_sdf(pos + e.zyy);
+    else
+      n += e.xyy * eval_sdf(pos + e.xyy);
+
+    if (pos.y > 0.0)
+      n += e.yzy * eval_sdf(pos + e.yzy);
+    else
+      n += e.yxy * eval_sdf(pos + e.yxy);
+
+    if (pos.z > 0.0)
+      n += e.yyz * eval_sdf(pos + e.yyz);
+    else
+      n += e.yyx * eval_sdf(pos + e.yyx);
+    return normalize(n);
+    //return normalize(
+    //        e.xyy * eval_sdf(pos + e.xyy) + 
+				//	  e.yyx * eval_sdf(pos + e.yyx) + 
+				//	  e.yxy * eval_sdf(pos + e.yxy)
+    //        // e.zyy * eval_sdf(pos + e.zyy) + 
+				//	  // e.yyz * eval_sdf(pos + e.yyz) + 
+				//	  // e.yzy * eval_sdf(pos + e.yzy)
+    //      );
 }
 
 @(ENTRY)
@@ -1285,20 +1433,20 @@ float3 eval_normal(float3 pos) {
     float3 rw = PIXEL_WORLD_POSITION;
     float3 rd = normalize(PIXEL_WORLD_POSITION - camera_pos);
     float dist = 0.0;
-    for (int i = 0; i < 16; i++) {
+    for (int i = 0; i < sdf_iterations; i++) {
       dist = eval_sdf(ro);
       if (abs(dist) < 1.0e-3)
         break;
-      //dist *= (1.0 - 1.0e-1);
-      ro += dist * rd / PIXEL_SCALE;
-      rw += dist * rd;
+      // dist *= (1.0 - 1.0e-1);
+      ro += dist * rd * 2.0;
+      rw += dist * rd * PIXEL_SCALE;
     }
     if (any(greater(abs(ro), float3_splat(1.0))))
       discard;
     if (abs(dist) > 1.0e-2)
       discard;
     float3 normal = eval_normal(ro);
-    float4 color = float4(abs(normal), 1.0);
+    float4 color = float4(normal, 1.0);
     float4 pp = mul4(viewproj, float4(rw, 1.0));
     pp.z /= pp.w;
     gl_FragDepth = pp.z;
@@ -1306,8 +1454,8 @@ float3 eval_normal(float3 pos) {
   } else if (mode == 1) {
     float dist = eval_sdf(ro);
     float4 color =
-        float4(1.0, 0.0, 0.0, 1.0) * saturate(dist / 3.0) +
-        float4(0.0, 0.0, 1.0, 1.0) * saturate(-dist / 3.0);
+        float4(1.0, 0.0, 0.0, 1.0) * saturate(dist) +
+        float4(0.0, 0.0, 1.0, 1.0) * saturate(-dist);
     @(EXPORT_COLOR 0 color);
     float4 pp = mul4(viewproj, float4(PIXEL_WORLD_POSITION, 1.0));
     pp.z /= pp.w;
@@ -1328,6 +1476,7 @@ float3 eval_normal(float3 pos) {
         afloat4x4 viewproj;
         afloat3   camera_pos;
         uint      mode;
+        uint      sdf_iterations;
       };
       {
         rd::Buffer_Create_Info buf_info;
@@ -1337,10 +1486,11 @@ float3 eval_normal(float3 pos) {
         buf_info.size              = sizeof(Uniform);
         Resource_ID uniform_buffer = factory->create_buffer(buf_info);
         factory->release_resource(uniform_buffer);
-        Uniform *ptr    = (Uniform *)factory->map_buffer(uniform_buffer);
-        ptr->viewproj   = gizmo_layer->get_camera().viewproj();
-        ptr->camera_pos = gizmo_layer->get_camera().pos;
-        ptr->mode       = g_config.get_u32("sdf_cube_rendering_mode");
+        Uniform *ptr        = (Uniform *)factory->map_buffer(uniform_buffer);
+        ptr->viewproj       = gizmo_layer->get_camera().viewproj();
+        ptr->camera_pos     = gizmo_layer->get_camera().pos;
+        ptr->mode           = g_config.get_u32("sdf_cube_rendering_mode");
+        ptr->sdf_iterations = g_config.get_u32("gpu_sdf_iterations", 16, 1, 128);
         factory->unmap_buffer(uniform_buffer);
         ctx->bind_uniform_buffer(0, 0, uniform_buffer, 0, sizeof(Uniform));
       }
@@ -1445,10 +1595,10 @@ float3 eval_normal(float3 pos) {
           info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
           info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_SAMPLED |
                             (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
-          info.format        = rd::Format::R16_FLOAT;
+          info.format        = rd::Format::R16_UNORM;
           Resource_ID img_id = factory->create_image(info);
           f32 *       ptr    = (f32 *)factory->map_buffer(staging_buf);
-          memcpy(ptr, root->sdf[i].sdf, sizeof(half_float::half) * 8 * 8 * 8);
+          memcpy(ptr, root->sdf[i].sdf, sizeof(u16) * 8 * 8 * 8);
           factory->unmap_buffer(staging_buf);
           auto ctx = factory->start_compute_pass();
           ctx->image_barrier(img_id, (u32)rd::Access_Bits::MEMORY_WRITE,
@@ -1523,9 +1673,9 @@ float3 eval_normal(float3 pos) {
       rt0.image             = normal_rt;
       rt0.format            = rd::Format::NATIVE;
       rt0.clear_color.clear = true;
-      rt0.clear_color.r     = 0.5f;
-      rt0.clear_color.g     = 0.5f;
-      rt0.clear_color.b     = 0.5f;
+      rt0.clear_color.r     = 0.0f;
+      rt0.clear_color.g     = 0.0f;
+      rt0.clear_color.b     = 0.0f;
       rt0.clear_color.a     = 1.0f;
       info.rts.push(rt0);
 
@@ -1698,7 +1848,7 @@ float3 eval_normal(float3 pos) {
           gizmo_layer->draw_cylinder(g_camera.look_at, g_camera.look_at + float3{0.0f, 0.0f, dx},
                                      dx * 0.04f, float3{0.0f, 0.0f, 1.0f});
         }
-        gizmo_layer->render(factory, ctx);
+        gizmo_layer->render(factory, ctx, width, height);
       }
       gizmo_layer->reset();
       timestamps.insert(factory, ctx);
@@ -1771,10 +1921,12 @@ class Event_Consumer : public IGUI_Pass {
       Ray ray = gizmo_layer->getMouseRay();
 
       SDF_Node::Collision col;
-      if (g_sdf_loader.root->getIntersection(ray, col)) {
-        gizmo_layer->draw_sphere(col.position, 1.0e-1f, float3(1.0f, 0.0f, 0.0f));
-        if (g_config.get_bool("viz_raymarch"))
-          gizmo_layer->draw_line(ray.o, col.position, float3(0.0f, 0.0f, 1.0f));
+      if (g_sdf_loader.root) {
+        if (g_sdf_loader.root->getIntersection(ray, col)) {
+          gizmo_layer->draw_sphere(col.position, 1.0e-1f, float3(1.0f, 0.0f, 0.0f));
+          if (g_config.get_bool("viz_raymarch"))
+            gizmo_layer->draw_line(ray.o, col.position, float3(0.0f, 0.0f, 1.0f));
+        }
       }
     }
     ImGui::End();
