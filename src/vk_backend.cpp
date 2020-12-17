@@ -7,6 +7,20 @@
 
 #define SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS
 
+#include <3rdparty/dxc/dxcapi.h>
+#include <codecvt>
+#include <locale>
+#include <string>
+
+LPCWSTR towstr_tmp(string_ref str) {
+  std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+  std::wstring wide = converter.from_bytes(str.ptr, str.ptr + str.len);
+  WCHAR *      tmp  = (WCHAR *)tl_alloc_tmp(wide.size() * 2 + 2);
+  memcpy(tmp, wide.c_str(), wide.size() * 2);
+  tmp[wide.size()] = L'\0';
+  return tmp;
+}
+
 #ifdef __linux__
 #  define VK_USE_PLATFORM_XCB_KHR
 #  include <SDL2/SDL.h>
@@ -18,6 +32,7 @@
 #  define VK_USE_PLATFORM_WIN32_KHR
 #  include <SDL.h>
 #  include <SDL_vulkan.h>
+#  include <atlbase.h>
 #  include <shaderc/shaderc.h>
 #  include <spirv_cross/spirv_cross_c.h>
 #  include <vulkan/vulkan.h>
@@ -478,6 +493,75 @@ static Array<u32> compile_glsl(VkDevice device, string_ref text, shaderc_shader_
   Array<u32> out;
   out.init(bytecode, len / 4);
   return out;
+}
+
+static Array<u32> compile_hlsl(VkDevice device, string_ref text, shaderc_shader_kind kind,
+                               Pair<string_ref, string_ref> *defines, size_t num_defines) {
+  HMODULE dxcompilerDLL = LoadLibraryA("dxcompiler.dll");
+  ASSERT_ALWAYS(dxcompilerDLL);
+  DxcCreateInstanceProc DxcCreateInstance =
+      (DxcCreateInstanceProc)GetProcAddress(dxcompilerDLL, "DxcCreateInstance");
+
+  CComPtr<IDxcLibrary> library;
+  ASSERT_ALWAYS(S_OK == DxcCreateInstance(CLSID_DxcLibrary, IID_PPV_ARGS(&library)));
+
+  CComPtr<IDxcCompiler> compiler;
+  ASSERT_ALWAYS(S_OK == DxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler)));
+
+  CComPtr<IDxcBlobEncoding> blob;
+  ASSERT_ALWAYS(S_OK ==
+                library->CreateBlobWithEncodingFromPinned(text.ptr, (uint32_t)text.len, 0, &blob));
+  LPCWSTR profile = L"ps_6_0";
+  if (kind == shaderc_vertex_shader)
+    profile = L"vs_6_0";
+  else if (kind == shaderc_vertex_shader)
+    profile = L"ps_6_0";
+  else if (kind == shaderc_compute_shader)
+    profile = L"cs_6_0";
+  else {
+    TRAP;
+  }
+
+  Array<DxcDefine> dxc_defines;
+  dxc_defines.init();
+  TMP_STORAGE_SCOPE;
+  ito(num_defines) {
+    DxcDefine d;
+    d.Name  = towstr_tmp(defines[i].first);
+    d.Value = towstr_tmp(defines[i].second);
+    dxc_defines.push(d);
+  }
+  defer(dxc_defines.release());
+
+  WCHAR const *options[] = {L"-spirv"};
+
+  CComPtr<IDxcOperationResult> result;
+  HRESULT                      hr = compiler->Compile(blob,                        // pSource
+                                 L"shader.hlsl",              // pSourceName
+                                 L"main",                     // pEntryPoint
+                                 profile,                     // pTargetProfile
+                                 options, ARRAYSIZE(options), // pArguments, argCount
+                                 dxc_defines.ptr, dxc_defines.size, // pDefines, defineCount
+                                 NULL,     // pIncludeHandler
+                                 &result); // ppResult
+  if (SUCCEEDED(hr)) result->GetStatus(&hr);
+  if (FAILED(hr)) {
+    if (result) {
+      CComPtr<IDxcBlobEncoding> errorsBlob;
+      hr = result->GetErrorBuffer(&errorsBlob);
+      if (SUCCEEDED(hr) && errorsBlob) {
+        wprintf(L"Compilation failed with errors:\n%hs\n",
+                (const char *)errorsBlob->GetBufferPointer());
+      }
+    }
+    TRAP;
+  } else {
+    CComPtr<IDxcBlob> spirv;
+    result->GetResult(&spirv);
+    Array<u32> out;
+    out.init((u32 *)spirv->GetBufferPointer(), spirv->GetBufferSize() / 4);
+    return out;
+  }
 }
 
 template <typename F> static char const *parse_parentheses(char const *cur, char const *end, F fn) {
@@ -2246,8 +2330,9 @@ struct Window {
     sb.init();
     defer(sb.release());
     sb.reset();
-    preprocess_shader(sb, body);
-    string_ref text = sb.get_str();
+    // preprocess_shader(sb, body);
+    // string_ref text = sb.get_str();
+    string_ref text = body;
 
     Shader_Info         si;
     shaderc_shader_kind kind;
@@ -2260,7 +2345,7 @@ struct Window {
     else
       UNIMPLEMENTED;
 
-    si.init(type, shader_hash, compile_glsl(device, text, kind, defines, num_defines));
+    si.init(type, shader_hash, compile_hlsl(device, text, kind, defines, num_defines));
 
     ID shid = shaders.push(si);
     shader_cache.insert(shader_hash, shid);

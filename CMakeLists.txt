@@ -28,6 +28,7 @@ IF (WIN32)
     "$ENV{VULKAN_SDK}/lib/SPIRV-Tools-shared.lib"
     "$ENV{VULKAN_SDK}/lib/shaderc_shared.lib"
     "$ENV{VULKAN_SDK}/lib/spirv-cross-core.lib"
+    "$ENV{VULKAN_SDK}/lib/HLSL.lib"
     )
   set (INCLUDES "${SDL2_PATH}/include")
   set(CompilerFlags

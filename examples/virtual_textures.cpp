@@ -1993,10 +1993,10 @@ int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
 
-  rd::Pass_Mng *pmng = rd::Pass_Mng::create(rd::Impl_t::VULKAN);
-  IGUI_Pass *   gui  = new Event_Consumer;
-  gui->init(pmng);
-  pmng->set_event_consumer(gui);
-  pmng->loop();
+  /* rd::Pass_Mng *pmng = rd::Pass_Mng::create(rd::Impl_t::VULKAN);
+   IGUI_Pass *   gui  = new Event_Consumer;
+   gui->init(pmng);
+   pmng->set_event_consumer(gui);
+   pmng->loop();*/
   return 0;
 }
