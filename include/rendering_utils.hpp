@@ -19,7 +19,8 @@
 
 #include "3rdparty/renderdoc_app.h"
 
-struct RenderDoc_CTX {
+class RenderDoc_CTX {
+  private:
   RENDERDOC_API_1_4_1 * renderdoc_api = NULL;
   bool                  dll_not_found = false;
   static RenderDoc_CTX &get() {
@@ -47,7 +48,7 @@ struct RenderDoc_CTX {
       }
     }
   }
-  void start() {
+  void _start() {
     if (renderdoc_api && renderdoc_api->IsFrameCapturing()) return;
 #ifdef WIN32
     if (renderdoc_api == NULL) {
@@ -60,12 +61,16 @@ struct RenderDoc_CTX {
     }
   }
 
-  void end() {
+  void _end() {
     if (renderdoc_api) {
       if (!renderdoc_api->IsFrameCapturing()) return;
       renderdoc_api->EndFrameCapture(NULL, NULL);
     }
   }
+
+  public:
+  static void start() { get()._start(); }
+  static void end() { get()._end(); }
 };
 
 f32 max3(float3 const &a) { return MAX3(a.x, a.y, a.z); }
@@ -236,72 +241,59 @@ class IGUI_Pass : public rd::IEvent_Consumer {
     rd::Imm_Ctx *ctx = factory->start_render_pass(info);
 
     static string_ref            shader    = stref_s(R"(
-@(DECLARE_PUSH_CONSTANTS
-  (add_field (type float2)   (name uScale))
-  (add_field (type float2)   (name uTranslate))
-  (add_field (type u32)      (name control_flags))
-)
+struct PushConstants
+{
+  float2 uScale;
+  float2 uTranslate; 
+  u32    control_flags;
+};
+[[vk::push_constant]] ConstantBuffer<PushConstants> pc : register(b0, space0);
 
 #define CONTROL_DEPTH_ENABLE 1
 #define CONTROL_AMPLIFY 2
-#define is_control(flag) (control_flags & flag) != 0
+#define is_control(flag) (pc.control_flags & flag) != 0
 
-@(DECLARE_IMAGE
-  (type SAMPLED)
-  (dim 2D)
-  (set 0)
-  (binding 0)
-  (format RGBA32_FLOAT)
-  (name sTexture)
-)
-@(DECLARE_SAMPLER
-  (set 0)
-  (binding 1)
-  (name sSampler)
-)
+[[vk::binding(0, 0)]] Texture2D<float4>   sTexture          : register(t0, space0);
+[[vk::binding(1, 0)]] SamplerState        sSampler          : register(s2, space0);
+
+struct PSInput {
+  [[vk::location(0)]] float4 pos   : SV_POSITION;
+  [[vk::location(1)]] float2 UV    : TEXCOORD0;
+  [[vk::location(2)]] float4 Color : TEXCOORD1;
+};
+
 #ifdef VERTEX
 
-@(DECLARE_INPUT (location 0) (type float2) (name aPos))
-@(DECLARE_INPUT (location 1) (type float2) (name aUV))
-@(DECLARE_INPUT (location 2) (type float4) (name aColor))
+struct VSInput {
+  [[vk::location(0)]] float2 aPos    : POSITION;
+  [[vk::location(1)]] float2 aUV     : TEXCOORD0;
+  [[vk::location(2)]] float4 aColor  : TEXCOORD1;
+};
 
-@(DECLARE_OUTPUT (location 0) (type float4) (name Color))
-@(DECLARE_OUTPUT (location 1) (type float2) (name UV))
-
-@(ENTRY)
-  Color = aColor;
-  UV = aUV;
-  @(EXPORT_POSITION
-      float4(aPos * uScale + uTranslate, 0, 1)
-  );
-@(END)
+PSInput main(in VSInput input) {
+  PSInput output;
+  output.Color = input.aColor;
+  output.UV    = input.aUV;
+  output.pos   = float4(input.aPos * pc.uScale + pc.uTranslate, 0.0f, 1.0f);
+  return output;
+}
 #endif
 #ifdef PIXEL
 
-@(DECLARE_INPUT (location 0) (type float4) (name Color))
-@(DECLARE_INPUT (location 1) (type float2) (name UV))
-
-@(DECLARE_RENDER_TARGET
-  (location 0)
-)
-@(ENTRY)
+float4 main(in PSInput input) : SV_TARGET0 {
   if (is_control(CONTROL_DEPTH_ENABLE)) {
-    float depth = texture(sampler2D(sTexture, sSampler), UV).r;
-    depth = pow(depth * 500.0, 1.0 / 2.0);
-    @(EXPORT_COLOR 0
-      float4_splat(depth)
-    );
+    float depth = sTexture.Sample(sSampler, input.UV).r;
+    depth = pow(depth * 500.0f, 1.0f / 2.0f);
+    return float4_splat(depth);
   } else {
-    float4 color = Color * texture(sampler2D(sTexture, sSampler), UV);
+    float4 color = input.Color * sTexture.Sample(sSampler, input.UV);
     if (is_control(CONTROL_AMPLIFY)) {
-      color *= 10.0;
-      color.a = 1.0;
+      color *= 10.0f;
+      color.a = 1.0f;
     }
-    @(EXPORT_COLOR 0
-      color
-    );
+    return color;
   }
-@(END)
+}
 #endif
 )");
     Pair<string_ref, string_ref> defines[] = {
@@ -665,20 +657,21 @@ struct TimeStamp_Pool {
 
 #if 1
 struct Mip_Builder {
-  static Resource_ID create_image(rd::IFactory *factory, Image2D const *image) {
+  static Resource_ID create_image(rd::IFactory *factory, Image2D const *image,
+                                  u32 usage = (u32)rd::Image_Usage_Bits::USAGE_SAMPLED) {
     Resource_ID           output_image;
     rd::Image_Create_Info info;
+    usage |= (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST;
     MEMZERO(info);
-    info.format   = image->format;
-    info.width    = image->width;
-    info.height   = image->height;
-    info.depth    = 1;
-    info.layers   = 1;
-    info.levels   = image->get_num_mip_levels();
-    info.mem_bits = (u32)rd::Memory_Bits::DEVICE_LOCAL;
-    info.usage_bits =
-        (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST | (u32)rd::Image_Usage_Bits::USAGE_SAMPLED;
-    output_image = factory->create_image(info);
+    info.format     = image->format;
+    info.width      = image->width;
+    info.height     = image->height;
+    info.depth      = 1;
+    info.layers     = 1;
+    info.levels     = image->get_num_mip_levels();
+    info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
+    info.usage_bits = usage;
+    output_image    = factory->create_image(info);
     Resource_ID cs;
     Resource_ID staging_buffer;
 
@@ -693,16 +686,18 @@ struct Mip_Builder {
 
     TMP_STORAGE_SCOPE;
     cs = factory->create_shader_raw(rd::Stage_t::COMPUTE, stref_s(R"(
-@(DECLARE_PUSH_CONSTANTS
-  (add_field (type u32)  (name src_offset))
-  (add_field (type u32)  (name src_width))
-  (add_field (type u32)  (name src_height))
-  (add_field (type u32)  (name dst_offset))
-  (add_field (type u32)  (name dst_width))
-  (add_field (type u32)  (name dst_height))
-  (add_field (type u32)  (name format))
-  (add_field (type u32)  (name op))
-)
+struct PushConstants
+{
+  u32 src_offset;
+  u32 src_width;
+  u32 src_height;
+  u32 dst_offset;
+  u32 dst_width;
+  u32 dst_height;
+  u32 format;
+  u32 op; 
+};
+[[vk::push_constant]] ConstantBuffer<PushConstants> pc : register(b0, space0);
 
 #define RGBA8_SRGBA    0
 #define RGBA8_UNORM    1
@@ -715,38 +710,25 @@ struct Mip_Builder {
 #define OP_MIN 2
 #define OP_SUM 3
 
-@(DECLARE_BUFFER
-  (type READ_WRITE)
-  (set 0)
-  (binding 0)
-  (type float)
-  (name data_f32)
-)
-
-@(DECLARE_BUFFER
-  (type READ_WRITE)
-  (set 0)
-  (binding 1)
-  (type uint)
-  (name data_u32)
-)
+[[vk::binding(0, 0)]] RWStructuredBuffer<float> data_f32 : register(u0, space0);
+[[vk::binding(1, 0)]] RWStructuredBuffer<uint>  data_u32 : register(u1, space0);
 
 float4 load(int2 coord) {
-  if (coord.x >= src_width) coord.x = int(src_width) - 1;
-  if (coord.y >= src_height) coord.y = int(src_height) - 1;
+  if (coord.x >= pc.src_width) coord.x = int(pc.src_width) - 1;
+  if (coord.y >= pc.src_height) coord.y = int(pc.src_height) - 1;
   if (coord.x < 0) coord.x = 0;
   if (coord.y < 0) coord.y = 0;
-  if (format == RGBA8_SRGBA) {
-    uint pixel = data_u32[coord.x + coord.y * src_width + src_offset];
+  if (pc.format == RGBA8_SRGBA) {
+    uint pixel = data_u32[coord.x + coord.y * pc.src_width + pc.src_offset];
     float4 o =
         float4(
               float((pixel >> 0u ) & 0xffu) / 255.0,
               float((pixel >> 8u ) & 0xffu) / 255.0,
               float((pixel >> 16u) & 0xffu) / 255.0,
               float((pixel >> 24u) & 0xffu) / 255.0);
-    return pow(o, float4(2.2));
-  } else if (format == RGBA8_UNORM) {
-    uint pixel = data_u32[coord.x + coord.y * src_width + src_offset];
+    return pow(o, float4_splat(2.2));
+  } else if (pc.format == RGBA8_UNORM) {
+    uint pixel = data_u32[coord.x + coord.y * pc.src_width + pc.src_offset];
     float4 o =
         float4(
               float((pixel >> 0u ) & 0xffu) / 255.0,
@@ -754,81 +736,81 @@ float4 load(int2 coord) {
               float((pixel >> 16u) & 0xffu) / 255.0,
               float((pixel >> 24u) & 0xffu) / 255.0);
     return o;
-  } else if (format == RGB32_FLOAT) {
-    float v_0 = data_f32[(coord.x + coord.y * src_width + src_offset) * 3 + 0];
-    float v_1 = data_f32[(coord.x + coord.y * src_width + src_offset) * 3 + 1];
-    float v_2 = data_f32[(coord.x + coord.y * src_width + src_offset) * 3 + 2];
+  } else if (pc.format == RGB32_FLOAT) {
+    float v_0 = data_f32[(coord.x + coord.y * pc.src_width + pc.src_offset) * 3 + 0];
+    float v_1 = data_f32[(coord.x + coord.y * pc.src_width + pc.src_offset) * 3 + 1];
+    float v_2 = data_f32[(coord.x + coord.y * pc.src_width + pc.src_offset) * 3 + 2];
     return float4(v_0, v_1, v_2, 1.0f);
-  } else if (format == RGBA32_FLOAT) {
-    float v_0 = data_f32[(coord.x + coord.y * src_width + src_offset) * 4 + 0];
-    float v_1 = data_f32[(coord.x + coord.y * src_width + src_offset) * 4 + 1];
-    float v_2 = data_f32[(coord.x + coord.y * src_width + src_offset) * 4 + 2];
-    float v_3 = data_f32[(coord.x + coord.y * src_width + src_offset) * 4 + 3];
+  } else if (pc.format == RGBA32_FLOAT) {
+    float v_0 = data_f32[(coord.x + coord.y * pc.src_width + pc.src_offset) * 4 + 0];
+    float v_1 = data_f32[(coord.x + coord.y * pc.src_width + pc.src_offset) * 4 + 1];
+    float v_2 = data_f32[(coord.x + coord.y * pc.src_width + pc.src_offset) * 4 + 2];
+    float v_3 = data_f32[(coord.x + coord.y * pc.src_width + pc.src_offset) * 4 + 3];
     return float4(v_0, v_1, v_2, v_3);
-  } else if (format == R32_FLOAT) {
-    float v_0 = data_f32[(coord.x + coord.y * src_width + src_offset)];
+  } else if (pc.format == R32_FLOAT) {
+    float v_0 = data_f32[(coord.x + coord.y * pc.src_width + pc.src_offset)];
     return float4(v_0, 0.0f, 0.0f, 0.0f);
   }
   return float4(1.0, 0.0, 0.0, 1.0);
 }
 
-void store(ivec2 coord, float4 val) {
-  if (format == RGBA8_SRGBA) {
-    val = pow(val, float4(1.0/2.2));
+void store(int2 coord, float4 val) {
+  if (pc.format == RGBA8_SRGBA) {
+    val = pow(val, float4_splat(1.0/2.2));
     uint r = uint(clamp(val.x * 255.0f, 0.0f, 255.0f));
     uint g = uint(clamp(val.y * 255.0f, 0.0f, 255.0f));
     uint b = uint(clamp(val.z * 255.0f, 0.0f, 255.0f));
     uint a = uint(clamp(val.w * 255.0f, 0.0f, 255.0f));
-    data_u32[coord.x + coord.y * dst_width + dst_offset] = ((r&0xffu)  |
+    data_u32[coord.x + coord.y * pc.dst_width + pc.dst_offset] = ((r&0xffu)  |
                                                    ((g&0xffu)  << 8u)  |
                                                    ((b&0xffu)  << 16u) |
                                                    ((a&0xffu)  << 24u));
-  } else if (format == RGBA8_UNORM) {
+  } else if (pc.format == RGBA8_UNORM) {
     uint r = uint(clamp(val.x * 255.0f, 0.0f, 255.0f));
     uint g = uint(clamp(val.y * 255.0f, 0.0f, 255.0f));
     uint b = uint(clamp(val.z * 255.0f, 0.0f, 255.0f));
     uint a = uint(clamp(val.w * 255.0f, 0.0f, 255.0f));
-    data_u32[coord.x + coord.y * dst_width + dst_offset] = ((r & 0xffu)  |
+    data_u32[coord.x + coord.y * pc.dst_width + pc.dst_offset] = ((r & 0xffu)  |
                                                    ((g & 0xffu)  << 8u)  |
                                                    ((b & 0xffu)  << 16u) |
                                                    ((a & 0xffu)  << 24u));
-  } else if (format == RGB32_FLOAT) {
-    data_f32[(coord.x + coord.y * dst_width + dst_offset) * 3] = val.x;
-    data_f32[(coord.x + coord.y * dst_width + dst_offset) * 3 + 1] = val.y;
-    data_f32[(coord.x + coord.y * dst_width + dst_offset) * 3 + 2] = val.z;
-  } else if (format == RGBA32_FLOAT) {
-    data_f32[(coord.x + coord.y * dst_width + dst_offset) * 4] = val.x;
-    data_f32[(coord.x + coord.y * dst_width + dst_offset) * 4 + 1] = val.y;
-    data_f32[(coord.x + coord.y * dst_width + dst_offset) * 4 + 2] = val.z;
-    data_f32[(coord.x + coord.y * dst_width + dst_offset) * 4 + 3] = val.w;
-  } else if (format == R32_FLOAT) {
-    data_f32[(coord.x + coord.y * dst_width + dst_offset)] = val.x;
+  } else if (pc.format == RGB32_FLOAT) {
+    data_f32[(coord.x + coord.y * pc.dst_width + pc.dst_offset) * 3] = val.x;
+    data_f32[(coord.x + coord.y * pc.dst_width + pc.dst_offset) * 3 + 1] = val.y;
+    data_f32[(coord.x + coord.y * pc.dst_width + pc.dst_offset) * 3 + 2] = val.z;
+  } else if (pc.format == RGBA32_FLOAT) {
+    data_f32[(coord.x + coord.y * pc.dst_width + pc.dst_offset) * 4] = val.x;
+    data_f32[(coord.x + coord.y * pc.dst_width + pc.dst_offset) * 4 + 1] = val.y;
+    data_f32[(coord.x + coord.y * pc.dst_width + pc.dst_offset) * 4 + 2] = val.z;
+    data_f32[(coord.x + coord.y * pc.dst_width + pc.dst_offset) * 4 + 3] = val.w;
+  } else if (pc.format == R32_FLOAT) {
+    data_f32[(coord.x + coord.y * pc.dst_width + pc.dst_offset)] = val.x;
   }
 }
 
-@(GROUP_SIZE 16 16 1)
-@(ENTRY)
-    if (GLOBAL_THREAD_INDEX.x >= dst_width || GLOBAL_THREAD_INDEX.y >= dst_height)
+[numthreads(16, 16, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+    if (tid.x >= pc.dst_width || tid.y >= pc.dst_height)
       return;
 
-    ivec2 xy = int2(GLOBAL_THREAD_INDEX.xy);
+    int2 xy = int2(tid.xy);
 
     float4 val_0 = load(xy * 2);
-    float4 val_1 = load(xy * 2 + ivec2(1, 0));
-    float4 val_2 = load(xy * 2 + ivec2(0, 1));
-    float4 val_3 = load(xy * 2 + ivec2(1, 1));
+    float4 val_1 = load(xy * 2 + int2(1, 0));
+    float4 val_2 = load(xy * 2 + int2(0, 1));
+    float4 val_3 = load(xy * 2 + int2(1, 1));
     float4 result = float4_splat(0.0);
 
-    if (op == OP_AVG)
+    if (pc.op == OP_AVG)
       result = (val_0 + val_1 + val_2 + val_3) / 4.0;
-    else if (op == OP_MAX)
+    else if (pc.op == OP_MAX)
       result = max(val_0, max(val_1, max(val_2, val_3)));
-    else if (op == OP_MIN)
+    else if (pc.op == OP_MIN)
       result = min(val_0, min(val_1, min(val_2, val_3)));
-    else if (op == OP_SUM)
+    else if (pc.op == OP_SUM)
       result = val_0 + val_1 + val_2 + val_3;
-    store(int2(GLOBAL_THREAD_INDEX.xy), result);
-@(END)
+    store(int2(tid.xy), result);
+}
 
 )"),
                                     NULL, 0);
@@ -849,7 +831,7 @@ void store(ivec2 coord, float4 val) {
     MEMZERO(pc);
     pc.op = 0;
     switch (image->format) {
-    // clang-format off
+      // clang-format off
       case rd::Format::RGBA8_SRGBA:  {  pc.format = 0; } break;
       case rd::Format::RGBA8_UNORM:  {  pc.format = 1; } break;
       case rd::Format::RGB32_FLOAT:  {  pc.format = 2; } break;
@@ -1127,47 +1109,51 @@ protected:
       glyph_wrapper.init(rm, (float3 *)pos, indices, 6, 6);
     }
     static string_ref            shader    = stref_s(R"(
-@(DECLARE_PUSH_CONSTANTS
-  (add_field (type float4x4)   (name viewproj))
-)
+struct PushConstants
+{
+  float4x4 viewproj;
+};
+[[vk::push_constant]] ConstantBuffer<PushConstants> pc : register(b0, space0);
+
+struct PSInput {
+  [[vk::location(0)]] float4 pos            : SV_POSITION;
+  [[vk::location(1)]] float4 pixel_color    : TEXCOORD0;
+};
 
 #ifdef VERTEX
 
-@(DECLARE_INPUT (location 0) (type float3) (name in_position))
-@(DECLARE_INPUT (location 1) (type float4) (name in_model_0))
-@(DECLARE_INPUT (location 2) (type float4) (name in_model_1))
-@(DECLARE_INPUT (location 3) (type float4) (name in_model_2))
-@(DECLARE_INPUT (location 4) (type float4) (name in_model_3))
-@(DECLARE_INPUT (location 5) (type float4) (name in_color))
+struct VSInput {
+  [[vk::location(0)]] float3 in_position    : POSITION;
+  [[vk::location(1)]] float4 in_model_0     : TEXCOORD0;
+  [[vk::location(2)]] float4 in_model_1     : TEXCOORD1;
+  [[vk::location(3)]] float4 in_model_2     : TEXCOORD2;
+  [[vk::location(4)]] float4 in_model_3     : TEXCOORD3;
+  [[vk::location(5)]] float4 in_color       : TEXCOORD4;
+};
 
-@(DECLARE_OUTPUT (location 0) (type float4) (name pixel_color))
-
-@(ENTRY)
-  pixel_color = in_color;
-  @(EXPORT_POSITION
-      viewproj *
-      float4x4(
-        in_model_0,
-        in_model_1,
-        in_model_2,
-        in_model_3
-      ) *
-      float4(in_position, 1.0)
-  );
-@(END)
+PSInput main(in VSInput input) {
+  PSInput output;
+  output.pixel_color = input.in_color;
+  output.pos =
+      mul(pc.viewproj,
+        mul(
+          float4x4(
+            input.in_model_0,
+            input.in_model_1,
+            input.in_model_2,
+            input.in_model_3
+          ),
+          float4(input.in_position, 1.0f)
+        )
+      );
+}
 #endif
 #ifdef PIXEL
 
-@(DECLARE_INPUT (location 0) (type float4) (name color))
-
-@(DECLARE_RENDER_TARGET
-  (location 0)
-)
-@(ENTRY)
-  @(EXPORT_COLOR 0
-    float4(color.xyz, 1.0)
-  );
-@(END)
+float4 main(in PSInput input) : SV_TARGET0 {
+  return
+    float4(input.pixel_color.xyz, 1.0f);
+}
 #endif
 )");
     Pair<string_ref, string_ref> defines[] = {
@@ -1177,37 +1163,40 @@ protected:
     gizmo_vs = rm->create_shader_raw(rd::Stage_t::VERTEX, shader, &defines[0], 1);
     gizmo_ps = rm->create_shader_raw(rd::Stage_t::PIXEL, shader, &defines[1], 1);
     static string_ref shader_lines = stref_s(R"(
-@(DECLARE_PUSH_CONSTANTS
-  (add_field (type float4x4)   (name viewproj))
-)
+struct PushConstants
+{
+  float4x4 viewproj;
+};
+[[vk::push_constant]] ConstantBuffer<PushConstants> pc : register(b0, space0);
+
+struct PSInput {
+  [[vk::location(0)]] float4 pos            : SV_POSITION;
+  [[vk::location(1)]] float3 pixel_color    : TEXCOORD0;
+};
 
 #ifdef VERTEX
 
-@(DECLARE_INPUT (location 0) (type float3) (name in_position))
-@(DECLARE_INPUT (location 1) (type float3) (name in_color))
+struct VSInput {
+  [[vk::location(0)]] float3 in_position    : POSITION;
+  [[vk::location(1)]] float3 in_color       : TEXCOORD4;
+};
 
-@(DECLARE_OUTPUT (location 0) (type float3) (name pixel_color))
-
-@(ENTRY)
-  pixel_color = in_color;
-  @(EXPORT_POSITION
-      viewproj *
-      float4(in_position, 1.0)
-  );
-@(END)
+PSInput main(in VSInput input) {
+  PSInput output;
+  output.pixel_color = input.in_color;
+  output.pos =
+      mul(
+        pc.viewproj,
+        float4(input.in_position, 1.0f)
+      );
+}
 #endif
 #ifdef PIXEL
 
-@(DECLARE_INPUT (location 0) (type float3) (name color))
-
-@(DECLARE_RENDER_TARGET
-  (location 0)
-)
-@(ENTRY)
-  @(EXPORT_COLOR 0
-    float4(color.xyz, 1.0)
-  );
-@(END)
+float4 main(in PSInput input) : SV_TARGET0 {
+  return
+    float4(input.pixel_color.xyz, 1.0f);
+}
 #endif
 )");
     gizmo_lines_vs = rm->create_shader_raw(rd::Stage_t::VERTEX, shader_lines, &defines[0], 1);
@@ -1253,60 +1242,53 @@ protected:
       // RenderDoc_CTX::get().end();
     }
     static const char *font_shader = R"(
-@(DECLARE_PUSH_CONSTANTS
-  (add_field (type float2)    (name glyph_uv_size))
-  (add_field (type float2)    (name glyph_size))
-  (add_field (type float2)    (name viewport_size))
-)
+struct PushConstants
+{
+  float2 glyph_uv_size;
+  float2 glyph_size; 
+  float2 viewport_size;
+};
+[[vk::push_constant]] ConstantBuffer<PushConstants> pc : register(b0, space0);
+
+struct PSInput {
+  [[vk::location(0)]] float4 pos   : SV_POSITION;
+  [[vk::location(1)]] float2 uv    : TEXCOORD0;
+  [[vk::location(2)]] float3 color : TEXCOORD1;
+};
 
 #ifdef VERTEX
 
-@(DECLARE_INPUT (location 0) (type float3) (name vertex_position))
-@(DECLARE_INPUT (location 1) (type float3) (name instance_offset))
-@(DECLARE_INPUT (location 2) (type float2) (name instance_uv_offset))
-@(DECLARE_INPUT (location 3) (type float3) (name instance_color))
+struct VSInput {
+  [[vk::location(0)]] float3 vertex_position     : POSITION;
+  [[vk::location(1)]] float3 instance_offset     : TEXCOORD0;
+  [[vk::location(2)]] float2 instance_uv_offset  : TEXCOORD1;
+  [[vk::location(3)]] float3 instance_color      : TEXCOORD2;
+};
 
-@(DECLARE_OUTPUT (location 0) (type float2) (name uv))
-@(DECLARE_OUTPUT (location 1) (type float3) (name color))
-
-@(ENTRY)
-  color = instance_color;
-  uv = instance_uv_offset + (vertex_position.xy * vec2(1.0, -1.0) + vec2(0.0, 1.0)) * glyph_uv_size;
-  float4 sspos =  float4(vertex_position.xy * glyph_size + instance_offset.xy, 0.0, 1.0);
-  int pixel_x = int(viewport_size.x * (sspos.x * 0.5 + 0.5));
-  int pixel_y = int(viewport_size.y * (sspos.y * 0.5 + 0.5));
-  sspos.x = 2.0 * (float(pixel_x)) / viewport_size.x - 1.0;
-  sspos.y = 2.0 * (float(pixel_y)) / viewport_size.y - 1.0;
-  sspos.z = instance_offset.z;
-  @(EXPORT_POSITION sspos);
-@(END)
+PSInput main(in VSInput input) {
+  PSInput output;
+  output.color = input.instance_color;
+  output.uv = input.instance_uv_offset + (input.vertex_position.xy * float2(1.0, -1.0) + float2(0.0, 1.0)) * pc.glyph_uv_size;
+  float4 sspos =  float4(input.vertex_position.xy * pc.glyph_size + input.instance_offset.xy, 0.0, 1.0);
+  int pixel_x = int(pc.viewport_size.x * (sspos.x * 0.5 + 0.5));
+  int pixel_y = int(pc.viewport_size.y * (sspos.y * 0.5 + 0.5));
+  sspos.x = 2.0 * (float(pixel_x)) / pc.viewport_size.x - 1.0;
+  sspos.y = 2.0 * (float(pixel_y)) / pc.viewport_size.y - 1.0;
+  sspos.z = input.instance_offset.z;
+  output.pos = sspos;
+  return output;
+}
 #endif
 #ifdef PIXEL
+[[vk::binding(0, 0)]] Texture2D<float4>   font_texture          : register(t0, space0);
+[[vk::binding(1, 0)]] SamplerState        my_sampler            : register(s2, space0);
 
-@(DECLARE_INPUT (location 0) (type float2) (name uv))
-@(DECLARE_INPUT (location 1) (type float3) (name color))
-@(DECLARE_IMAGE
-  (type SAMPLED)
-  (dim 2D)
-  (set 0)
-  (binding 0)
-  (name font_texture)
-)
-@(DECLARE_SAMPLER
-  (set 0)
-  (binding 1)
-  (name my_sampler)
-)
-@(DECLARE_RENDER_TARGET
-  (location 0)
-)
-@(ENTRY)
-  if (texture(sampler2D(font_texture, my_sampler), uv).x < 0.5)
+float4 main(in PSInput input) : SV_TARGET0 {
+  if (font_texture.Sample(my_sampler, input.uv).x < 0.5f)
     discard;
-  @(EXPORT_COLOR 0
-    float4(color.xyz, 1.0)
-  );
-@(END)
+  return
+    float4(input.color.xyz, 1.0f);
+}
 #endif
 )";
     font_vs = rm->create_shader_raw(rd::Stage_t::VERTEX, stref_s(font_shader), &defines[0], 1);
@@ -1906,6 +1888,72 @@ protected:
       ctx->draw(line_segments.size, 1, 0, 0);
       line_segments.reset();
     }
+  }
+};
+
+template <typename T> class GPUBuffer {
+  private:
+  rd::IFactory *factory;
+  Array<T>      cpu_array;
+  Resource_ID   gpu_buffer;
+  Resource_ID   cpu_buffer;
+  size_t        gpu_buffer_size;
+
+  public:
+  void init(rd::IFactory *factory) {
+    this->factory = factory;
+    cpu_array.init();
+    gpu_buffer.reset();
+    cpu_buffer.reset();
+    gpu_buffer_size = 0;
+  }
+  void push(T a) { cpu_array.push(a); }
+  void clear() {
+    cpu_array.release();
+    factory->release_resource(gpu_buffer);
+    factory->release_resource(cpu_buffer);
+    gpu_buffer.reset();
+  }
+  Resource_ID get() { return gpu_buffer; }
+  void        reset() { cpu_array.reset(); }
+  void        flush(rd::Imm_Ctx *ctx = NULL) {
+    if (gpu_buffer.is_null() || cpu_array.size * sizeof(T) < gpu_buffer_size) {
+      if (cpu_buffer) factory->release_resource(cpu_buffer);
+      if (gpu_buffer) factory->release_resource(gpu_buffer);
+      gpu_buffer_size = cpu_array.size * sizeof(T);
+      {
+        rd::Buffer_Create_Info info;
+        MEMZERO(info);
+        info.mem_bits = (u32)rd::Memory_Bits::DEVICE_LOCAL;
+        info.usage_bits =
+            (u32)rd::Buffer_Usage_Bits::USAGE_UAV | (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
+        info.size  = cpu_array.size * sizeof(T);
+        gpu_buffer = factory->create_buffer(info);
+      }
+      {
+        rd::Buffer_Create_Info info;
+        MEMZERO(info);
+        info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+        info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
+        info.size       = cpu_array.size * sizeof(T);
+        cpu_array       = factory->create_buffer(info);
+      }
+    }
+    void *ptr = factory->map_buffer(cpu_buffer);
+    memcpy(ptr, cpu_array.ptr, gpu_buffer_size);
+    factory->unmap_buffer(cpu_buffer);
+    if (ctx == NULL) {
+      ctx = factory->start_compute_pass();
+      ctx->copy_buffer(cpu_buffer, 0, gpu_buffer, 0, gpu_buffer_size);
+      factory->end_compute_pass(ctx);
+    } else {
+      ctx->copy_buffer(cpu_buffer, 0, gpu_buffer, 0, gpu_buffer_size);
+    }
+  }
+  void release() {
+    if (cpu_buffer) factory->release_resource(cpu_buffer);
+    if (gpu_buffer) factory->release_resource(gpu_buffer);
+    cpu_array.release();
   }
 };
 

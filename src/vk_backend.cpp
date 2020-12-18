@@ -497,15 +497,15 @@ static Array<u32> compile_glsl(VkDevice device, string_ref text, shaderc_shader_
 
 static Array<u32> compile_hlsl(VkDevice device, string_ref text, shaderc_shader_kind kind,
                                Pair<string_ref, string_ref> *defines, size_t num_defines) {
-  HMODULE dxcompilerDLL = LoadLibraryA("dxcompiler.dll");
+  static HMODULE dxcompilerDLL = LoadLibraryA("dxcompiler.dll");
   ASSERT_ALWAYS(dxcompilerDLL);
-  DxcCreateInstanceProc DxcCreateInstance =
+  static DxcCreateInstanceProc DxcCreateInstance =
       (DxcCreateInstanceProc)GetProcAddress(dxcompilerDLL, "DxcCreateInstance");
 
-  CComPtr<IDxcLibrary> library;
+  static CComPtr<IDxcLibrary> library;
   ASSERT_ALWAYS(S_OK == DxcCreateInstance(CLSID_DxcLibrary, IID_PPV_ARGS(&library)));
 
-  CComPtr<IDxcCompiler> compiler;
+  static CComPtr<IDxcCompiler> compiler;
   ASSERT_ALWAYS(S_OK == DxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler)));
 
   CComPtr<IDxcBlobEncoding> blob;
@@ -514,7 +514,7 @@ static Array<u32> compile_hlsl(VkDevice device, string_ref text, shaderc_shader_
   LPCWSTR profile = L"ps_6_0";
   if (kind == shaderc_vertex_shader)
     profile = L"vs_6_0";
-  else if (kind == shaderc_vertex_shader)
+  else if (kind == shaderc_fragment_shader)
     profile = L"ps_6_0";
   else if (kind == shaderc_compute_shader)
     profile = L"cs_6_0";
@@ -2330,9 +2330,18 @@ struct Window {
     sb.init();
     defer(sb.release());
     sb.reset();
+    sb.putf(R"(
+#define u32 uint
+#define i32 int
+#define f32 float
+#define f64 double
+#define float2_splat(x)  float2(x, x)
+#define float3_splat(x)  float3(x, x, x)
+#define float4_splat(x)  float4(x, x, x, x)
+)");
+    sb.putstr(body);
     // preprocess_shader(sb, body);
-    // string_ref text = sb.get_str();
-    string_ref text = body;
+    string_ref text = sb.get_str();
 
     Shader_Info         si;
     shaderc_shader_kind kind;
@@ -3769,12 +3778,6 @@ class Vk_Ctx : public rd::Imm_Ctx {
     cpu_cmd.write(Cmd_t::EVENT, &de);
     return event;
   }
-  bool get_event_state(Resource_ID fence_id) override {
-    Event &  event    = wnd->events[fence_id.id];
-    VkResult wait_res = vkGetEventStatus(wnd->device, event.event);
-    ASSERT_DEBUG(wait_res == VK_EVENT_SET || wait_res == VK_EVENT_RESET);
-    return wait_res == VK_EVENT_SET;
-  }
   void IA_set_topology(rd::Primitive topology) override {
     ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
     graphics_state.topology = to_vk(topology);
@@ -4233,6 +4236,12 @@ class VkFactory : public rd::IFactory {
   }
   Resource_ID create_buffer(rd::Buffer_Create_Info info) override {
     return wnd->create_buffer(info);
+  }
+  bool get_event_state(Resource_ID fence_id) override {
+    Event &  event    = wnd->events[fence_id.id];
+    VkResult wait_res = vkGetEventStatus(wnd->device, event.event);
+    ASSERT_DEBUG(wait_res == VK_EVENT_SET || wait_res == VK_EVENT_RESET);
+    return wait_res == VK_EVENT_SET;
   }
   Resource_ID create_shader_raw(rd::Stage_t type, string_ref body,
                                 Pair<string_ref, string_ref> *defines,

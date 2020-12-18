@@ -416,6 +416,7 @@ class IFactory {
   virtual bool     get_timestamp_state(Resource_ID)                       = 0;
   virtual double   get_timestamp_ms(Resource_ID t0, Resource_ID t1)       = 0;
   virtual void     wait_idle()                                            = 0;
+  virtual bool     get_event_state(Resource_ID id)                        = 0;
 };
 
 class Imm_Ctx {
@@ -431,7 +432,6 @@ class Imm_Ctx {
   virtual void image_barrier(Resource_ID image_id, u32 access_flags, Image_Layout layout) = 0;
   virtual void buffer_barrier(Resource_ID buf_id, u32 access_flags)                       = 0;
   virtual Resource_ID insert_event()                                                      = 0;
-  virtual bool        get_event_state(Resource_ID id)                                     = 0;
   virtual void        RS_set_line_width(float width)                                      = 0;
   virtual void        RS_set_depth_bias(float b)                                          = 0;
   virtual void        IA_set_topology(Primitive topology)                                 = 0;
