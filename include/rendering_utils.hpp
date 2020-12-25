@@ -115,8 +115,9 @@ struct ImGui_ID {
     return iid;
   }
 };
-
-class IGUI_Pass : public rd::IEvent_Consumer {
+#if 0
+				
+class IGUI_Pass {
   protected:
   Resource_ID vs;
   Resource_ID ps;
@@ -138,12 +139,12 @@ class IGUI_Pass : public rd::IEvent_Consumer {
   ImDrawData *  draw_data;
   Timer         timer;
   bool          imgui_initialized;
-  rd::Pass_Mng *pmng;
+  rd::IFactory *factory;
 
   public:
   virtual void on_gui(rd::IFactory *factory) {}
 
-  void consume(void *_event) override {
+  void consume(void *_event) {
     SDL_Event *event = (SDL_Event *)_event;
     if (imgui_initialized) {
       ImGui_ImplSDL2_ProcessEvent(event);
@@ -195,8 +196,8 @@ class IGUI_Pass : public rd::IEvent_Consumer {
       }
     }
   }
-  void init(rd::Pass_Mng *pmng) override {
-    this->pmng = pmng;
+  void init(rd::IFactory *factory) {
+    this->factory = factory;
     image_bindings.init();
     timer.init();
     imgui_initialized = false;
@@ -221,7 +222,7 @@ class IGUI_Pass : public rd::IEvent_Consumer {
     image_bindings.push(iid);
     return (ImTextureID)(size_t)(image_bindings.size - 1);
   }
-  void on_frame(rd::IFactory *factory) override {
+  void on_frame(rd::IFactory *factory) {
     rd::Image2D_Info scinfo = factory->get_swapchain_image_info();
     width                   = scinfo.width;
     height                  = scinfo.height;
@@ -556,6 +557,8 @@ float4 main(in PSInput input) : SV_TARGET0 {
     delete this;
   }
 };
+#endif // 0
+
 
 static ImVec2 get_window_size() {
   auto  wsize       = ImGui::GetWindowSize();
@@ -831,7 +834,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     MEMZERO(pc);
     pc.op = 0;
     switch (image->format) {
-      // clang-format off
+    // clang-format off
       case rd::Format::RGBA8_SRGBA:  {  pc.format = 0; } break;
       case rd::Format::RGBA8_UNORM:  {  pc.format = 1; } break;
       case rd::Format::RGB32_FLOAT:  {  pc.format = 2; } break;
@@ -1137,15 +1140,16 @@ PSInput main(in VSInput input) {
   output.pos =
       mul(pc.viewproj,
         mul(
+          float4(input.in_position, 1.0f),
           float4x4(
             input.in_model_0,
             input.in_model_1,
             input.in_model_2,
             input.in_model_3
-          ),
-          float4(input.in_position, 1.0f)
+          )
         )
       );
+  return output;
 }
 #endif
 #ifdef PIXEL
@@ -1563,6 +1567,8 @@ float4 main(in PSInput input) : SV_TARGET0 {
       auto   wpos      = ImGui::GetCursorScreenPos();
       auto   wsize     = ImGui::GetWindowSize();
       g_camera.aspect  = float(wsize.x) / wsize.y;
+      timer.update();
+      g_camera.update();
       imguimpos.x -= wpos.x;
       imguimpos.y -= wpos.y;
       ito(3) {
@@ -1638,8 +1644,6 @@ float4 main(in PSInput input) : SV_TARGET0 {
       float3 color = float3(1.0f, 1.0f, 1.0f);
       render_linebox(aabb.min, aabb.max, color);
     }
-    timer.update();
-    g_camera.update();
     ito(gizmos.size) if (gizmos[i]) { gizmos[i]->update(); }
     ito(gizmos.size) if (gizmos[i] && gizmos[i]->isScheduledForRemoval()) { gizmos[i]->release(); }
     ito(gizmos.size) if (gizmos[i]) { gizmos[i]->paint(); }

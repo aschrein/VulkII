@@ -34,7 +34,7 @@ static inline u64 hash_of(ID id) { return hash_of(id._id); }
 static inline u64 hash_of(Resource_ID res) { return hash_of(res.id._id) ^ hash_of(res.type); }
 
 namespace rd {
-enum class Impl_t { VULKAN, Null };
+enum class Impl_t { VULKAN, DX12, Null };
 enum class Cmp { LT, LE, GT, GE, EQ };
 enum class Primitive { TRIANGLE_LIST, TRIANGLE_STRIP, LINE_LIST };
 enum class Front_Face { CW, CCW };
@@ -417,6 +417,8 @@ class IFactory {
   virtual double   get_timestamp_ms(Resource_ID t0, Resource_ID t1)       = 0;
   virtual void     wait_idle()                                            = 0;
   virtual bool     get_event_state(Resource_ID id)                        = 0;
+
+  virtual void release() = 0;
 };
 
 class Imm_Ctx {
@@ -478,24 +480,8 @@ class Imm_Ctx {
   virtual Image_Info get_image_info(Resource_ID res_id)                                   = 0;
 };
 
-class Pass_Mng;
-
-class IEvent_Consumer {
-  public:
-  virtual void consume(void *event)   = 0;
-  virtual void init(Pass_Mng *)       = 0;
-  virtual void on_init(IFactory *)    = 0;
-  virtual void on_release(IFactory *) = 0;
-  virtual void on_frame(IFactory *)   = 0;
-};
-
-struct Pass_Mng {
-  static Pass_Mng *create(Impl_t type);
-  virtual void     loop()                                        = 0;
-  virtual void     set_event_consumer(IEvent_Consumer *consumer) = 0;
-  virtual void     release()                                     = 0;
-  virtual void *   get_window_handle()                           = 0;
-};
+IFactory *create_vulkan(void *window_handler);
+// IFactory *create_dx12();
 
 } // namespace rd
 

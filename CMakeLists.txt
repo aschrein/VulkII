@@ -29,6 +29,9 @@ IF (WIN32)
     "$ENV{VULKAN_SDK}/lib/shaderc_shared.lib"
     "$ENV{VULKAN_SDK}/lib/spirv-cross-core.lib"
     "$ENV{VULKAN_SDK}/lib/HLSL.lib"
+    "d3d12.lib"
+    "d3dcompiler.lib"
+    "dxgi.lib"
     )
   set (INCLUDES "${SDL2_PATH}/include")
   set(CompilerFlags
@@ -118,3 +121,4 @@ add_example(simple_compute examples/simple_compute.cpp)
 add_example(oit examples/oit.cpp)
 add_example(virtual_textures examples/virtual_textures.cpp)
 add_example(sdf examples/sdf.cpp)
+add_example(dx12_test examples/dx12_test.cpp)

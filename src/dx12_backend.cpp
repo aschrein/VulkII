@@ -295,4 +295,108 @@ struct Resource_Path {
 u64 hash_of(Resource_Path const &path) {
   return ::hash_of(path.set) ^ ::hash_of(path.binding) ^ ::hash_of(path.element);
 }
+
+#if 0
+				class Dx12Factory : public rd::IFactory {
+  Window *           wnd;
+  Array<Resource_ID> release_queue;
+
+  public:
+  ID   last_sem;
+  void init(Window *wnd) {
+    this->wnd = wnd;
+    last_sem  = {0};
+    release_queue.init();
+  }
+  void release() {
+    release_queue.release();
+    delete this;
+  }
+  void on_frame_begin() { last_sem = {0}; }
+  void on_frame_end() {
+    if (last_sem.is_null() == false) {
+      wnd->release_resource({last_sem, (u32)Resource_Type::SEMAPHORE});
+    }
+    last_sem = {0};
+    ito(release_queue.size) wnd->release_resource(release_queue[i]);
+    release_queue.release();
+  }
+  bool        get_timestamp_state(Resource_ID t0) override { TRAP; }
+  double      get_timestamp_ms(Resource_ID t0, Resource_ID t1) override { TRAP; }
+  Resource_ID create_image(rd::Image_Create_Info info) override { TRAP; }
+  Resource_ID create_buffer(rd::Buffer_Create_Info info) override { TRAP; }
+  bool        get_event_state(Resource_ID fence_id) override { TRAP; }
+  Resource_ID create_shader_raw(rd::Stage_t type, string_ref body,
+                                Pair<string_ref, string_ref> *defines,
+                                size_t                        num_defines) override {
+
+    TRAP;
+  }
+  void *           map_buffer(Resource_ID res_id) override { TRAP; }
+  void             unmap_buffer(Resource_ID res_id) override { TRAP; }
+  Resource_ID      create_sampler(rd::Sampler_Create_Info const &info) override { TRAP; }
+  void             release_resource(Resource_ID id) override { TRAP; }
+  Resource_ID      get_swapchain_image() override { TRAP; }
+  rd::Image2D_Info get_swapchain_image_info() override { TRAP; }
+  rd::Image_Info   get_image_info(Resource_ID res_id) override { TRAP; }
+  rd::Imm_Ctx *    start_render_pass(rd::Render_Pass_Create_Info const &info) override { TRAP; }
+  void             end_render_pass(rd::Imm_Ctx *_ctx) override { TRAP; }
+  rd::Imm_Ctx *    start_compute_pass() override { TRAP; }
+  void             wait_idle() { TRAP; }
+  void             end_compute_pass(rd::Imm_Ctx *_ctx) override { TRAP; }
+};
+class Dx12Pass_Mng : public rd::Pass_Mng {
+  public:
+  Window *             wnd      = NULL;
+  Dx12Factory *        f        = NULL;
+  rd::IEvent_Consumer *consumer = NULL;
+  Dx12Pass_Mng() {
+    wnd = new Window();
+    wnd->init();
+    f = new Dx12Factory();
+    f->init(wnd);
+    consumer = NULL;
+  }
+  void release() override {
+    consumer->on_release(f);
+    f->release();
+    wnd->release();
+    delete wnd;
+    delete this;
+  }
+  void loop() override {
+    consumer->init(this);
+    wnd->start_frame();
+    consumer->on_init(f);
+    wnd->end_frame();
+    while (true) {
+      SDL_Event event;
+      while (SDL_PollEvent(&event)) {
+        if (consumer != NULL) {
+          consumer->consume(&event);
+        }
+        if (event.type == SDL_QUIT) {
+          release();
+          exit(0);
+        }
+        switch (event.type) {
+        case SDL_WINDOWEVENT:
+          if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
+          }
+          break;
+        }
+      }
+      wnd->start_frame();
+      f->on_frame_begin();
+      consumer->on_frame(f);
+      f->on_frame_end();
+      wnd->end_frame();
+    }
+  }
+  void  set_event_consumer(rd::IEvent_Consumer *consumer) override { this->consumer = consumer; }
+  void *get_window_handle() { return (void *)wnd->window; }
+};
+rd::Pass_Mng *create_dx12_pass_mng() { return new Dx12Pass_Mng; }
+#endif // 0
+
 } // namespace

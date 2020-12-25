@@ -23,19 +23,16 @@ LPCWSTR towstr_tmp(string_ref str) {
 
 #ifdef __linux__
 #  define VK_USE_PLATFORM_XCB_KHR
-#  include <SDL2/SDL.h>
-#  include <SDL2/SDL_vulkan.h>
 #  include <shaderc/shaderc.h>
 #  include <spirv_cross/spirv_cross_c.h>
 #  include <vulkan/vulkan.h>
 #else
 #  define VK_USE_PLATFORM_WIN32_KHR
-#  include <SDL.h>
-#  include <SDL_vulkan.h>
 #  include <atlbase.h>
 #  include <shaderc/shaderc.h>
 #  include <spirv_cross/spirv_cross_c.h>
 #  include <vulkan/vulkan.h>
+#  include <vulkan/vulkan_win32.h>
 #endif
 
 #include "rendering.hpp"
@@ -50,6 +47,28 @@ LPCWSTR towstr_tmp(string_ref str) {
       TRAP;                                                                                        \
     }                                                                                              \
   } while (0)
+
+VKAPI_ATTR VkBool32 VKAPI_CALL dbgFunc(VkDebugReportFlagsEXT flags,
+                                       VkDebugReportObjectTypeEXT /*objType*/,
+                                       uint64_t /*srcObject*/, size_t /*location*/, int32_t msgCode,
+                                       const char *pLayerPrefix, const char *pMsg,
+                                       void * /*pUserData*/) {
+
+  switch (flags) {
+  case VK_DEBUG_REPORT_INFORMATION_BIT_EXT: fprintf(stdout, "INFORMATION: "); break;
+  case VK_DEBUG_REPORT_WARNING_BIT_EXT: fprintf(stdout, "WARNING: "); break;
+  case VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT: fprintf(stdout, "PERFORMANCE WARNING: "); break;
+  case VK_DEBUG_REPORT_ERROR_BIT_EXT: fprintf(stdout, "ERROR: "); break;
+  case VK_DEBUG_REPORT_DEBUG_BIT_EXT: fprintf(stdout, "DEBUG: "); break;
+  default: fprintf(stdout, "unknown flag %i", (int)flags); break;
+  }
+
+  fprintf(stdout, pLayerPrefix);
+  fprintf(stdout, " ");
+  fprintf(stdout, pMsg);
+
+  return false;
+}
 
 namespace {
 Pool<char> string_storage = Pool<char>::create(1 << 20);
@@ -1753,9 +1772,8 @@ struct Resource_Array {
   }
 };
 
-struct Window {
+struct VkDeviceContext {
   static constexpr u32 MAX_SC_IMAGES = 0x10;
-  SDL_Window *         window;
 
   VkSurfaceKHR surface       = VK_NULL_HANDLE;
   i32          window_width  = 1280;
@@ -1792,161 +1810,161 @@ struct Window {
 
   Array<Mem_Chunk> mem_chunks;
   struct Buffer_Array : Resource_Array<Buffer, Buffer_Array> {
-    static constexpr char const NAME[] = "Buffer_Array";
-    Window *                    wnd    = NULL;
+    static constexpr char const NAME[]  = "Buffer_Array";
+    VkDeviceContext *           dev_ctx = NULL;
     void                        release_item(Buffer &buf) {
-      vkDestroyBuffer(wnd->device, buf.buffer, NULL);
-      wnd->mem_chunks[buf.mem_chunk_id.index()].rem_reference();
+      vkDestroyBuffer(dev_ctx->device, buf.buffer, NULL);
+      dev_ctx->mem_chunks[buf.mem_chunk_id.index()].rem_reference();
       buf.release();
       MEMZERO(buf);
     }
-    void init(Window *wnd) {
-      this->wnd = wnd;
+    void init(VkDeviceContext *dev_ctx) {
+      this->dev_ctx = dev_ctx;
       Resource_Array::init();
     }
   } buffers;
   struct Image_Array : Resource_Array<Image, Image_Array> {
-    static constexpr char const NAME[] = "Image_Array";
-    Window *                    wnd    = NULL;
+    static constexpr char const NAME[]  = "Image_Array";
+    VkDeviceContext *           dev_ctx = NULL;
     void                        release_item(Image &img) {
       if (img.mem_chunk_id.is_null() == false) {
         // True in case of swap chain images
-        vkDestroyImage(wnd->device, img.image, NULL);
-        wnd->mem_chunks[img.mem_chunk_id.index()].rem_reference();
+        vkDestroyImage(dev_ctx->device, img.image, NULL);
+        dev_ctx->mem_chunks[img.mem_chunk_id.index()].rem_reference();
       }
       img.release();
       MEMZERO(img);
     }
-    void init(Window *wnd) {
-      this->wnd = wnd;
+    void init(VkDeviceContext *dev_ctx) {
+      this->dev_ctx = dev_ctx;
       Resource_Array::init();
     }
   } images;
   struct BufferView_Array : Resource_Array<BufferView, BufferView_Array> {
-    static constexpr char const NAME[] = "BufferView_Array";
-    Window *                    wnd    = NULL;
+    static constexpr char const NAME[]  = "BufferView_Array";
+    VkDeviceContext *           dev_ctx = NULL;
     void                        release_item(BufferView &buf) {
-      vkDestroyBufferView(wnd->device, buf.view, NULL);
-      // wnd->buffers[buf.buf_id].rem_reference();
+      vkDestroyBufferView(dev_ctx->device, buf.view, NULL);
+      // dev_ctx->buffers[buf.buf_id].rem_reference();
       MEMZERO(buf);
     }
-    void init(Window *wnd) {
-      this->wnd = wnd;
+    void init(VkDeviceContext *dev_ctx) {
+      this->dev_ctx = dev_ctx;
       Resource_Array::init();
     }
   } buffer_views;
   struct ImageView_Array : Resource_Array<ImageView, ImageView_Array> {
-    static constexpr char const NAME[] = "ImageView_Array";
-    Window *                    wnd    = NULL;
+    static constexpr char const NAME[]  = "ImageView_Array";
+    VkDeviceContext *           dev_ctx = NULL;
     void                        release_item(ImageView &img) {
-      vkDestroyImageView(wnd->device, img.view, NULL);
-      // wnd->images[img.img_id].rem_reference();
+      vkDestroyImageView(dev_ctx->device, img.view, NULL);
+      // dev_ctx->images[img.img_id].rem_reference();
       MEMZERO(img);
     }
-    void init(Window *wnd) {
-      this->wnd = wnd;
+    void init(VkDeviceContext *dev_ctx) {
+      this->dev_ctx = dev_ctx;
       Resource_Array::init();
     }
   } image_views;
   struct Shader_Array : Resource_Array<Shader_Info, Shader_Array> {
-    static constexpr char const NAME[] = "Shader_Array";
-    Window *                    wnd    = NULL;
+    static constexpr char const NAME[]  = "Shader_Array";
+    VkDeviceContext *           dev_ctx = NULL;
     void                        release_item(Shader_Info &shader) { shader.release(); }
-    void                        init(Window *wnd) {
-      this->wnd = wnd;
+    void                        init(VkDeviceContext *dev_ctx) {
+      this->dev_ctx = dev_ctx;
       Resource_Array::init();
     }
   } shaders;
   struct Render_Pass_Array : Resource_Array<Render_Pass, Render_Pass_Array> {
-    static constexpr char const NAME[] = "Render_Pass_Array";
-    Window *                    wnd    = NULL;
-    void                        release_item(Render_Pass &item) { item.release(wnd->device); }
-    void                        init(Window *wnd) {
-      this->wnd = wnd;
+    static constexpr char const NAME[]  = "Render_Pass_Array";
+    VkDeviceContext *           dev_ctx = NULL;
+    void                        release_item(Render_Pass &item) { item.release(dev_ctx->device); }
+    void                        init(VkDeviceContext *dev_ctx) {
+      this->dev_ctx = dev_ctx;
       Resource_Array::init();
     }
   } render_passes;
   struct Pipe_Array : Resource_Array<Graphics_Pipeline_Wrapper, Pipe_Array> {
-    static constexpr char const NAME[] = "Pipe_Array";
-    Window *                    wnd    = NULL;
+    static constexpr char const NAME[]  = "Pipe_Array";
+    VkDeviceContext *           dev_ctx = NULL;
     void                        release_item(Graphics_Pipeline_Wrapper &item) {
-      item.release(wnd->device);
+      item.release(dev_ctx->device);
       MEMZERO(item);
     }
-    void init(Window *wnd) {
-      this->wnd = wnd;
+    void init(VkDeviceContext *dev_ctx) {
+      this->dev_ctx = dev_ctx;
       Resource_Array::init();
     }
   } pipelines;
   struct Compute_Pipe_Array : Resource_Array<Compute_Pipeline_Wrapper, Compute_Pipe_Array> {
-    static constexpr char const NAME[] = "Compute_Pipe_Array";
-    Window *                    wnd    = NULL;
+    static constexpr char const NAME[]  = "Compute_Pipe_Array";
+    VkDeviceContext *           dev_ctx = NULL;
     void                        release_item(Compute_Pipeline_Wrapper &item) {
-      item.release(wnd->device);
+      item.release(dev_ctx->device);
       MEMZERO(item);
     }
-    void init(Window *wnd) {
-      this->wnd = wnd;
+    void init(VkDeviceContext *dev_ctx) {
+      this->dev_ctx = dev_ctx;
       Resource_Array::init();
     }
   } compute_pipelines;
   struct Fence_Array : Resource_Array<Fence, struct Fence_Array> {
-    static constexpr char const NAME[] = "Fence_Pipe_Array";
-    Window *                    wnd    = NULL;
+    static constexpr char const NAME[]  = "Fence_Pipe_Array";
+    VkDeviceContext *           dev_ctx = NULL;
     void                        release_item(Fence &item) {
-      vkDestroyFence(wnd->device, item.fence, NULL);
+      vkDestroyFence(dev_ctx->device, item.fence, NULL);
       MEMZERO(item);
     }
-    void init(Window *wnd) {
-      this->wnd = wnd;
+    void init(VkDeviceContext *dev_ctx) {
+      this->dev_ctx = dev_ctx;
       Resource_Array::init();
     }
   } fences;
   struct Event_Array : Resource_Array<Event, struct Event_Array> {
-    static constexpr char const NAME[] = "Event_Pipe_Array";
-    Window *                    wnd    = NULL;
+    static constexpr char const NAME[]  = "Event_Pipe_Array";
+    VkDeviceContext *           dev_ctx = NULL;
     void                        release_item(Event &item) {
-      vkDestroyEvent(wnd->device, item.event, NULL);
+      vkDestroyEvent(dev_ctx->device, item.event, NULL);
       MEMZERO(item);
     }
-    void init(Window *wnd) {
-      this->wnd = wnd;
+    void init(VkDeviceContext *dev_ctx) {
+      this->dev_ctx = dev_ctx;
       Resource_Array::init();
     }
   } events;
   struct CmdBuffer_Array : Resource_Array<CommandBuffer, struct CmdBuffer_Array> {
-    static constexpr char const NAME[] = "CmdBuffer";
-    Window *                    wnd    = NULL;
+    static constexpr char const NAME[]  = "CmdBuffer";
+    VkDeviceContext *           dev_ctx = NULL;
     void                        release_item(CommandBuffer &item) {
-      vkFreeCommandBuffers(wnd->device, item.pool, 1, &item.cmd);
+      vkFreeCommandBuffers(dev_ctx->device, item.pool, 1, &item.cmd);
       MEMZERO(item);
     }
-    void init(Window *wnd) {
-      this->wnd = wnd;
+    void init(VkDeviceContext *dev_ctx) {
+      this->dev_ctx = dev_ctx;
       Resource_Array::init();
     }
   } cmd_buffers;
   struct Sem_Array : Resource_Array<Semaphore, struct Sem_Array> {
-    static constexpr char const NAME[] = "Sem_Array";
-    Window *                    wnd    = NULL;
+    static constexpr char const NAME[]  = "Sem_Array";
+    VkDeviceContext *           dev_ctx = NULL;
     void                        release_item(Semaphore &item) {
-      vkDestroySemaphore(wnd->device, item.sem, NULL);
+      vkDestroySemaphore(dev_ctx->device, item.sem, NULL);
       MEMZERO(item);
     }
-    void init(Window *wnd) {
-      this->wnd = wnd;
+    void init(VkDeviceContext *dev_ctx) {
+      this->dev_ctx = dev_ctx;
       Resource_Array::init();
     }
   } semaphores;
   struct Sampler_Array : Resource_Array<Sampler, Sampler_Array> {
-    static constexpr char const NAME[] = "Sampler_Array";
-    Window *                    wnd    = NULL;
+    static constexpr char const NAME[]  = "Sampler_Array";
+    VkDeviceContext *           dev_ctx = NULL;
     void                        release_item(Sampler &item) {
-      vkDestroySampler(wnd->device, item.sampler, NULL);
+      vkDestroySampler(dev_ctx->device, item.sampler, NULL);
       MEMZERO(item);
     }
-    void init(Window *wnd) {
-      this->wnd = wnd;
+    void init(VkDeviceContext *dev_ctx) {
+      this->dev_ctx = dev_ctx;
       Resource_Array::init();
     }
   } samplers;
@@ -2005,10 +2023,9 @@ struct Window {
     ito(sc_image_count) desc_pools[i].release();
     vkDestroySwapchainKHR(device, swapchain, NULL);
     vkDestroyDevice(device, NULL);
-    vkDestroySurfaceKHR(instance, surface, NULL);
+    if (surface != VK_NULL_HANDLE) vkDestroySurfaceKHR(instance, surface, NULL);
     vkDestroyInstance(instance, NULL);
-    SDL_DestroyWindow(window);
-    SDL_Quit();
+    delete this;
   }
 
   Descriptor_Pool &get_descriptor_pool() { return desc_pools[cmd_index]; }
@@ -2467,8 +2484,9 @@ struct Window {
   }
 
   void update_swapchain() {
-    SDL_SetWindowResizable(window, SDL_FALSE);
-    defer(SDL_SetWindowResizable(window, SDL_TRUE));
+    // In the case when we don't have a swap chain just allocate 1 command pool
+    sc_image_count = 1;
+    if (surface == VK_NULL_HANDLE) return;
     vkDeviceWaitIdle(device);
     release_swapchain();
     u32                format_count = 0;
@@ -2563,20 +2581,18 @@ struct Window {
     }
   }
 
-  void init() {
+  void init(void *window_handler) {
     init_ds();
-    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS);
-    window = SDL_CreateWindow("VulkII", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 512, 512,
-                              SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+
     TMP_STORAGE_SCOPE;
 
-    u32 num_instance_extensions;
-    ASSERT_ALWAYS(SDL_Vulkan_GetInstanceExtensions(window, &num_instance_extensions, nullptr));
-    const char **instance_extensions =
-        (char const **)tl_alloc_tmp((num_instance_extensions + 1) * sizeof(char *));
-    ASSERT_ALWAYS(
-        SDL_Vulkan_GetInstanceExtensions(window, &num_instance_extensions, instance_extensions));
-    instance_extensions[num_instance_extensions++] = VK_EXT_DEBUG_REPORT_EXTENSION_NAME;
+    const char *instance_extensions[] = {
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+        VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
+#else
+#  error
+#endif
+        VK_EXT_DEBUG_REPORT_EXTENSION_NAME};
 
     VkApplicationInfo app_info;
     MEMZERO(app_info);
@@ -2601,14 +2617,24 @@ struct Window {
     } else {
       info.enabledLayerCount = 0;
     }
-    info.enabledExtensionCount   = num_instance_extensions;
+    info.enabledExtensionCount   = ARRAYSIZE(instance_extensions);
     info.ppEnabledExtensionNames = instance_extensions;
 
     VK_ASSERT_OK(vkCreateInstance(&info, nullptr, &instance));
 
-    if (!SDL_Vulkan_CreateSurface(window, instance, &surface)) {
-      TRAP;
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+    if (window_handler) {
+      VkWin32SurfaceCreateInfoKHR createInfo;
+      MEMZERO(createInfo);
+      createInfo.sType     = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+      createInfo.hwnd      = (HWND)window_handler;
+      createInfo.hinstance = GetModuleHandle(nullptr);
+      VK_ASSERT_OK(vkCreateWin32SurfaceKHR(instance, &createInfo, nullptr, &surface));
     }
+#else
+#  error
+#endif
+
     const u32               MAX_COUNT = 0x100;
     u32                     physdevice_count;
     VkPhysicalDevice        physdevice_handles[MAX_COUNT];
@@ -2628,8 +2654,9 @@ struct Window {
             physdevice_handles[i], &num_queue_family_properties, queue_family_properties);
         jto(num_queue_family_properties) {
 
-          VkBool32 sup = VK_FALSE;
-          vkGetPhysicalDeviceSurfaceSupportKHR(physdevice_handles[i], j, surface, &sup);
+          VkBool32 sup = VK_TRUE;
+          if (surface != VK_NULL_HANDLE)
+            vkGetPhysicalDeviceSurfaceSupportKHR(physdevice_handles[i], j, surface, &sup);
 
           if (sup && (queue_family_properties[j].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
             graphics_queue_id  = j;
@@ -2763,10 +2790,12 @@ struct Window {
   }
 
   void update_surface_size() {
-    VkSurfaceCapabilitiesKHR surface_capabilities;
-    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physdevice, surface, &surface_capabilities);
-    window_width  = surface_capabilities.currentExtent.width;
-    window_height = surface_capabilities.currentExtent.height;
+    if (surface != VK_NULL_HANDLE) {
+      VkSurfaceCapabilitiesKHR surface_capabilities;
+      vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physdevice, surface, &surface_capabilities);
+      window_width  = surface_capabilities.currentExtent.width;
+      window_height = surface_capabilities.currentExtent.height;
+    }
   }
 
   void start_frame() {
@@ -2896,7 +2925,7 @@ u64 hash_of(Resource_Path const &path) {
 class Vk_Ctx : public rd::Imm_Ctx {
   private:
   rd::Pass_t                              type;
-  Window *                                wnd;
+  VkDeviceContext *                       dev_ctx;
   Graphics_Pipeline_State                 graphics_state;
   ID                                      cs;
   Resource_ID                             cmd_id;
@@ -3080,8 +3109,8 @@ class Vk_Ctx : public rd::Imm_Ctx {
 
   void _copy_buffer(Resource_ID src_buf_id, size_t src_offset, Resource_ID dst_buf_id,
                     size_t dst_offset, u32 size) {
-    Buffer &src_buffer = wnd->buffers[src_buf_id.id];
-    Buffer &dst_buffer = wnd->buffers[dst_buf_id.id];
+    Buffer &src_buffer = dev_ctx->buffers[src_buf_id.id];
+    Buffer &dst_buffer = dev_ctx->buffers[dst_buf_id.id];
 
     src_buffer.barrier(cmd, VK_ACCESS_TRANSFER_READ_BIT);
     dst_buffer.barrier(cmd, VK_ACCESS_TRANSFER_WRITE_BIT);
@@ -3095,8 +3124,8 @@ class Vk_Ctx : public rd::Imm_Ctx {
 
   void _copy_image_buffer(Resource_ID buf_id, size_t offset, Resource_ID img_id,
                           rd::Image_Copy const &dst_info) {
-    Buffer &buffer           = wnd->buffers[buf_id.id];
-    Image & image            = wnd->images[img_id.id];
+    Buffer &buffer           = dev_ctx->buffers[buf_id.id];
+    Image & image            = dev_ctx->images[img_id.id];
     auto    old_access_flags = image.access_flags;
     auto    old_layout       = image.layout;
 
@@ -3138,8 +3167,8 @@ class Vk_Ctx : public rd::Imm_Ctx {
 
   void _copy_buffer_image(Resource_ID buf_id, size_t offset, Resource_ID img_id,
                           rd::Image_Copy const &dst_info) {
-    Buffer &buffer           = wnd->buffers[buf_id.id];
-    Image & image            = wnd->images[img_id.id];
+    Buffer &buffer           = dev_ctx->buffers[buf_id.id];
+    Image & image            = dev_ctx->images[img_id.id];
     auto    old_access_flags = image.access_flags;
     auto    old_layout       = image.layout;
 
@@ -3243,14 +3272,14 @@ class Vk_Ctx : public rd::Imm_Ctx {
     cpu_cmd.write(Cmd_t::BARRIER, &db);
   }
   void flush_render_pass() {
-    Render_Pass &pass = wnd->render_passes[cur_pass];
+    Render_Pass &pass = dev_ctx->render_passes[cur_pass];
     ito(pass.create_info.rts.size) {
-      Image &img = wnd->images[pass.create_info.rts[i].image.id];
+      Image &img = dev_ctx->images[pass.create_info.rts[i].image.id];
       img.barrier(cmd, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     }
     if (pass.depth_target_view.is_null() == false) {
-      Image &img = wnd->images[pass.create_info.depth_target.image.id];
+      Image &img = dev_ctx->images[pass.create_info.depth_target.image.id];
       img.barrier(cmd, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                   VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     }
@@ -3265,15 +3294,14 @@ class Vk_Ctx : public rd::Imm_Ctx {
     binfo.clearValueCount = pass.clear_values.size;
     /*{
       u64      timestamp_results[2];
-      VkResult res = vkGetQueryPoolResults(wnd->device, wnd->query_pool, timestamp_begin_id, 2, 16,
-                                           timestamp_results, 8, VK_QUERY_RESULT_64_BIT);
-      if (res == VK_SUCCESS) {
-        u64 diff = timestamp_results[1] - timestamp_results[0];
-        last_ms  = diff * wnd->device_properties.limits.timestampPeriod;
+      VkResult res = vkGetQueryPoolResults(dev_ctx->device, dev_ctx->query_pool, timestamp_begin_id,
+    2, 16, timestamp_results, 8, VK_QUERY_RESULT_64_BIT); if (res == VK_SUCCESS) { u64 diff =
+    timestamp_results[1] - timestamp_results[0]; last_ms  = diff *
+    dev_ctx->device_properties.limits.timestampPeriod;
       }
     }
-    vkResetQueryPool(wnd->device, wnd->query_pool, timestamp_begin_id, 2);
-    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, wnd->query_pool,
+    vkResetQueryPool(dev_ctx->device, dev_ctx->query_pool, timestamp_begin_id, 2);
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, dev_ctx->query_pool,
                         timestamp_begin_id);*/
     vkCmdBeginRenderPass(cmd, &binfo, VK_SUBPASS_CONTENTS_INLINE);
     u8    pcs[128];
@@ -3306,7 +3334,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       } else if (type == Cmd_t::DRAW) {
         Deferred_Draw dd;
         cpu_cmd.read(&dd);
-        Graphics_Pipeline_Wrapper &gw = wnd->pipelines[dd.pso];
+        Graphics_Pipeline_Wrapper &gw = dev_ctx->pipelines[dd.pso];
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gw.pipeline);
         if (dd.sets.size > 0)
           vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gw.pipeline_layout, 0,
@@ -3343,8 +3371,8 @@ class Vk_Ctx : public rd::Imm_Ctx {
           break;
         }
         case Deferred_Draw::Type::MULTI_DRAW_INDEXED_INDIRECT: {
-          Buffer &arg_buf = wnd->buffers[dd.multi_draw_indexed_indirect.arg_buf_id];
-          Buffer &cnt_buf = wnd->buffers[dd.multi_draw_indexed_indirect.cnt_buf_id];
+          Buffer &arg_buf = dev_ctx->buffers[dd.multi_draw_indexed_indirect.arg_buf_id];
+          Buffer &cnt_buf = dev_ctx->buffers[dd.multi_draw_indexed_indirect.cnt_buf_id];
           vkCmdBindIndexBuffer(cmd, dd.ibo.buffer, dd.ibo.offset, dd.ibo.indexType);
           vkCmdDrawIndexedIndirectCount(
               cmd, arg_buf.buffer, dd.multi_draw_indexed_indirect.arg_buf_offset, cnt_buf.buffer,
@@ -3376,15 +3404,14 @@ class Vk_Ctx : public rd::Imm_Ctx {
   void flush_compute_pass() {
     /* {
        u64      timestamp_results[2];
-       VkResult res = vkGetQueryPoolResults(wnd->device, wnd->query_pool, timestamp_begin_id, 2, 16,
-                                            timestamp_results, 8, VK_QUERY_RESULT_64_BIT);
-       if (res == VK_SUCCESS) {
-         u64 diff = timestamp_results[1] - timestamp_results[0];
-         last_ms  = diff * wnd->device_properties.limits.timestampPeriod;
+       VkResult res = vkGetQueryPoolResults(dev_ctx->device, dev_ctx->query_pool,
+     timestamp_begin_id, 2, 16, timestamp_results, 8, VK_QUERY_RESULT_64_BIT); if (res ==
+     VK_SUCCESS) { u64 diff = timestamp_results[1] - timestamp_results[0]; last_ms  = diff *
+     dev_ctx->device_properties.limits.timestampPeriod;
        }
      }
-     vkResetQueryPool(wnd->device, wnd->query_pool, timestamp_begin_id, 2);
-     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, wnd->query_pool,
+     vkResetQueryPool(dev_ctx->device, dev_ctx->query_pool, timestamp_begin_id, 2);
+     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, dev_ctx->query_pool,
                          timestamp_begin_id);*/
     u8  pcs[128];
     u32 pc_dirty_range = 0;
@@ -3406,7 +3433,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       } else if (type == Cmd_t::BUFFER_FILL) {
         Deferred_Buffer_Fill df;
         cpu_cmd.read(&df);
-        Buffer &buf = wnd->buffers[df.buf_id];
+        Buffer &buf = dev_ctx->buffers[df.buf_id];
         vkCmdFillBuffer(cmd, buf.buffer, df.offset, df.size, df.val);
       } else if (type == Cmd_t::COPY_BUFFER_IMAGE) {
         Deferred_Copy_Buffer_Image dci;
@@ -3423,7 +3450,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       } else if (type == Cmd_t::CLEAR_IMAGE) {
         Deferred_Clear_Image cl;
         cpu_cmd.read(&cl);
-        Image &img = wnd->images[cl.img_id];
+        Image &img = dev_ctx->images[cl.img_id];
         /* img.barrier(cmd, VK_ACCESS_MEMORY_WRITE_BIT,
                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);*/
 
@@ -3431,7 +3458,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       } else if (type == Cmd_t::DISPATCH) {
         Deferred_Dispatch dd;
         cpu_cmd.read(&dd);
-        Compute_Pipeline_Wrapper &gw = wnd->compute_pipelines[dd.pso];
+        Compute_Pipeline_Wrapper &gw = dev_ctx->compute_pipelines[dd.pso];
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gw.pipeline);
         if (dd.sets.size > 0)
           vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gw.pipeline_layout, 0,
@@ -3447,51 +3474,51 @@ class Vk_Ctx : public rd::Imm_Ctx {
         Deferred_Barrier db;
         cpu_cmd.read(&db);
         if (db.image) {
-          Image &img = wnd->images[db.res_id];
+          Image &img = dev_ctx->images[db.res_id];
           img.barrier(cmd, db.new_access_flags, db.new_layout);
         } else {
-          Buffer &buffer = wnd->buffers[db.res_id];
+          Buffer &buffer = dev_ctx->buffers[db.res_id];
           buffer.barrier(cmd, db.new_access_flags);
         }
       } else {
         UNIMPLEMENTED;
       }
     }
-    // vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, wnd->query_pool,
+    // vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, dev_ctx->query_pool,
     // timestamp_end_id);
     cpu_cmd.reset();
   }
 
   Graphics_Pipeline_Wrapper &get_or_bake_graphics_pipeline() {
-    if (!wnd->pipeline_cache.contains(graphics_state)) {
+    if (!dev_ctx->pipeline_cache.contains(graphics_state)) {
       Graphics_Pipeline_Wrapper gw;
       ASSERT_DEBUG(!graphics_state.ps.is_null());
       ASSERT_DEBUG(!graphics_state.vs.is_null());
-      Shader_Info &ps = wnd->shaders[graphics_state.ps];
-      Shader_Info &vs = wnd->shaders[graphics_state.vs];
+      Shader_Info &ps = dev_ctx->shaders[graphics_state.ps];
+      Shader_Info &vs = dev_ctx->shaders[graphics_state.vs];
       ASSERT_DEBUG(!cur_pass.is_null());
-      Render_Pass &pass = wnd->render_passes[cur_pass];
-      gw.init(wnd->device, pass, vs, ps, graphics_state);
-      ID pipe_id = wnd->pipelines.push(gw);
-      wnd->pipeline_cache.insert(graphics_state, pipe_id);
+      Render_Pass &pass = dev_ctx->render_passes[cur_pass];
+      gw.init(dev_ctx->device, pass, vs, ps, graphics_state);
+      ID pipe_id = dev_ctx->pipelines.push(gw);
+      dev_ctx->pipeline_cache.insert(graphics_state, pipe_id);
     }
-    ID pipe_id = wnd->pipeline_cache.get(graphics_state);
+    ID pipe_id = dev_ctx->pipeline_cache.get(graphics_state);
     ASSERT_DEBUG(!pipe_id.is_null());
-    return wnd->pipelines[pipe_id];
+    return dev_ctx->pipelines[pipe_id];
   }
 
   Compute_Pipeline_Wrapper &get_or_bake_compute_pipeline() {
-    if (!wnd->compute_pipeline_cache.contains(cs)) {
+    if (!dev_ctx->compute_pipeline_cache.contains(cs)) {
       Compute_Pipeline_Wrapper gw;
       ASSERT_DEBUG(!cs.is_null());
-      Shader_Info &cs_info = wnd->shaders[cs];
-      gw.init(wnd->device, cs_info);
-      ID pipe_id = wnd->compute_pipelines.push(gw);
-      wnd->compute_pipeline_cache.insert(cs, pipe_id);
+      Shader_Info &cs_info = dev_ctx->shaders[cs];
+      gw.init(dev_ctx->device, cs_info);
+      ID pipe_id = dev_ctx->compute_pipelines.push(gw);
+      dev_ctx->compute_pipeline_cache.insert(cs, pipe_id);
     }
-    ID pipe_id = wnd->compute_pipeline_cache.get(cs);
+    ID pipe_id = dev_ctx->compute_pipeline_cache.get(cs);
     ASSERT_DEBUG(!pipe_id.is_null());
-    return wnd->compute_pipelines[pipe_id];
+    return dev_ctx->compute_pipelines[pipe_id];
   }
 
   void record_barriers() {
@@ -3500,14 +3527,14 @@ class Vk_Ctx : public rd::Imm_Ctx {
 
     deferred_bindings.iter_pairs([&](Resource_Path const &path, Resource_Binding const &rb) {
       if (rb.type == Binding_t::UNIFORM_BUFFER) {
-        Buffer &buffer = wnd->buffers[rb.uniform_buffer.buf_id];
+        Buffer &buffer = dev_ctx->buffers[rb.uniform_buffer.buf_id];
         if (type == rd::Pass_t::COMPUTE) {
           push_buffer_barrier(buffer.id, VK_ACCESS_SHADER_READ_BIT);
         } else {
           buffer.barrier(cmd, VK_ACCESS_SHADER_READ_BIT);
         }
       } else if (rb.type == Binding_t::STORAGE_BUFFER) {
-        Buffer &buffer = wnd->buffers[rb.uniform_buffer.buf_id];
+        Buffer &buffer = dev_ctx->buffers[rb.uniform_buffer.buf_id];
         if (type == rd::Pass_t::COMPUTE) {
           push_buffer_barrier(buffer.id, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
         } else {
@@ -3517,7 +3544,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       } else if (rb.type == Binding_t::IMAGE) {
         VkDescriptorImageInfo binfo;
         MEMZERO(binfo);
-        Image &img = wnd->images[rb.image.image_id];
+        Image &img = dev_ctx->images[rb.image.image_id];
         if (type == rd::Pass_t::COMPUTE) {
           push_image_barrier(img.id, VK_ACCESS_SHADER_READ_BIT,
                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -3528,7 +3555,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       } else if (rb.type == Binding_t::STORAGE_IMAGE) {
         VkDescriptorImageInfo binfo;
         MEMZERO(binfo);
-        Image &img = wnd->images[rb.image.image_id];
+        Image &img = dev_ctx->images[rb.image.image_id];
 
         if (type == rd::Pass_t::COMPUTE) {
           push_image_barrier(img.id, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
@@ -3551,7 +3578,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       if (bindings->contains({path.set, path.binding}) == false) return;
       if (rb.set != index) return;
       if (rb.type == Binding_t::UNIFORM_BUFFER) {
-        Buffer &               buffer = wnd->buffers[rb.uniform_buffer.buf_id];
+        Buffer &               buffer = dev_ctx->buffers[rb.uniform_buffer.buf_id];
         VkDescriptorBufferInfo binfo;
         MEMZERO(binfo);
         binfo.buffer = buffer.buffer;
@@ -3566,9 +3593,9 @@ class Vk_Ctx : public rd::Imm_Ctx {
         wset.dstBinding      = rb.binding;
         wset.dstSet          = set;
         wset.pBufferInfo     = &binfo;
-        vkUpdateDescriptorSets(wnd->device, 1, &wset, 0, NULL);
+        vkUpdateDescriptorSets(dev_ctx->device, 1, &wset, 0, NULL);
       } else if (rb.type == Binding_t::STORAGE_BUFFER) {
-        Buffer &buffer = wnd->buffers[rb.uniform_buffer.buf_id];
+        Buffer &buffer = dev_ctx->buffers[rb.uniform_buffer.buf_id];
 
         VkDescriptorBufferInfo binfo;
         MEMZERO(binfo);
@@ -3584,16 +3611,17 @@ class Vk_Ctx : public rd::Imm_Ctx {
         wset.dstBinding      = rb.binding;
         wset.dstSet          = set;
         wset.pBufferInfo     = &binfo;
-        vkUpdateDescriptorSets(wnd->device, 1, &wset, 0, NULL);
+        vkUpdateDescriptorSets(dev_ctx->device, 1, &wset, 0, NULL);
       } else if (rb.type == Binding_t::IMAGE) {
         VkDescriptorImageInfo binfo;
         MEMZERO(binfo);
-        Image &img     = wnd->images[rb.image.image_id];
-        ID     view_id = wnd->create_image_view(img.id, rb.image.sr.baseMipLevel,
-                                            rb.image.sr.levelCount, rb.image.sr.baseArrayLayer,
-                                            rb.image.sr.layerCount, rb.image.format)
+        Image &img     = dev_ctx->images[rb.image.image_id];
+        ID     view_id = dev_ctx
+                         ->create_image_view(img.id, rb.image.sr.baseMipLevel,
+                                             rb.image.sr.levelCount, rb.image.sr.baseArrayLayer,
+                                             rb.image.sr.layerCount, rb.image.format)
                          .id;
-        ImageView &view   = wnd->image_views[view_id];
+        ImageView &view   = dev_ctx->image_views[view_id];
         binfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         binfo.imageView   = view.view;
         binfo.sampler     = VK_NULL_HANDLE;
@@ -3606,16 +3634,17 @@ class Vk_Ctx : public rd::Imm_Ctx {
         wset.dstBinding      = rb.binding;
         wset.dstSet          = set;
         wset.pImageInfo      = &binfo;
-        vkUpdateDescriptorSets(wnd->device, 1, &wset, 0, NULL);
+        vkUpdateDescriptorSets(dev_ctx->device, 1, &wset, 0, NULL);
       } else if (rb.type == Binding_t::STORAGE_IMAGE) {
         VkDescriptorImageInfo binfo;
         MEMZERO(binfo);
-        Image &img     = wnd->images[rb.image.image_id];
-        ID     view_id = wnd->create_image_view(img.id, rb.image.sr.baseMipLevel,
-                                            rb.image.sr.levelCount, rb.image.sr.baseArrayLayer,
-                                            rb.image.sr.layerCount, rb.image.format)
+        Image &img     = dev_ctx->images[rb.image.image_id];
+        ID     view_id = dev_ctx
+                         ->create_image_view(img.id, rb.image.sr.baseMipLevel,
+                                             rb.image.sr.levelCount, rb.image.sr.baseArrayLayer,
+                                             rb.image.sr.layerCount, rb.image.format)
                          .id;
-        ImageView &view   = wnd->image_views[view_id];
+        ImageView &view   = dev_ctx->image_views[view_id];
         binfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         binfo.imageView   = view.view;
         binfo.sampler     = VK_NULL_HANDLE;
@@ -3628,11 +3657,11 @@ class Vk_Ctx : public rd::Imm_Ctx {
         wset.dstBinding      = rb.binding;
         wset.dstSet          = set;
         wset.pImageInfo      = &binfo;
-        vkUpdateDescriptorSets(wnd->device, 1, &wset, 0, NULL);
+        vkUpdateDescriptorSets(dev_ctx->device, 1, &wset, 0, NULL);
       } else if (rb.type == Binding_t::SAMPLER) {
         VkDescriptorImageInfo binfo;
         MEMZERO(binfo);
-        Sampler &sampler  = wnd->samplers[rb.sampler.sampler_id];
+        Sampler &sampler  = dev_ctx->samplers[rb.sampler.sampler_id];
         binfo.imageLayout = VK_IMAGE_LAYOUT_MAX_ENUM;
         binfo.imageView   = VK_NULL_HANDLE;
         binfo.sampler     = sampler.sampler;
@@ -3645,7 +3674,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
         wset.dstBinding      = rb.binding;
         wset.dstSet          = set;
         wset.pImageInfo      = &binfo;
-        vkUpdateDescriptorSets(wnd->device, 1, &wset, 0, NULL);
+        vkUpdateDescriptorSets(dev_ctx->device, 1, &wset, 0, NULL);
       } else {
         UNIMPLEMENTED;
       }
@@ -3660,20 +3689,20 @@ class Vk_Ctx : public rd::Imm_Ctx {
     clear_state();
   }
 
-  void init(rd::Pass_t type, Window *wnd, ID pass_id) {
+  void init(rd::Pass_t type, VkDeviceContext *dev_ctx, ID pass_id) {
     this->type = type;
-    // timestamp_begin_id = wnd->allocate_timestamp_id();
-    // timestamp_end_id   = wnd->allocate_timestamp_id();
+    // timestamp_begin_id = dev_ctx->allocate_timestamp_id();
+    // timestamp_end_id   = dev_ctx->allocate_timestamp_id();
     set_dirty_flags = 0;
     memset(set_cache, 0, sizeof(set_cache));
     deferred_bindings.init();
     cpu_cmd.init();
-    this->wnd = wnd;
+    this->dev_ctx = dev_ctx;
     stack.init();
     graphics_state.reset();
 
-    cmd_id = wnd->create_command_buffer();
-    cmd    = wnd->cmd_buffers[cmd_id.id].cmd;
+    cmd_id = dev_ctx->create_command_buffer();
+    cmd    = dev_ctx->cmd_buffers[cmd_id.id].cmd;
 
     this->cur_pass = pass_id;
     clear_state();
@@ -3709,17 +3738,17 @@ class Vk_Ctx : public rd::Imm_Ctx {
     submit_info.signalSemaphoreCount = 1;
 
     ID finish_sem;
-    finish_sem                    = wnd->create_semaphore().id;
-    VkSemaphore raw_sem           = wnd->semaphores[finish_sem].sem;
+    finish_sem                    = dev_ctx->create_semaphore().id;
+    VkSemaphore raw_sem           = dev_ctx->semaphores[finish_sem].sem;
     submit_info.pSignalSemaphores = &raw_sem;
-    vkQueueSubmit(wnd->queue, 1, &submit_info, finish_fence);
+    vkQueueSubmit(dev_ctx->queue, 1, &submit_info, finish_fence);
     return finish_sem;
   }
   void release() {
     cpu_cmd.release();
     deferred_bindings.release();
     stack.release();
-    wnd->release_resource(cmd_id);
+    dev_ctx->release_resource(cmd_id);
     delete this;
   }
   // CTX
@@ -3771,10 +3800,10 @@ class Vk_Ctx : public rd::Imm_Ctx {
   void        push_state() override { stack.push(graphics_state); }
   void        pop_state() override { graphics_state = stack.pop(); }
   Resource_ID insert_event() override {
-    Resource_ID    event = wnd->create_event();
+    Resource_ID    event = dev_ctx->create_event();
     Deferred_Event de;
     MEMZERO(de);
-    de.event = wnd->events[event.id].event;
+    de.event = dev_ctx->events[event.id].event;
     cpu_cmd.write(Cmd_t::EVENT, &de);
     return event;
   }
@@ -3788,7 +3817,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       UNIMPLEMENTED;
     }
     ASSERT_DEBUG(res_id.type == (i32)Resource_Type::BUFFER);
-    Buffer &buf = wnd->buffers[res_id.id];
+    Buffer &buf = dev_ctx->buffers[res_id.id];
     buf.barrier(cmd, VK_ACCESS_INDEX_READ_BIT);
     VkIndexType type;
     switch (format) {
@@ -3807,7 +3836,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       UNIMPLEMENTED;
     }
     ASSERT_DEBUG(res_id.type == (i32)Resource_Type::BUFFER);
-    Buffer &buf = wnd->buffers[res_id.id];
+    Buffer &buf = dev_ctx->buffers[res_id.id];
     buf.barrier(cmd, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT);
     VkDeviceSize doffset                   = (VkDeviceSize)offset;
     current_draw.vbos.size                 = MAX(index + 1, current_draw.vbos.size);
@@ -3927,15 +3956,15 @@ class Vk_Ctx : public rd::Imm_Ctx {
   Resource_ID insert_timestamp() override {
     Deferred_Timestamp dt;
     MEMZERO(dt);
-    dt.pool         = wnd->query_pool;
-    dt.timestamp_id = wnd->allocate_timestamp_id();
-    vkResetQueryPool(wnd->device, dt.pool, dt.timestamp_id, 1);
+    dt.pool         = dev_ctx->query_pool;
+    dt.timestamp_id = dev_ctx->allocate_timestamp_id();
+    vkResetQueryPool(dev_ctx->device, dt.pool, dt.timestamp_id, 1);
     cpu_cmd.write(Cmd_t::TIMESTAMP, &dt);
     return {dt.timestamp_id, (u32)Resource_Type::TIMESTAMP};
   }
   void bind_image(u32 set, u32 binding, u32 index, Resource_ID image_id,
                   rd::Image_Subresource const &range, rd::Format format) override {
-    Image &          image = wnd->images[image_id.id];
+    Image &          image = dev_ctx->images[image_id.id];
     Resource_Binding rb;
     MEMZERO(rb);
     rb.type                    = Binding_t::IMAGE;
@@ -3966,7 +3995,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
   }
   void bind_rw_image(u32 set, u32 binding, u32 index, Resource_ID image_id,
                      rd::Image_Subresource const &range, rd::Format format) override {
-    Image &          image = wnd->images[image_id.id];
+    Image &          image = dev_ctx->images[image_id.id];
     Resource_Binding rb;
     MEMZERO(rb);
     rb.type                    = Binding_t::STORAGE_IMAGE;
@@ -4018,7 +4047,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       if ((set_dirty_flags & (1 << i)) == 0 && set_cache[i] != VK_NULL_HANDLE) {
         set_dst[i] = set_cache[i];
       } else {
-        VkDescriptorSet set = wnd->get_descriptor_pool().allocate(set_layouts[i]);
+        VkDescriptorSet set = dev_ctx->get_descriptor_pool().allocate(set_layouts[i]);
         update_descriptor_set(i, bindings, set);
         set_dirty_flags &= ~(1 << i);
         set_cache[i] = set;
@@ -4097,11 +4126,11 @@ class Vk_Ctx : public rd::Imm_Ctx {
                                    Resource_ID cnt_buf_id, u32 cnt_buf_offset, u32 max_count,
                                    u32 stride) override {
     {
-      Buffer &buffer = wnd->buffers[arg_buf_id.id];
+      Buffer &buffer = dev_ctx->buffers[arg_buf_id.id];
       buffer.barrier(cmd, VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
     }
     {
-      Buffer &buffer = wnd->buffers[cnt_buf_id.id];
+      Buffer &buffer = dev_ctx->buffers[cnt_buf_id.id];
       buffer.barrier(cmd, VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
     }
     ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
@@ -4145,7 +4174,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       bf.val  = value;
       cpu_cmd.write(Cmd_t::BUFFER_FILL, &bf);
     } else {
-      Buffer &buf = wnd->buffers[id.id];
+      Buffer &buf = dev_ctx->buffers[id.id];
       vkCmdFillBuffer(cmd, buf.buffer, offset, size, value);
     }
   }
@@ -4154,7 +4183,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
     if (type == rd::Pass_t::COMPUTE) {
       Deferred_Clear_Image cl;
       MEMZERO(cl);
-      Image &           img = wnd->images[id.id];
+      Image &           img = dev_ctx->images[id.id];
       VkClearColorValue _cv;
       MEMZERO(_cv);
       memcpy(&_cv, &cv, 16);
@@ -4170,7 +4199,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       cl.img_id        = id.id;
       cpu_cmd.write(Cmd_t::CLEAR_IMAGE, &cl);
     } else {
-      Image &img = wnd->images[id.id];
+      Image &img = dev_ctx->images[id.id];
       img.barrier(cmd, VK_ACCESS_MEMORY_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
       VkClearColorValue _cv;
       MEMZERO(_cv);
@@ -4185,61 +4214,65 @@ class Vk_Ctx : public rd::Imm_Ctx {
       vkCmdClearColorImage(cmd, img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &_cv, 1, &r);
     }
   }
-  rd::Image_Info get_image_info(Resource_ID res_id) override { return wnd->get_image_info(res_id); }
+  rd::Image_Info get_image_info(Resource_ID res_id) override {
+    return dev_ctx->get_image_info(res_id);
+  }
 };
 
 class VkFactory : public rd::IFactory {
-  Window *           wnd;
+  VkDeviceContext *  dev_ctx;
   Array<Resource_ID> release_queue;
 
   public:
-  ID   last_sem;
-  void init(Window *wnd) {
-    this->wnd = wnd;
-    last_sem  = {0};
+  ID last_sem;
+  VkFactory(void *window_handler) {
+    dev_ctx = new VkDeviceContext();
+    dev_ctx->init(window_handler);
+    last_sem = {0};
     release_queue.init();
   }
   void release() {
     release_queue.release();
+    dev_ctx->release();
     delete this;
   }
   void on_frame_begin() { last_sem = {0}; }
   void on_frame_end() {
     if (last_sem.is_null() == false) {
-      wnd->release_resource({last_sem, (u32)Resource_Type::SEMAPHORE});
+      dev_ctx->release_resource({last_sem, (u32)Resource_Type::SEMAPHORE});
     }
     last_sem = {0};
-    ito(release_queue.size) wnd->release_resource(release_queue[i]);
+    ito(release_queue.size) dev_ctx->release_resource(release_queue[i]);
     release_queue.release();
   }
   bool get_timestamp_state(Resource_ID t0) override {
     u64      timestamp_results[1];
-    VkResult res = vkGetQueryPoolResults(wnd->device, wnd->query_pool, t0.id._id, 1, 8,
+    VkResult res = vkGetQueryPoolResults(dev_ctx->device, dev_ctx->query_pool, t0.id._id, 1, 8,
                                          timestamp_results, 8, VK_QUERY_RESULT_64_BIT);
     return res == VK_SUCCESS;
   }
   double get_timestamp_ms(Resource_ID t0, Resource_ID t1) override {
     u64      timestamp_results[2];
-    VkResult res0 = vkGetQueryPoolResults(wnd->device, wnd->query_pool, t0.id._id, 1, 8,
+    VkResult res0 = vkGetQueryPoolResults(dev_ctx->device, dev_ctx->query_pool, t0.id._id, 1, 8,
                                           timestamp_results + 0, 8, VK_QUERY_RESULT_64_BIT);
-    VkResult res1 = vkGetQueryPoolResults(wnd->device, wnd->query_pool, t1.id._id, 1, 8,
+    VkResult res1 = vkGetQueryPoolResults(dev_ctx->device, dev_ctx->query_pool, t1.id._id, 1, 8,
                                           timestamp_results + 1, 8, VK_QUERY_RESULT_64_BIT);
     if (res0 == VK_SUCCESS && res1 == VK_SUCCESS) {
       u64 diff = timestamp_results[1] - timestamp_results[0];
-      return (double(diff) * wnd->device_properties.limits.timestampPeriod) * 1.0e-6;
+      return (double(diff) * dev_ctx->device_properties.limits.timestampPeriod) * 1.0e-6;
     }
     return 0.0;
   }
   Resource_ID create_image(rd::Image_Create_Info info) override {
-    return wnd->create_image(info.width, info.height, info.depth, info.layers, info.levels,
-                             to_vk(info.format), info.usage_bits, info.mem_bits);
+    return dev_ctx->create_image(info.width, info.height, info.depth, info.layers, info.levels,
+                                 to_vk(info.format), info.usage_bits, info.mem_bits);
   }
   Resource_ID create_buffer(rd::Buffer_Create_Info info) override {
-    return wnd->create_buffer(info);
+    return dev_ctx->create_buffer(info);
   }
   bool get_event_state(Resource_ID fence_id) override {
-    Event &  event    = wnd->events[fence_id.id];
-    VkResult wait_res = vkGetEventStatus(wnd->device, event.event);
+    Event &  event    = dev_ctx->events[fence_id.id];
+    VkResult wait_res = vkGetEventStatus(dev_ctx->device, event.event);
     ASSERT_DEBUG(wait_res == VK_EVENT_SET || wait_res == VK_EVENT_RESET);
     return wait_res == VK_EVENT_SET;
   }
@@ -4247,25 +4280,29 @@ class VkFactory : public rd::IFactory {
                                 Pair<string_ref, string_ref> *defines,
                                 size_t                        num_defines) override {
 
-    return wnd->create_shader_raw(type, body, defines, num_defines);
+    return dev_ctx->create_shader_raw(type, body, defines, num_defines);
   }
-  void *      map_buffer(Resource_ID res_id) override { return wnd->map_buffer(res_id); }
-  void        unmap_buffer(Resource_ID res_id) override { wnd->unmap_buffer(res_id); }
+  void *      map_buffer(Resource_ID res_id) override { return dev_ctx->map_buffer(res_id); }
+  void        unmap_buffer(Resource_ID res_id) override { dev_ctx->unmap_buffer(res_id); }
   Resource_ID create_sampler(rd::Sampler_Create_Info const &info) override {
-    return wnd->create_sampler(info);
+    return dev_ctx->create_sampler(info);
   }
   void        release_resource(Resource_ID id) override { release_queue.push(id); }
   Resource_ID get_swapchain_image() override {
-    return {wnd->sc_images[wnd->image_index], (u32)Resource_Type::IMAGE};
+    return {dev_ctx->sc_images[dev_ctx->image_index], (u32)Resource_Type::IMAGE};
   }
-  rd::Image2D_Info get_swapchain_image_info() override { return wnd->get_swapchain_image_info(); }
-  rd::Image_Info get_image_info(Resource_ID res_id) override { return wnd->get_image_info(res_id); }
+  rd::Image2D_Info get_swapchain_image_info() override {
+    return dev_ctx->get_swapchain_image_info();
+  }
+  rd::Image_Info get_image_info(Resource_ID res_id) override {
+    return dev_ctx->get_image_info(res_id);
+  }
 
   rd::Imm_Ctx *start_render_pass(rd::Render_Pass_Create_Info const &info) override {
     ID pass_id = {0};
-    if (wnd->pass_cache.contains(info)) {
-      pass_id = wnd->pass_cache.get(info);
-      wnd->render_passes.add_ref(pass_id);
+    if (dev_ctx->pass_cache.contains(info)) {
+      pass_id = dev_ctx->pass_cache.get(info);
+      dev_ctx->render_passes.add_ref(pass_id);
     } else {
       Render_Pass rp;
       rp.init();
@@ -4274,25 +4311,27 @@ class VkFactory : public rd::IFactory {
       ito(info.rts.size) {
         VkFormat format;
         if (info.rts[i].format == rd::Format::NATIVE)
-          format = wnd->images[info.rts[i].image.id].info.format;
+          format = dev_ctx->images[info.rts[i].image.id].info.format;
         else
           format = to_vk(info.rts[i].format);
-        rp.rts_views.push(wnd->create_image_view(info.rts[i].image.id, //
-                                                 info.rts[i].level, 1, //
-                                                 info.rts[i].layer, 1, //
-                                                 format)
+        rp.rts_views.push(dev_ctx
+                              ->create_image_view(info.rts[i].image.id, //
+                                                  info.rts[i].level, 1, //
+                                                  info.rts[i].layer, 1, //
+                                                  format)
                               .id);
       }
       if (info.depth_target.image.is_null() == false) {
         VkFormat format;
         if (info.depth_target.format == rd::Format::NATIVE)
-          format = wnd->images[info.depth_target.image.id].info.format;
+          format = dev_ctx->images[info.depth_target.image.id].info.format;
         else
           format = to_vk(info.depth_target.format);
-        rp.depth_target_view = wnd->create_image_view(info.depth_target.image.id, //
-                                                      info.depth_target.level, 1, //
-                                                      info.depth_target.layer, 1, //
-                                                      format)
+        rp.depth_target_view = dev_ctx
+                                   ->create_image_view(info.depth_target.image.id, //
+                                                       info.depth_target.level, 1, //
+                                                       info.depth_target.layer, 1, //
+                                                       format)
                                    .id;
       }
       InlineArray<VkAttachmentDescription, 9> attachments;
@@ -4308,7 +4347,7 @@ class VkFactory : public rd::IFactory {
       ito(info.rts.size) {
         VkAttachmentDescription attachment;
         MEMZERO(attachment);
-        Image &img = wnd->images[info.rts[i].image.id];
+        Image &img = dev_ctx->images[info.rts[i].image.id];
         if (width == 0)
           width = img.info.extent.width;
         else
@@ -4342,7 +4381,7 @@ class VkFactory : public rd::IFactory {
       if (info.depth_target.image.is_null() == false) {
         VkAttachmentDescription attachment;
         MEMZERO(attachment);
-        Image &img = wnd->images[info.depth_target.image.id];
+        Image &img = dev_ctx->images[info.depth_target.image.id];
         if (width == 0)
           width = img.info.extent.width;
         else
@@ -4403,14 +4442,14 @@ class VkFactory : public rd::IFactory {
       rp.height = height;
       rp.width  = width;
 
-      VK_ASSERT_OK(vkCreateRenderPass(wnd->device, &cinfo, NULL, &rp.pass));
+      VK_ASSERT_OK(vkCreateRenderPass(dev_ctx->device, &cinfo, NULL, &rp.pass));
       {
         InlineArray<VkImageView, 8> views;
         views.init();
         defer(views.release());
-        ito(rp.rts_views.size) { views.push(wnd->image_views[rp.rts_views[i]].view); }
+        ito(rp.rts_views.size) { views.push(dev_ctx->image_views[rp.rts_views[i]].view); }
         if (info.depth_target.image.is_null() == false) {
-          views.push(wnd->image_views[rp.depth_target_view].view);
+          views.push(dev_ctx->image_views[rp.depth_target_view].view);
         }
         VkFramebufferCreateInfo info;
         MEMZERO(info);
@@ -4421,81 +4460,82 @@ class VkFactory : public rd::IFactory {
         info.layers          = 1;
         info.pAttachments    = &views[0];
         info.renderPass      = rp.pass;
-        VK_ASSERT_OK(vkCreateFramebuffer(wnd->device, &info, NULL, &rp.fb));
+        VK_ASSERT_OK(vkCreateFramebuffer(dev_ctx->device, &info, NULL, &rp.fb));
       }
-      pass_id = wnd->render_passes.push(rp);
-      wnd->pass_cache.insert(rp.create_info, pass_id);
+      pass_id = dev_ctx->render_passes.push(rp);
+      dev_ctx->pass_cache.insert(rp.create_info, pass_id);
     }
     Vk_Ctx *ctx = new Vk_Ctx();
-    ctx->init(rd::Pass_t::RENDER, wnd, pass_id);
+    ctx->init(rd::Pass_t::RENDER, dev_ctx, pass_id);
     return ctx;
   }
   void end_render_pass(rd::Imm_Ctx *_ctx) override {
     Vk_Ctx *    ctx = (Vk_Ctx *)_ctx;
-    Resource_ID f   = wnd->create_fence(false);
+    Resource_ID f   = dev_ctx->create_fence(false);
     ID          finish_sem;
     if (last_sem.is_null() == false) {
-      Semaphore s = wnd->semaphores[last_sem];
-      finish_sem  = ctx->submit(wnd->fences[f.id].fence, &s.sem);
-      wnd->release_resource({last_sem, (u32)Resource_Type::SEMAPHORE});
+      Semaphore s = dev_ctx->semaphores[last_sem];
+      finish_sem  = ctx->submit(dev_ctx->fences[f.id].fence, &s.sem);
+      dev_ctx->release_resource({last_sem, (u32)Resource_Type::SEMAPHORE});
       last_sem = {0};
     } else {
-      finish_sem = ctx->submit(wnd->fences[f.id].fence, NULL);
+      finish_sem = ctx->submit(dev_ctx->fences[f.id].fence, NULL);
     }
     last_sem = finish_sem;
-    wnd->release_resource(f);
+    dev_ctx->release_resource(f);
     ctx->release();
   }
   rd::Imm_Ctx *start_compute_pass() override {
     Vk_Ctx *ctx = new Vk_Ctx();
-    ctx->init(rd::Pass_t::COMPUTE, wnd, {0});
+    ctx->init(rd::Pass_t::COMPUTE, dev_ctx, {0});
     return ctx;
   }
-  void wait_idle() { vkDeviceWaitIdle(wnd->device); }
+  void wait_idle() { vkDeviceWaitIdle(dev_ctx->device); }
   void end_compute_pass(rd::Imm_Ctx *_ctx) override {
     Vk_Ctx *    ctx = (Vk_Ctx *)_ctx;
-    Resource_ID f   = wnd->create_fence(false);
+    Resource_ID f   = dev_ctx->create_fence(false);
 
     ID finish_sem;
     if (last_sem.is_null() == false) {
-      Semaphore s = wnd->semaphores[last_sem];
-      finish_sem  = ctx->submit(wnd->fences[f.id].fence, &s.sem);
-      wnd->release_resource({last_sem, (u32)Resource_Type::SEMAPHORE});
+      Semaphore s = dev_ctx->semaphores[last_sem];
+      finish_sem  = ctx->submit(dev_ctx->fences[f.id].fence, &s.sem);
+      dev_ctx->release_resource({last_sem, (u32)Resource_Type::SEMAPHORE});
       last_sem = {0};
     } else {
-      finish_sem = ctx->submit(wnd->fences[f.id].fence, NULL);
+      finish_sem = ctx->submit(dev_ctx->fences[f.id].fence, NULL);
     }
     last_sem = finish_sem;
 
-    wnd->release_resource(f);
+    dev_ctx->release_resource(f);
     ctx->release();
   }
 };
-
+#if 0
+				
 class VkPass_Mng : public rd::Pass_Mng {
   public:
-  Window *             wnd;
+  VkDeviceContext *             dev_ctx;
   VkFactory *          f;
   rd::IEvent_Consumer *consumer;
   VkPass_Mng() {
-    wnd = new Window();
-    wnd->init();
+    dev_ctx = new VkDeviceContext();
+    dev_ctx->init();
     f = new VkFactory();
-    f->init(wnd);
+    f->init(dev_ctx);
     consumer = NULL;
   }
   void release() override {
     consumer->on_release(f);
     f->release();
-    wnd->release();
-    delete wnd;
+    dev_ctx->release();
+    delete dev_ctx;
     delete this;
   }
   void loop() override {
     consumer->init(this);
-    wnd->start_frame();
+    dev_ctx->start_frame();
     consumer->on_init(f);
-    wnd->end_frame(NULL);
+    dev_ctx->end_frame(NULL);
     while (true) {
       SDL_Event event;
       while (SDL_PollEvent(&event)) {
@@ -4513,22 +4553,25 @@ class VkPass_Mng : public rd::Pass_Mng {
           break;
         }
       }
-      wnd->start_frame();
+      dev_ctx->start_frame();
       f->on_frame_begin();
       consumer->on_frame(f);
       VkSemaphore sem = VK_NULL_HANDLE;
       if (f->last_sem.is_null() == false) {
-        sem = wnd->semaphores[f->last_sem].sem;
+        sem = dev_ctx->semaphores[f->last_sem].sem;
       }
       f->on_frame_end();
       if (sem != VK_NULL_HANDLE)
-        wnd->end_frame(&sem);
+        dev_ctx->end_frame(&sem);
       else
-        wnd->end_frame(NULL);
+        dev_ctx->end_frame(NULL);
     }
   }
   void  set_event_consumer(rd::IEvent_Consumer *consumer) override { this->consumer = consumer; }
-  void *get_window_handle() { return (void *)wnd->window; }
+  void *get_window_handle() { return (void *)dev_ctx->window; }
 };
+#endif // 0
 } // namespace
-rd::Pass_Mng *rd::Pass_Mng::create(rd::Impl_t) { return new VkPass_Mng; }
+namespace rd {
+IFactory *create_vulkan(void *window_handler) { return new VkFactory(window_handler); }
+} // namespace rd
