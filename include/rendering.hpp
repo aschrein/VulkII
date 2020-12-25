@@ -417,8 +417,10 @@ class IFactory {
   virtual double   get_timestamp_ms(Resource_ID t0, Resource_ID t1)       = 0;
   virtual void     wait_idle()                                            = 0;
   virtual bool     get_event_state(Resource_ID id)                        = 0;
-
-  virtual void release() = 0;
+  virtual Impl_t   getImplType()                                          = 0;
+  virtual void     release()                                              = 0;
+  virtual void     start_frame()                                          = 0;
+  virtual void     end_frame()                                            = 0;
 };
 
 class Imm_Ctx {

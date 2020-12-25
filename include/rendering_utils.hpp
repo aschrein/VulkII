@@ -10,6 +10,7 @@
 #  include <SDL2/SDL.h>
 #else
 #  include <SDL.h>
+#  include <SDL_syswm.h>
 #endif
 
 #include <imgui.h>
@@ -115,44 +116,37 @@ struct ImGui_ID {
     return iid;
   }
 };
-#if 0
-				
-class IGUI_Pass {
+
+class IGUIApp {
   protected:
-  Resource_ID vs;
-  Resource_ID ps;
-  u32         width, height;
-  Resource_ID sampler;
-  Resource_ID vertex_buffer;
-  Resource_ID index_buffer;
+  Resource_ID vs{};
+  Resource_ID ps{};
+  u32         width{0}, height{0};
+  Resource_ID sampler{};
+  Resource_ID vertex_buffer{};
+  Resource_ID index_buffer{};
 
-  Resource_ID font_texture;
-  Resource_ID staging_buffer;
+  Resource_ID font_texture{};
+  Resource_ID staging_buffer{};
 
-  InlineArray<ImGui_ID, 0x100> image_bindings;
+  InlineArray<ImGui_ID, 0x100> image_bindings{};
 
-  unsigned char *font_pixels;
-  int            font_width, font_height;
+  unsigned char *font_pixels = NULL;
+  int            font_width = 0, font_height = 0;
 
-  i32           last_m_x;
-  i32           last_m_y;
-  ImDrawData *  draw_data;
-  Timer         timer;
-  bool          imgui_initialized;
-  rd::IFactory *factory;
+  i32           last_m_x          = 0;
+  i32           last_m_y          = 0;
+  ImDrawData *  draw_data         = NULL;
+  Timer         timer             = {};
+  bool          imgui_initialized = false;
+  rd::IFactory *factory           = NULL;
+  SDL_Window *  window            = NULL;
 
-  public:
-  virtual void on_gui(rd::IFactory *factory) {}
+  virtual void on_gui() {}
+  virtual void on_init() {}
+  virtual void on_release() {}
+  virtual void on_frame() {}
 
-  void consume(void *_event) {
-    SDL_Event *event = (SDL_Event *)_event;
-    if (imgui_initialized) {
-      ImGui_ImplSDL2_ProcessEvent(event);
-    }
-    if (event->type == SDL_MOUSEMOTION) {
-      SDL_MouseMotionEvent *m = (SDL_MouseMotionEvent *)event;
-    }
-  }
   void on_gui_traverse_nodes(List *l, int &id) {
     if (l == NULL) return;
     id++;
@@ -196,21 +190,86 @@ class IGUI_Pass {
       }
     }
   }
-  void init(rd::IFactory *factory) {
-    this->factory = factory;
-    image_bindings.init();
-    timer.init();
-    imgui_initialized = false;
-    draw_data         = NULL;
-    last_m_x          = -1;
-    last_m_y          = -1;
-    font_texture.reset();
-    staging_buffer.reset();
-    vs.reset();
-    ps.reset();
-    vertex_buffer.reset();
-    index_buffer.reset();
-    sampler.reset();
+  void _start(rd::Impl_t impl_t) {
+    static int init = [] { return SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS); }();
+    window = SDL_CreateWindow("VulkII", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 512, 512,
+                              SDL_WINDOW_RESIZABLE);
+    defer({
+      release();
+      // SDL_Quit();
+    });
+
+    SDL_SysWMinfo wmInfo;
+    SDL_VERSION(&wmInfo.version);
+    SDL_GetWindowWMInfo(window, &wmInfo);
+    HWND hwnd = wmInfo.info.win.window;
+
+    if (impl_t == rd::Impl_t::VULKAN) {
+      factory = rd::create_vulkan(hwnd);
+    } else if (impl_t == rd::Impl_t::DX12) {
+      TRAP;
+      // factory = rd::create_vulkan(NULL);
+    } else {
+      TRAP;
+    }
+    factory->start_frame();
+    imgui_initialized = true;
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO &io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    ImGui::StyleColorsDark();
+    if (factory->getImplType() == rd::Impl_t::VULKAN) {
+      ImGui_ImplSDL2_InitForVulkan(window);
+    } else if (factory->getImplType() == rd::Impl_t::DX12) {
+      ImGui_ImplSDL2_InitForD3D(window);
+    } else {
+      TRAP;
+    }
+
+    io.Fonts->GetTexDataAsRGBA32(&font_pixels, &font_width, &font_height);
+
+    rd::Image_Create_Info info;
+    MEMZERO(info);
+    info.format   = rd::Format::RGBA8_UNORM;
+    info.width    = font_width;
+    info.height   = font_height;
+    info.depth    = 1;
+    info.layers   = 1;
+    info.levels   = 1;
+    info.mem_bits = (u32)rd::Memory_Bits::DEVICE_LOCAL;
+    info.usage_bits =
+        (u32)rd::Image_Usage_Bits::USAGE_SAMPLED | (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST;
+    font_texture    = factory->create_image(info);
+    io.Fonts->TexID = bind_texture(font_texture, 0, 0, rd::Format::RGBA8_UNORM);
+
+    rd::Buffer_Create_Info buf_info;
+    MEMZERO(buf_info);
+    buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+    buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
+    buf_info.size       = font_width * font_height * 4;
+    staging_buffer      = factory->create_buffer(buf_info);
+
+    on_init();
+    factory->end_frame();
+    while (true) {
+      SDL_Event event;
+      while (SDL_PollEvent(&event)) {
+        ImGui_ImplSDL2_ProcessEvent(&event);
+        if (event.type == SDL_QUIT) {
+          exit(0);
+        }
+        switch (event.type) {
+        case SDL_WINDOWEVENT:
+          if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
+          }
+          break;
+        }
+      }
+      factory->start_frame();
+      frame();
+      factory->end_frame();
+    }
   }
   ImTextureID bind_texture(Resource_ID id, u32 layer, u32 level, rd::Format format) {
     ImGui_ID iid;
@@ -222,7 +281,8 @@ class IGUI_Pass {
     image_bindings.push(iid);
     return (ImTextureID)(size_t)(image_bindings.size - 1);
   }
-  void on_frame(rd::IFactory *factory) {
+  void frame() {
+    on_frame();
     rd::Image2D_Info scinfo = factory->get_swapchain_image_info();
     width                   = scinfo.width;
     height                  = scinfo.height;
@@ -319,39 +379,9 @@ float4 main(in PSInput input) : SV_TARGET0 {
     }
 
     if (!imgui_initialized) {
-      imgui_initialized = true;
-      IMGUI_CHECKVERSION();
-      ImGui::CreateContext();
-      ImGuiIO &io = ImGui::GetIO();
-      io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-      ImGui::StyleColorsDark();
-      ImGui_ImplSDL2_InitForVulkan((SDL_Window *)pmng->get_window_handle());
-
-      io.Fonts->GetTexDataAsRGBA32(&font_pixels, &font_width, &font_height);
-
-      rd::Image_Create_Info info;
-      MEMZERO(info);
-      info.format   = rd::Format::RGBA8_UNORM;
-      info.width    = font_width;
-      info.height   = font_height;
-      info.depth    = 1;
-      info.layers   = 1;
-      info.levels   = 1;
-      info.mem_bits = (u32)rd::Memory_Bits::DEVICE_LOCAL;
-      info.usage_bits =
-          (u32)rd::Image_Usage_Bits::USAGE_SAMPLED | (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST;
-      font_texture    = factory->create_image(info);
-      io.Fonts->TexID = bind_texture(font_texture, 0, 0, rd::Format::RGBA8_UNORM);
-
-      rd::Buffer_Create_Info buf_info;
-      MEMZERO(buf_info);
-      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
-      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
-      buf_info.size       = font_width * font_height * 4;
-      staging_buffer      = factory->create_buffer(buf_info);
     }
 
-    ImGui_ImplSDL2_NewFrame((SDL_Window *)pmng->get_window_handle());
+    ImGui_ImplSDL2_NewFrame(window);
     ImGui::NewFrame();
     ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDocking;
     ImGuiViewport *  viewport     = ImGui::GetMainViewport();
@@ -375,7 +405,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
 
     static bool show_demo_window = true;
     ImGui::ShowDemoWindow(&show_demo_window);
-    on_gui(factory);
+    on_gui();
     ImGui::Render();
 
     draw_data = ImGui::GetDrawData();
@@ -549,16 +579,23 @@ float4 main(in PSInput input) : SV_TARGET0 {
     image_bindings.size = 1;
     factory->end_render_pass(ctx);
   }
-  void release(rd::IFactory *rm) {
+  void release() {
+    on_release();
     ImGui_ImplSDL2_Shutdown();
     ImGui::DestroyContext();
-    rm->release_resource(vs);
-    rm->release_resource(ps);
-    delete this;
+    factory->release_resource(vs);
+    factory->release_resource(ps);
+    factory->release();
+  }
+  ~IGUIApp() = default;
+  IGUIApp()  = default;
+
+  public:
+  template <typename T> static void start(rd::Impl_t impl_t) {
+    T t;
+    t._start(impl_t);
   }
 };
-#endif // 0
-
 
 static ImVec2 get_window_size() {
   auto  wsize       = ImGui::GetWindowSize();
@@ -834,7 +871,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     MEMZERO(pc);
     pc.op = 0;
     switch (image->format) {
-    // clang-format off
+      // clang-format off
       case rd::Format::RGBA8_SRGBA:  {  pc.format = 0; } break;
       case rd::Format::RGBA8_UNORM:  {  pc.format = 1; } break;
       case rd::Format::RGB32_FLOAT:  {  pc.format = 2; } break;

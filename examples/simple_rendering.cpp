@@ -285,12 +285,10 @@ float4 main(in PSInput input) : SV_TARGET0 {
   void release(rd::IFactory *factory) { factory->release_resource(normal_rt); }
 };
 
-class Event_Consumer : public IGUI_Pass {
+class Event_Consumer : public IGUIApp {
   public:
   GBufferPass gbuffer_pass;
-  void        init(rd::Pass_Mng *pmng) override { //
-    IGUI_Pass::init(pmng);
-  }
+
   void init_traverse(List *l) {
     if (l == NULL) return;
     if (l->child) {
@@ -306,7 +304,7 @@ class Event_Consumer : public IGUI_Pass {
       }
     }
   }
-  void on_gui(rd::IFactory *factory) override { //
+  void on_gui() override { //
     // bool show = true;
     // ShowExampleAppCustomNodeGraph(&show);
     // ImGui::TestNodeGraphEditor();
@@ -342,7 +340,7 @@ class Event_Consumer : public IGUI_Pass {
     { Ray ray = gizmo_layer->getMouseRay(); }
     ImGui::End();
   }
-  void on_init(rd::IFactory *factory) override { //
+  void on_init() override { //
     TMP_STORAGE_SCOPE;
     gizmo_layer = Gizmo_Layer::create(factory);
     // new XYZDragGizmo(gizmo_layer, &pos);
@@ -364,7 +362,7 @@ class Event_Consumer : public IGUI_Pass {
 
     gbuffer_pass.init();
   }
-  void on_release(rd::IFactory *factory) override { //
+  void on_release() override { //
     // thread_pool.release();
     FILE *scene_dump = fopen("scene_state", "wb");
     fprintf(scene_dump, "(\n");
@@ -381,12 +379,8 @@ class Event_Consumer : public IGUI_Pass {
     fprintf(scene_dump, ")\n");
     gizmo_layer->release();
     g_scene->release();
-    IGUI_Pass::release(factory);
   }
-  void consume(void *_event) override { //
-    IGUI_Pass::consume(_event);
-  }
-  void on_frame(rd::IFactory *factory) override { //
+  void on_frame() override { //
     g_scene->traverse([&](Node *node) {
       if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
         if (mn->getComponent<GizmoComponent>() == NULL) {
@@ -396,7 +390,6 @@ class Event_Consumer : public IGUI_Pass {
     });
     g_scene->get_root()->update();
     gbuffer_pass.render(factory);
-    IGUI_Pass::on_frame(factory);
   }
 };
 
@@ -404,10 +397,6 @@ int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
 
-  rd::Pass_Mng *pmng = rd::Pass_Mng::create(rd::Impl_t::VULKAN);
-  IGUI_Pass *   gui  = new Event_Consumer;
-  gui->init(pmng);
-  pmng->set_event_consumer(gui);
-  pmng->loop();
+  IGUIApp::start<Event_Consumer>(rd::Impl_t::VULKAN);
   return 0;
 }

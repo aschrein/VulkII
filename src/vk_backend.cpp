@@ -2484,9 +2484,11 @@ struct VkDeviceContext {
   }
 
   void update_swapchain() {
-    // In the case when we don't have a swap chain just allocate 1 command pool
-    sc_image_count = 1;
-    if (surface == VK_NULL_HANDLE) return;
+    if (surface == VK_NULL_HANDLE) {
+      // In the case when we don't have a swap chain just allocate 1 command pool
+      sc_image_count = 1;
+      return;
+    }
     vkDeviceWaitIdle(device);
     release_swapchain();
     u32                format_count = 0;
@@ -4509,68 +4511,23 @@ class VkFactory : public rd::IFactory {
     dev_ctx->release_resource(f);
     ctx->release();
   }
-};
-#if 0
-				
-class VkPass_Mng : public rd::Pass_Mng {
-  public:
-  VkDeviceContext *             dev_ctx;
-  VkFactory *          f;
-  rd::IEvent_Consumer *consumer;
-  VkPass_Mng() {
-    dev_ctx = new VkDeviceContext();
-    dev_ctx->init();
-    f = new VkFactory();
-    f->init(dev_ctx);
-    consumer = NULL;
-  }
-  void release() override {
-    consumer->on_release(f);
-    f->release();
-    dev_ctx->release();
-    delete dev_ctx;
-    delete this;
-  }
-  void loop() override {
-    consumer->init(this);
+  rd::Impl_t getImplType() override { return rd::Impl_t::VULKAN; }
+  void       start_frame() override {
     dev_ctx->start_frame();
-    consumer->on_init(f);
-    dev_ctx->end_frame(NULL);
-    while (true) {
-      SDL_Event event;
-      while (SDL_PollEvent(&event)) {
-        if (consumer != NULL) {
-          consumer->consume(&event);
-        }
-        if (event.type == SDL_QUIT) {
-          release();
-          exit(0);
-        }
-        switch (event.type) {
-        case SDL_WINDOWEVENT:
-          if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
-          }
-          break;
-        }
-      }
-      dev_ctx->start_frame();
-      f->on_frame_begin();
-      consumer->on_frame(f);
-      VkSemaphore sem = VK_NULL_HANDLE;
-      if (f->last_sem.is_null() == false) {
-        sem = dev_ctx->semaphores[f->last_sem].sem;
-      }
-      f->on_frame_end();
-      if (sem != VK_NULL_HANDLE)
-        dev_ctx->end_frame(&sem);
-      else
-        dev_ctx->end_frame(NULL);
-    }
+    on_frame_begin();
   }
-  void  set_event_consumer(rd::IEvent_Consumer *consumer) override { this->consumer = consumer; }
-  void *get_window_handle() { return (void *)dev_ctx->window; }
+  void end_frame() override {
+    on_frame_end();
+    VkSemaphore sem = VK_NULL_HANDLE;
+    if (last_sem.is_null() == false) {
+      sem = dev_ctx->semaphores[last_sem].sem;
+    }
+    if (sem != VK_NULL_HANDLE)
+      dev_ctx->end_frame(&sem);
+    else
+      dev_ctx->end_frame(NULL);
+  }
 };
-#endif // 0
 } // namespace
 namespace rd {
 IFactory *create_vulkan(void *window_handler) { return new VkFactory(window_handler); }
