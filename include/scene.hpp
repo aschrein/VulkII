@@ -2244,6 +2244,8 @@ class GfxSufraceComponent : public Node::Component {
     return s;
   }
   void buildBVH() {
+    if (bvh)
+      bvh->release();
     bvh = new BVH<Tri>;
     AutoArray<Tri> tri_pool;
     MeshNode *     mn = node->dyn_cast<MeshNode>();

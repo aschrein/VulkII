@@ -25,13 +25,14 @@ struct Resource_ID {
   u32                index() { return id.index(); }
   bool               is_null() const { return id.is_null(); }
   void               reset() { memset(this, 0, sizeof(*this)); }
+  bool               operator==(Resource_ID const &that) const { return data == that.data; }
 };
 
 static_assert(sizeof(Resource_ID) == 8, "blimey!");
 
 static inline u64 hash_of(ID id) { return hash_of(id._id); }
 
-static inline u64 hash_of(Resource_ID res) { return hash_of(res.id._id) ^ hash_of(res.type); }
+static inline u64 hash_of(Resource_ID res) { return hash_of(res.data); }
 
 namespace rd {
 enum class Impl_t { VULKAN, DX12, Null };

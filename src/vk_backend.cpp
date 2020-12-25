@@ -189,23 +189,9 @@ struct Buffer : public Slot {
   u32                mem_offset;
   VkBuffer           buffer;
   VkBufferCreateInfo create_info;
-  VkAccessFlags      access_flags;
+
   InlineArray<ID, 8> views;
 
-  void barrier(VkCommandBuffer cmd, VkAccessFlags new_access_flags) {
-    VkBufferMemoryBarrier bar;
-    MEMZERO(bar);
-    bar.sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-    bar.srcAccessMask       = access_flags;
-    bar.dstAccessMask       = new_access_flags;
-    bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    bar.buffer              = buffer;
-    bar.size                = VK_WHOLE_SIZE;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 1, &bar, 0, NULL);
-    access_flags = new_access_flags;
-  }
   void init() {
     memset(this, 0, sizeof(*this));
     views.init();
@@ -213,6 +199,25 @@ struct Buffer : public Slot {
   void release() {
     views.release();
     name.release();
+  }
+  Resource_ID get_resource_id() const { return {{id, (u32)Resource_Type::BUFFER}}; }
+};
+
+struct BufferLaoutTracker {
+  VkAccessFlags access_flags = 0;
+  void          barrier(VkCommandBuffer cmd, Buffer *buffer, VkAccessFlags new_access_flags) {
+    VkBufferMemoryBarrier bar;
+    MEMZERO(bar);
+    bar.sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    bar.srcAccessMask       = access_flags;
+    bar.dstAccessMask       = new_access_flags;
+    bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bar.buffer              = buffer->buffer;
+    bar.size                = VK_WHOLE_SIZE;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 1, &bar, 0, NULL);
+    access_flags = new_access_flags;
   }
 };
 
@@ -367,8 +372,6 @@ u32 get_format_size(VkFormat format) {
 struct Image : public Slot {
   ID                    mem_chunk_id;
   u32                   mem_offset;
-  VkImageLayout         layout;
-  VkAccessFlags         access_flags;
   VkImageAspectFlags    aspect;
   VkImage               image;
   Image_Info            info;
@@ -389,7 +392,14 @@ struct Image : public Slot {
     default: return false;
     }
   }
-  void barrier(VkCommandBuffer cmd, VkAccessFlags new_access_flags, VkImageLayout new_layout) {
+  Resource_ID get_resource_id() const { return {{id, (u32)Resource_Type::IMAGE}}; }
+};
+
+struct ImageLayoutTracker {
+  VkImageLayout layout       = VK_IMAGE_LAYOUT_GENERAL;
+  VkAccessFlags access_flags = 0;
+  void          barrier(VkCommandBuffer cmd, Image *image, VkAccessFlags new_access_flags,
+                        VkImageLayout new_layout) {
     // if (new_access_flags == access_flags && new_layout == layout) return;
     VkImageMemoryBarrier bar;
     MEMZERO(bar);
@@ -400,12 +410,12 @@ struct Image : public Slot {
     bar.newLayout                       = new_layout;
     bar.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
     bar.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
-    bar.image                           = image;
-    bar.subresourceRange.aspectMask     = aspect;
+    bar.image                           = image->image;
+    bar.subresourceRange.aspectMask     = image->aspect;
     bar.subresourceRange.baseArrayLayer = 0;
     bar.subresourceRange.baseMipLevel   = 0;
-    bar.subresourceRange.layerCount     = info.arrayLayers;
-    bar.subresourceRange.levelCount     = info.mipLevels;
+    bar.subresourceRange.layerCount     = image->info.arrayLayers;
+    bar.subresourceRange.levelCount     = image->info.mipLevels;
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &bar);
     layout       = new_layout;
@@ -2123,9 +2133,8 @@ struct VkDeviceContext {
     vkGetBufferMemoryRequirements(device, buf, &reqs);
     Buffer new_buf;
     new_buf.init();
-    new_buf.buffer       = buf;
-    new_buf.access_flags = 0;
-    new_buf.create_info  = cinfo;
+    new_buf.buffer      = buf;
+    new_buf.create_info = cinfo;
     // new_buf.ref_cnt      = 1;
 
     u32 chunk_index = find_mem_chunk(prop_flags, reqs.memoryTypeBits, reqs.alignment, reqs.size);
@@ -2307,7 +2316,6 @@ struct VkDeviceContext {
     Image new_image;
     new_image.init();
     new_image.image              = image;
-    new_image.access_flags       = 0;
     new_image.info.arrayLayers   = cinfo.arrayLayers;
     new_image.info.extent.width  = cinfo.extent.width;
     new_image.info.extent.height = cinfo.extent.height;
@@ -2319,7 +2327,6 @@ struct VkDeviceContext {
     new_image.info.sharingMode   = cinfo.sharingMode;
     new_image.info.tiling        = cinfo.tiling;
     new_image.info.usage         = cinfo.usage;
-    new_image.layout             = VK_IMAGE_LAYOUT_UNDEFINED;
     // new_image.ref_cnt            = 1;
     if (usage_flags & (u32)rd::Image_Usage_Bits::USAGE_DT)
       new_image.aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
@@ -2332,6 +2339,7 @@ struct VkDeviceContext {
     vkBindImageMemory(device, new_image.image, chunk.mem, new_image.mem_offset);
     ID          img_id = images.push(new_image);
     Resource_ID res_id = {img_id, (u32)Resource_Type::IMAGE};
+    _image_barrier_sync(new_image, 0, VK_IMAGE_LAYOUT_UNDEFINED, 0, VK_IMAGE_LAYOUT_GENERAL);
     return res_id;
   }
 
@@ -2521,10 +2529,10 @@ struct VkDeviceContext {
                                               present_modes);
     VkPresentModeKHR present_mode_of_choice = VK_PRESENT_MODE_FIFO_KHR; // always supported.
     ito(num_present_modes) {
-      // if (present_modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR) { // prefer mailbox
-      // present_mode_of_choice = VK_PRESENT_MODE_IMMEDIATE_KHR;
-      // break;
-      //}
+      if (present_modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR) { // prefer mailbox
+        present_mode_of_choice = VK_PRESENT_MODE_IMMEDIATE_KHR;
+        break;
+      }
     }
     //    usleep(100000);
     VkSurfaceCapabilitiesKHR surface_capabilities;
@@ -2564,8 +2572,6 @@ struct VkDeviceContext {
       Image image;
       image.init();
       image.image              = raw_images[i];
-      image.access_flags       = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-      image.layout             = VK_IMAGE_LAYOUT_UNDEFINED;
       image.info.arrayLayers   = sc_create_info.imageArrayLayers;
       image.info.extent.width  = sc_create_info.imageExtent.width;
       image.info.extent.height = sc_create_info.imageExtent.height;
@@ -2580,6 +2586,7 @@ struct VkDeviceContext {
       image.aspect             = VK_IMAGE_ASPECT_COLOR_BIT;
       // image.ref_cnt            = 1;
       sc_images[i] = images.push(image);
+      _image_barrier_sync(image, 0, VK_IMAGE_LAYOUT_UNDEFINED, 0, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     }
   }
 
@@ -2764,6 +2771,11 @@ struct VkDeviceContext {
 
       ito(sc_image_count) VK_ASSERT_OK(vkCreateCommandPool(device, &info, 0, &cmd_pools[i]));
     }
+
+    ito(sc_image_count) {
+      Image &image = images[sc_images[i]];
+      _image_barrier_sync(image, 0, VK_IMAGE_LAYOUT_UNDEFINED, 0, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    }
     {
       VkQueryPoolCreateInfo info;
       MEMZERO(info);
@@ -2800,7 +2812,99 @@ struct VkDeviceContext {
     }
   }
 
-  void start_frame() {
+  void _image_barrier_sync(Image const &img, VkAccessFlags old_mem_access,
+                           VkImageLayout old_image_layout, VkAccessFlags new_mem_access,
+                           VkImageLayout new_image_layout) {
+    if (cmd_pools[cmd_index] == VK_NULL_HANDLE) return;
+    Resource_ID              cmd_id = create_command_buffer();
+    CommandBuffer            cmd    = cmd_buffers[cmd_id.id];
+    VkCommandBufferBeginInfo begin_info;
+    MEMZERO(begin_info);
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd.cmd, &begin_info);
+    {
+      VkImageMemoryBarrier bar;
+      MEMZERO(bar);
+      bar.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+      bar.srcAccessMask                   = old_mem_access;
+      bar.dstAccessMask                   = new_mem_access;
+      bar.oldLayout                       = old_image_layout;
+      bar.newLayout                       = new_image_layout;
+      bar.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+      bar.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+      bar.image                           = img.image;
+      bar.subresourceRange.aspectMask     = img.aspect;
+      bar.subresourceRange.baseArrayLayer = 0;
+      bar.subresourceRange.baseMipLevel   = 0;
+      bar.subresourceRange.layerCount     = img.info.arrayLayers;
+      bar.subresourceRange.levelCount     = img.info.mipLevels;
+      vkCmdPipelineBarrier(cmd.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &bar);
+    }
+
+    vkEndCommandBuffer(cmd.cmd);
+    release_resource(cmd_id);
+    VkPipelineStageFlags stage_flags[]{VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                       VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT};
+    VkSubmitInfo         submit_info;
+    MEMZERO(submit_info);
+    submit_info.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers    = &cmd.cmd;
+    vkQueueSubmit(queue, 1, &submit_info, VK_NULL_HANDLE);
+    vkDeviceWaitIdle(device);
+  }
+
+  Resource_ID _image_barrier_async(Image const &img, VkAccessFlags old_mem_access,
+                                   VkImageLayout old_image_layout, VkAccessFlags new_mem_access,
+                                   VkImageLayout new_image_layout) {
+    if (cmd_pools[cmd_index] == VK_NULL_HANDLE) return {0u};
+    Resource_ID              cmd_id = create_command_buffer();
+    CommandBuffer            cmd    = cmd_buffers[cmd_id.id];
+    VkCommandBufferBeginInfo begin_info;
+    MEMZERO(begin_info);
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd.cmd, &begin_info);
+    {
+      VkImageMemoryBarrier bar;
+      MEMZERO(bar);
+      bar.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+      bar.srcAccessMask                   = old_mem_access;
+      bar.dstAccessMask                   = new_mem_access;
+      bar.oldLayout                       = old_image_layout;
+      bar.newLayout                       = new_image_layout;
+      bar.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+      bar.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+      bar.image                           = img.image;
+      bar.subresourceRange.aspectMask     = img.aspect;
+      bar.subresourceRange.baseArrayLayer = 0;
+      bar.subresourceRange.baseMipLevel   = 0;
+      bar.subresourceRange.layerCount     = img.info.arrayLayers;
+      bar.subresourceRange.levelCount     = img.info.mipLevels;
+      vkCmdPipelineBarrier(cmd.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &bar);
+    }
+
+    vkEndCommandBuffer(cmd.cmd);
+    release_resource(cmd_id);
+    VkPipelineStageFlags stage_flags[]{VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                       VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT};
+    VkSubmitInfo         submit_info;
+    MEMZERO(submit_info);
+    Resource_ID sem                  = create_semaphore();
+    VkSemaphore raw_sem              = semaphores[sem.id].sem;
+    submit_info.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount   = 1;
+    submit_info.pCommandBuffers      = &cmd.cmd;
+    submit_info.signalSemaphoreCount = 1;
+    submit_info.pSignalSemaphores    = &raw_sem;
+    vkQueueSubmit(queue, 1, &submit_info, VK_NULL_HANDLE);
+    return sem;
+  }
+
+  Resource_ID start_frame() {
     buffers.tick();
     samplers.tick();
     images.tick();
@@ -2832,79 +2936,113 @@ struct VkDeviceContext {
     });
     ito(resources_to_remove.size) release_resource(resources_to_remove[i]);
   restart:
-    update_surface_size();
-    if (window_width != (i32)sc_extent.width || window_height != (i32)sc_extent.height) {
-      update_swapchain();
-    }
     cmd_index = (frame_id++) % sc_image_count;
 
-    VkResult wait_res = vkWaitForFences(device, 1, &frame_fences[cmd_index], VK_TRUE, 1000);
-    if (wait_res == VK_TIMEOUT) {
-      goto restart;
-    }
-    vkResetFences(device, 1, &frame_fences[cmd_index]);
-    desc_pools[cmd_index].reset();
-    VkResult acquire_res = vkAcquireNextImageKHR(
-        device, swapchain, UINT64_MAX, sc_free_sem[cmd_index], VK_NULL_HANDLE, &image_index);
+    if (surface != VK_NULL_HANDLE) {
+      update_surface_size();
+      if (window_width != (i32)sc_extent.width || window_height != (i32)sc_extent.height) {
+        update_swapchain();
+      }
+      VkResult wait_res = vkWaitForFences(device, 1, &frame_fences[cmd_index], VK_TRUE, 1000);
+      if (wait_res == VK_TIMEOUT) {
+        goto restart;
+      }
+      vkResetFences(device, 1, &frame_fences[cmd_index]);
+      desc_pools[cmd_index].reset();
+      VkResult acquire_res = vkAcquireNextImageKHR(
+          device, swapchain, UINT64_MAX, sc_free_sem[cmd_index], VK_NULL_HANDLE, &image_index);
 
-    if (acquire_res == VK_ERROR_OUT_OF_DATE_KHR || acquire_res == VK_SUBOPTIMAL_KHR) {
-      update_swapchain();
-      goto restart;
-    } else if (acquire_res != VK_SUCCESS) {
-      TRAP;
+      if (acquire_res == VK_ERROR_OUT_OF_DATE_KHR || acquire_res == VK_SUBOPTIMAL_KHR) {
+        update_swapchain();
+        goto restart;
+      } else if (acquire_res != VK_SUCCESS) {
+        TRAP;
+      }
+      VK_ASSERT_OK(vkResetCommandPool(device, cmd_pools[cmd_index],
+                                      VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT));
+      if (1) {
+
+        Image &     img = images[sc_images[image_index]];
+        Resource_ID sem = _image_barrier_async(img, 0, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, 0,
+                                               VK_IMAGE_LAYOUT_GENERAL);
+        return sem;
+      }
+    } else {
+      VK_ASSERT_OK(vkResetCommandPool(device, cmd_pools[cmd_index],
+                                      VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT));
     }
-    VK_ASSERT_OK(vkResetCommandPool(device, cmd_pools[cmd_index],
-                                    VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT));
+    return {0u};
   }
   void end_frame(VkSemaphore *wait_sem) {
-    Resource_ID   cmd_id = create_command_buffer();
-    CommandBuffer cmd    = cmd_buffers[cmd_id.id];
-    // vkResetCommandBuffer(cmd, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
-    VkCommandBufferBeginInfo begin_info;
-    MEMZERO(begin_info);
-    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cmd.cmd, &begin_info);
-    Image &img = images[sc_images[image_index]];
-    img.barrier(cmd.cmd, VK_ACCESS_MEMORY_READ_BIT, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    if (surface != VK_NULL_HANDLE) {
+      Resource_ID   cmd_id = create_command_buffer();
+      CommandBuffer cmd    = cmd_buffers[cmd_id.id];
+      // vkResetCommandBuffer(cmd, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+      VkCommandBufferBeginInfo begin_info;
+      MEMZERO(begin_info);
+      begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+      begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+      vkBeginCommandBuffer(cmd.cmd, &begin_info);
 
-    vkEndCommandBuffer(cmd.cmd);
-    release_resource(cmd_id);
-    VkPipelineStageFlags stage_flags[]{VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                                       VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT};
-    VkSubmitInfo         submit_info;
-    MEMZERO(submit_info);
-    if (wait_sem != NULL) {
-      VkSemaphore sems[2]              = {sc_free_sem[cmd_index], *wait_sem};
-      submit_info.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-      submit_info.waitSemaphoreCount   = 2;
-      submit_info.pWaitSemaphores      = sems;
-      submit_info.pWaitDstStageMask    = stage_flags;
-      submit_info.commandBufferCount   = 1;
-      submit_info.pCommandBuffers      = &cmd.cmd;
-      submit_info.signalSemaphoreCount = 1;
-      submit_info.pSignalSemaphores    = &render_finish_sem[cmd_index];
-      vkQueueSubmit(queue, 1, &submit_info, frame_fences[cmd_index]);
-    } else {
-      submit_info.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-      submit_info.waitSemaphoreCount   = 1;
-      submit_info.pWaitSemaphores      = &sc_free_sem[cmd_index];
-      submit_info.pWaitDstStageMask    = stage_flags;
-      submit_info.commandBufferCount   = 1;
-      submit_info.pCommandBuffers      = &cmd.cmd;
-      submit_info.signalSemaphoreCount = 1;
-      submit_info.pSignalSemaphores    = &render_finish_sem[cmd_index];
-      vkQueueSubmit(queue, 1, &submit_info, frame_fences[cmd_index]);
+      Image &img = images[sc_images[image_index]];
+      {
+        VkImageMemoryBarrier bar;
+        MEMZERO(bar);
+        bar.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        bar.srcAccessMask                   = 0;
+        bar.dstAccessMask                   = 0;
+        bar.oldLayout                       = VK_IMAGE_LAYOUT_GENERAL;
+        bar.newLayout                       = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        bar.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+        bar.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+        bar.image                           = img.image;
+        bar.subresourceRange.aspectMask     = img.aspect;
+        bar.subresourceRange.baseArrayLayer = 0;
+        bar.subresourceRange.baseMipLevel   = 0;
+        bar.subresourceRange.layerCount     = img.info.arrayLayers;
+        bar.subresourceRange.levelCount     = img.info.mipLevels;
+        vkCmdPipelineBarrier(cmd.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &bar);
+      }
+
+      vkEndCommandBuffer(cmd.cmd);
+      release_resource(cmd_id);
+      VkPipelineStageFlags stage_flags[]{VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT};
+      VkSubmitInfo         submit_info;
+      MEMZERO(submit_info);
+      if (wait_sem != NULL) {
+        VkSemaphore sems[2]              = {sc_free_sem[cmd_index], *wait_sem};
+        submit_info.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit_info.waitSemaphoreCount   = 2;
+        submit_info.pWaitSemaphores      = sems;
+        submit_info.pWaitDstStageMask    = stage_flags;
+        submit_info.commandBufferCount   = 1;
+        submit_info.pCommandBuffers      = &cmd.cmd;
+        submit_info.signalSemaphoreCount = 1;
+        submit_info.pSignalSemaphores    = &render_finish_sem[cmd_index];
+        vkQueueSubmit(queue, 1, &submit_info, frame_fences[cmd_index]);
+      } else {
+        submit_info.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit_info.waitSemaphoreCount   = 1;
+        submit_info.pWaitSemaphores      = &sc_free_sem[cmd_index];
+        submit_info.pWaitDstStageMask    = stage_flags;
+        submit_info.commandBufferCount   = 1;
+        submit_info.pCommandBuffers      = &cmd.cmd;
+        submit_info.signalSemaphoreCount = 1;
+        submit_info.pSignalSemaphores    = &render_finish_sem[cmd_index];
+        vkQueueSubmit(queue, 1, &submit_info, frame_fences[cmd_index]);
+      }
+      VkPresentInfoKHR present_info;
+      MEMZERO(present_info);
+      present_info.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+      present_info.waitSemaphoreCount = 1;
+      present_info.pWaitSemaphores    = &render_finish_sem[cmd_index];
+      present_info.swapchainCount     = 1;
+      present_info.pSwapchains        = &swapchain;
+      present_info.pImageIndices      = &image_index;
+      vkQueuePresentKHR(queue, &present_info);
     }
-    VkPresentInfoKHR present_info;
-    MEMZERO(present_info);
-    present_info.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-    present_info.waitSemaphoreCount = 1;
-    present_info.pWaitSemaphores    = &render_finish_sem[cmd_index];
-    present_info.swapchainCount     = 1;
-    present_info.pSwapchains        = &swapchain;
-    present_info.pImageIndices      = &image_index;
-    vkQueuePresentKHR(queue, &present_info);
   }
 };
 
@@ -2970,6 +3108,8 @@ class Vk_Ctx : public rd::Imm_Ctx {
 
   template <typename K, typename V> using Table = Hash_Table<K, V, Default_Allocator, 0x1000>;
   Table<Resource_Path, Resource_Binding> deferred_bindings;
+  Table<Resource_ID, BufferLaoutTracker> buffer_layouts;
+  Table<Resource_ID, ImageLayoutTracker> image_layouts;
   VkDescriptorSet                        set_cache[0x10];
   u64                                    set_dirty_flags;
 
@@ -3109,13 +3249,39 @@ class Vk_Ctx : public rd::Imm_Ctx {
     u32         timestamp_id;
   };
 
+  VkImageLayout _get_image_layout(Resource_ID img_id) {
+    if (!image_layouts.contains(img_id)) {
+      return VK_IMAGE_LAYOUT_GENERAL;
+    }
+    ImageLayoutTracker &il = image_layouts.get(img_id);
+    return il.layout;
+  }
+
+  void _buffer_barrier(VkCommandBuffer cmd, Resource_ID buf_id, VkAccessFlags bits) {
+    if (!buffer_layouts.contains(buf_id)) {
+      buffer_layouts.insert(buf_id, BufferLaoutTracker{});
+    }
+    BufferLaoutTracker &bt     = buffer_layouts.get(buf_id);
+    Buffer &            buffer = dev_ctx->buffers[buf_id.id];
+    bt.barrier(cmd, &buffer, bits);
+  }
+
+  void _image_barrier(VkCommandBuffer cmd, Resource_ID img_id, VkAccessFlags bits,
+                      VkImageLayout layout) {
+    if (!image_layouts.contains(img_id)) {
+      image_layouts.insert(img_id, ImageLayoutTracker{});
+    }
+    ImageLayoutTracker &il  = image_layouts.get(img_id);
+    Image &             img = dev_ctx->images[img_id.id];
+    il.barrier(cmd, &img, bits, layout);
+  }
+
   void _copy_buffer(Resource_ID src_buf_id, size_t src_offset, Resource_ID dst_buf_id,
                     size_t dst_offset, u32 size) {
     Buffer &src_buffer = dev_ctx->buffers[src_buf_id.id];
     Buffer &dst_buffer = dev_ctx->buffers[dst_buf_id.id];
-
-    src_buffer.barrier(cmd, VK_ACCESS_TRANSFER_READ_BIT);
-    dst_buffer.barrier(cmd, VK_ACCESS_TRANSFER_WRITE_BIT);
+    _buffer_barrier(cmd, src_buf_id, VK_ACCESS_TRANSFER_READ_BIT);
+    _buffer_barrier(cmd, dst_buf_id, VK_ACCESS_TRANSFER_WRITE_BIT);
     VkBufferCopy info;
     MEMZERO(info);
     info.dstOffset = dst_offset;
@@ -3126,12 +3292,10 @@ class Vk_Ctx : public rd::Imm_Ctx {
 
   void _copy_image_buffer(Resource_ID buf_id, size_t offset, Resource_ID img_id,
                           rd::Image_Copy const &dst_info) {
-    Buffer &buffer           = dev_ctx->buffers[buf_id.id];
-    Image & image            = dev_ctx->images[img_id.id];
-    auto    old_access_flags = image.access_flags;
-    auto    old_layout       = image.layout;
+    Buffer &buffer = dev_ctx->buffers[buf_id.id];
+    Image & image  = dev_ctx->images[img_id.id];
 
-    image.barrier(cmd, VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    _image_barrier(cmd, img_id, VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     VkBufferImageCopy info;
     MEMZERO(info);
     info.bufferOffset = offset;
@@ -3169,12 +3333,10 @@ class Vk_Ctx : public rd::Imm_Ctx {
 
   void _copy_buffer_image(Resource_ID buf_id, size_t offset, Resource_ID img_id,
                           rd::Image_Copy const &dst_info) {
-    Buffer &buffer           = dev_ctx->buffers[buf_id.id];
-    Image & image            = dev_ctx->images[img_id.id];
-    auto    old_access_flags = image.access_flags;
-    auto    old_layout       = image.layout;
+    Buffer &buffer = dev_ctx->buffers[buf_id.id];
+    Image & image  = dev_ctx->images[img_id.id];
 
-    image.barrier(cmd, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    _image_barrier(cmd, img_id, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     VkBufferImageCopy info;
     MEMZERO(info);
     info.bufferOffset = offset;
@@ -3276,14 +3438,13 @@ class Vk_Ctx : public rd::Imm_Ctx {
   void flush_render_pass() {
     Render_Pass &pass = dev_ctx->render_passes[cur_pass];
     ito(pass.create_info.rts.size) {
-      Image &img = dev_ctx->images[pass.create_info.rts[i].image.id];
-      img.barrier(cmd, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+      _image_barrier(cmd, pass.create_info.rts[i].image, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     }
     if (pass.depth_target_view.is_null() == false) {
-      Image &img = dev_ctx->images[pass.create_info.depth_target.image.id];
-      img.barrier(cmd, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                  VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+      _image_barrier(cmd, pass.create_info.depth_target.image,
+                     VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                     VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     }
     VkRenderPassBeginInfo binfo;
     MEMZERO(binfo);
@@ -3456,7 +3617,9 @@ class Vk_Ctx : public rd::Imm_Ctx {
         /* img.barrier(cmd, VK_ACCESS_MEMORY_WRITE_BIT,
                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);*/
 
-        vkCmdClearColorImage(cmd, img.image, img.layout, &cl.cv, 1, &cl.r);
+        vkCmdClearColorImage(cmd, img.image,
+                             _get_image_layout({{cl.img_id, (u32)Resource_Type::IMAGE}}), &cl.cv, 1,
+                             &cl.r);
       } else if (type == Cmd_t::DISPATCH) {
         Deferred_Dispatch dd;
         cpu_cmd.read(&dd);
@@ -3476,11 +3639,10 @@ class Vk_Ctx : public rd::Imm_Ctx {
         Deferred_Barrier db;
         cpu_cmd.read(&db);
         if (db.image) {
-          Image &img = dev_ctx->images[db.res_id];
-          img.barrier(cmd, db.new_access_flags, db.new_layout);
+          _image_barrier(cmd, {{db.res_id, (u32)Resource_Type::IMAGE}}, db.new_access_flags,
+                         db.new_layout);
         } else {
-          Buffer &buffer = dev_ctx->buffers[db.res_id];
-          buffer.barrier(cmd, db.new_access_flags);
+          _buffer_barrier(cmd, {{db.res_id, (u32)Resource_Type::BUFFER}}, db.new_access_flags);
         }
       } else {
         UNIMPLEMENTED;
@@ -3533,14 +3695,15 @@ class Vk_Ctx : public rd::Imm_Ctx {
         if (type == rd::Pass_t::COMPUTE) {
           push_buffer_barrier(buffer.id, VK_ACCESS_SHADER_READ_BIT);
         } else {
-          buffer.barrier(cmd, VK_ACCESS_SHADER_READ_BIT);
+          _buffer_barrier(cmd, buffer.get_resource_id(), VK_ACCESS_SHADER_READ_BIT);
         }
       } else if (rb.type == Binding_t::STORAGE_BUFFER) {
         Buffer &buffer = dev_ctx->buffers[rb.uniform_buffer.buf_id];
         if (type == rd::Pass_t::COMPUTE) {
           push_buffer_barrier(buffer.id, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
         } else {
-          buffer.barrier(cmd, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+          _buffer_barrier(cmd, buffer.get_resource_id(),
+                          VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
         }
 
       } else if (rb.type == Binding_t::IMAGE) {
@@ -3551,7 +3714,8 @@ class Vk_Ctx : public rd::Imm_Ctx {
           push_image_barrier(img.id, VK_ACCESS_SHADER_READ_BIT,
                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         } else {
-          img.barrier(cmd, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+          _image_barrier(cmd, img.get_resource_id(), VK_ACCESS_SHADER_READ_BIT,
+                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         }
 
       } else if (rb.type == Binding_t::STORAGE_IMAGE) {
@@ -3563,8 +3727,9 @@ class Vk_Ctx : public rd::Imm_Ctx {
           push_image_barrier(img.id, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
                              VK_IMAGE_LAYOUT_GENERAL);
         } else {
-          img.barrier(cmd, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-                      VK_IMAGE_LAYOUT_GENERAL);
+          _image_barrier(cmd, img.get_resource_id(),
+                         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                         VK_IMAGE_LAYOUT_GENERAL);
         }
 
       } else if (rb.type == Binding_t::SAMPLER) {
@@ -3702,7 +3867,8 @@ class Vk_Ctx : public rd::Imm_Ctx {
     this->dev_ctx = dev_ctx;
     stack.init();
     graphics_state.reset();
-
+    buffer_layouts.reset();
+    image_layouts.reset();
     cmd_id = dev_ctx->create_command_buffer();
     cmd    = dev_ctx->cmd_buffers[cmd_id.id].cmd;
 
@@ -3724,6 +3890,13 @@ class Vk_Ctx : public rd::Imm_Ctx {
     } else {
       UNIMPLEMENTED;
     }
+    buffer_layouts.iter_pairs(
+        [=](Resource_ID res_id, BufferLaoutTracker &lt) { _buffer_barrier(cmd, res_id, 0); });
+    image_layouts.iter_pairs([=](Resource_ID res_id, ImageLayoutTracker &lt) {
+      _image_barrier(cmd, res_id, 0, VK_IMAGE_LAYOUT_GENERAL);
+    });
+    buffer_layouts.release();
+    image_layouts.release();
     vkEndCommandBuffer(cmd);
     VkPipelineStageFlags stage_flags[]{VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                                        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT};
@@ -3820,7 +3993,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
     }
     ASSERT_DEBUG(res_id.type == (i32)Resource_Type::BUFFER);
     Buffer &buf = dev_ctx->buffers[res_id.id];
-    buf.barrier(cmd, VK_ACCESS_INDEX_READ_BIT);
+    _buffer_barrier(cmd, res_id, VK_ACCESS_INDEX_READ_BIT);
     VkIndexType type;
     switch (format) {
     case rd::Index_t::UINT32: type = VK_INDEX_TYPE_UINT32; break;
@@ -3839,7 +4012,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
     }
     ASSERT_DEBUG(res_id.type == (i32)Resource_Type::BUFFER);
     Buffer &buf = dev_ctx->buffers[res_id.id];
-    buf.barrier(cmd, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT);
+    _buffer_barrier(cmd, res_id, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT);
     VkDeviceSize doffset                   = (VkDeviceSize)offset;
     current_draw.vbos.size                 = MAX(index + 1, current_draw.vbos.size);
     current_draw.vbos[index].buffer        = buf.buffer;
@@ -4129,11 +4302,11 @@ class Vk_Ctx : public rd::Imm_Ctx {
                                    u32 stride) override {
     {
       Buffer &buffer = dev_ctx->buffers[arg_buf_id.id];
-      buffer.barrier(cmd, VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
+      _buffer_barrier(cmd, arg_buf_id, VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
     }
     {
       Buffer &buffer = dev_ctx->buffers[cnt_buf_id.id];
-      buffer.barrier(cmd, VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
+      _buffer_barrier(cmd, cnt_buf_id, VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
     }
     ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
     bake_descriptor_sets();
@@ -4202,7 +4375,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       cpu_cmd.write(Cmd_t::CLEAR_IMAGE, &cl);
     } else {
       Image &img = dev_ctx->images[id.id];
-      img.barrier(cmd, VK_ACCESS_MEMORY_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+      _image_barrier(cmd, id, VK_ACCESS_MEMORY_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
       VkClearColorValue _cv;
       MEMZERO(_cv);
       memcpy(&_cv, &cv, 16);
@@ -4513,8 +4686,9 @@ class VkFactory : public rd::IFactory {
   }
   rd::Impl_t getImplType() override { return rd::Impl_t::VULKAN; }
   void       start_frame() override {
-    dev_ctx->start_frame();
+    Resource_ID sem = dev_ctx->start_frame();
     on_frame_begin();
+    last_sem = sem.id;
   }
   void end_frame() override {
     on_frame_end();

@@ -2173,6 +2173,7 @@ static float3 transform(float4x4 const &t, float3 const &v) {
 }
 
 template <typename T> static void render_bvh(float4x4 const &t, BVH<T> *bvh, Gizmo_Layer *gl) {
+  ASSERT_DEBUG(bvh);
   bvh->traverse([&](BVH_Node *node) {
     gl->render_linebox(transform(t, node->min), transform(t, node->max), float3(1.0f, 0.0f, 0.0f));
   });

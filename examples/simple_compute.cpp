@@ -15,7 +15,11 @@ int main(int argc, char *argv[]) {
   (void)argv;
 
   rd::IFactory *factory = rd::create_vulkan(NULL);
-  defer(factory->release());
+  factory->start_frame();
+  defer({
+    factory->end_frame();
+    factory->release();
+  });
   Image2D *image = load_image(stref_s("images/ECurtis.png"));
   defer(if (image) image->release());
   ASSERT_ALWAYS(image);
