@@ -145,6 +145,7 @@ Index of this file:
 
 // Dummy data structure provided for the example.
 // Note that we storing links as indices (not ID) to make example code shorter.
+__attribute__((unused))
 static void ShowExampleAppCustomNodeGraph(bool *opened) {
   ImGui::SetNextWindowSize(ImVec2(700, 600), ImGuiCond_FirstUseEver);
   if (!ImGui::Begin("Example: Custom Node Graph", opened)) {

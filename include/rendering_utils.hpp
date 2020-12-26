@@ -8,6 +8,9 @@
 
 #ifdef __linux__
 #  include <SDL2/SDL.h>
+#  include <SDL2/SDL_syswm.h>
+#include <xcb/xcb.h>
+#include <X11/Xlib-xcb.h>
 #else
 #  include <SDL.h>
 #  include <SDL_syswm.h>
@@ -31,6 +34,7 @@ class RenderDoc_CTX {
   void init() {
     if (dll_not_found) return;
     if (renderdoc_api == NULL) {
+#ifdef WIN32
       HMODULE mod = GetModuleHandle("renderdoc.dll");
       if (mod) {
         pRENDERDOC_GetAPI getApi = (pRENDERDOC_GetAPI)GetProcAddress(mod, "RENDERDOC_GetAPI");
@@ -47,6 +51,7 @@ class RenderDoc_CTX {
         dll_not_found = true;
         fprintf(stderr, "[RenderDoc] module not found!\n");
       }
+#endif
     }
   }
   void _start() {
@@ -199,13 +204,24 @@ class IGUIApp {
       // SDL_Quit();
     });
 
+    void *handle = NULL;
+#ifdef WIN32
     SDL_SysWMinfo wmInfo;
     SDL_VERSION(&wmInfo.version);
     SDL_GetWindowWMInfo(window, &wmInfo);
     HWND hwnd = wmInfo.info.win.window;
-
+    handle = (void*)hwnd;
+#else
+    SDL_SysWMinfo wmInfo;
+    SDL_VERSION(&wmInfo.version);
+    SDL_GetWindowWMInfo(window, &wmInfo);
+    Window hwnd = wmInfo.info.x11.window;
+    xcb_connection_t *connection = XGetXCBConnection(wmInfo.info.x11.display);
+    Ptr2 ptrs{(void*)hwnd, (void*)connection};
+    handle = (void*)&ptrs;
+#endif
     if (impl_t == rd::Impl_t::VULKAN) {
-      factory = rd::create_vulkan(hwnd);
+      factory = rd::create_vulkan(handle);
     } else if (impl_t == rd::Impl_t::DX12) {
       TRAP;
       // factory = rd::create_vulkan(NULL);
@@ -1830,7 +1846,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
           glyphs[num_glyphs++] = glyph;
         }
       }
-      if (num_glyphs == 0) goto skip_strings;
+      if (num_glyphs != 0) {
       rd::Buffer_Create_Info buf_info;
       MEMZERO(buf_info);
       buf_info.mem_bits                 = (u32)rd::Memory_Bits::HOST_VISIBLE;
@@ -1888,7 +1904,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
       ctx->bind_image(0, 0, 0, font_texture, rd::Image_Subresource::top_level(),
                       rd::Format::NATIVE);
       glyph_wrapper.draw(ctx, num_glyphs, 0);
-    skip_strings:;
+    }
     }
     if (line_segments.size != 0) {
       ctx->push_state();
@@ -1960,8 +1976,8 @@ template <typename T> class GPUBuffer {
   void        reset() { cpu_array.reset(); }
   void        flush(rd::Imm_Ctx *ctx = NULL) {
     if (gpu_buffer.is_null() || cpu_array.size * sizeof(T) < gpu_buffer_size) {
-      if (cpu_buffer) factory->release_resource(cpu_buffer);
-      if (gpu_buffer) factory->release_resource(gpu_buffer);
+      if (cpu_buffer.is_valid()) factory->release_resource(cpu_buffer);
+      if (gpu_buffer.is_valid()) factory->release_resource(gpu_buffer);
       gpu_buffer_size = cpu_array.size * sizeof(T);
       {
         rd::Buffer_Create_Info info;
@@ -1993,8 +2009,8 @@ template <typename T> class GPUBuffer {
     }
   }
   void release() {
-    if (cpu_buffer) factory->release_resource(cpu_buffer);
-    if (gpu_buffer) factory->release_resource(gpu_buffer);
+    if (cpu_buffer.is_valid()) factory->release_resource(cpu_buffer);
+    if (gpu_buffer.is_valid()) factory->release_resource(gpu_buffer);
     cpu_array.release();
   }
 };

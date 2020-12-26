@@ -280,10 +280,6 @@ template <typename T, typename V> struct Pair {
 
 template <typename T, typename V> Pair<T, V> make_pair(T t, V v) { return {t, v}; }
 
-template <typename T, typename V> u64 hash_of(Pair<T, V> const &p) {
-  return hash_of(hash_of(p.first)) ^ hash_of(p.second);
-}
-
 template <typename T = uint8_t> struct Pool {
   uint8_t *ptr;
   size_t   cursor;
@@ -485,10 +481,6 @@ static inline uint64_t hash_of(uint64_t u) {
   return v;
 }
 
-template <> inline u64 hash_of(Pair<u32, u32> const &item) {
-  return hash_of((u64)item.first | ((u64)item.second << 32ull));
-}
-
 template <typename T> static void swap(T &a, T &b) {
   T c = a;
   a   = b;
@@ -510,6 +502,14 @@ static inline uint64_t hash_of(string_ref a) {
         ((hash << 5) + hash) + a.ptr[i];
   }
   return hash;
+}
+
+template <typename T, typename V> u64 hash_of(Pair<T, V> const &p) {
+  return hash_of(hash_of(p.first)) ^ hash_of(p.second);
+}
+
+template <> inline u64 hash_of(Pair<u32, u32> const &item) {
+  return hash_of((u64)item.first | ((u64)item.second << 32ull));
 }
 
 /** String view of a static string
@@ -573,7 +573,6 @@ static inline char const *stref_to_tmp_cstr(string_ref a) {
 }
 
 static inline int32_t stref_find(string_ref a, string_ref b, size_t start = 0) {
-  size_t cursor = 0;
   for (size_t i = start; i < a.len; i++) {
     for (size_t j = 0; j < b.len && i + j < a.len; j++) {
       if (a.ptr[i + j] != b.ptr[j]) break;
@@ -724,7 +723,7 @@ static inline string_ref tmp_format(char const *fmt, ...) {
   // char *  buf = (char *)tl_alloc_tmp(strlen(fmt) * 2);
   va_list args;
   va_start(args, fmt);
-  i32 len = vsnprintf(tmp_buf, sizeof(tmp_buf), fmt, args);
+  vsnprintf(tmp_buf, sizeof(tmp_buf), fmt, args);
   va_end(args);
   return stref_tmp(tmp_buf);
 }
@@ -936,7 +935,7 @@ struct Tmp_Allocator {
       return new_ptr;
     }
   }
-  static void free(void *ptr) {
+  static void free(void *) {
     // lol
   }
 };
@@ -1094,13 +1093,13 @@ struct Array {
 template <typename T, size_t grow_k = 0x10,
           typename Allcator_t = Default_Allocator> //
 struct AutoArray : public Array<T, grow_k, Allcator_t> {
-  AutoArray() { init(); }
+  AutoArray() { Array<T, grow_k, Allcator_t>::init(); }
   AutoArray(AutoArray const &) = delete;
   AutoArray operator=(AutoArray const &) = delete;
   AutoArray operator=(AutoArray &&) = delete;
   AutoArray(AutoArray &&)           = delete;
-  void cloneFrom(AutoArray const &a) { init(a.ptr, a.size); }
-  ~AutoArray() { release(); }
+  void cloneFrom(AutoArray const &a) { Array<T, grow_k, Allcator_t>::init(a.ptr, a.size); }
+  ~AutoArray() { Array<T, grow_k, Allcator_t>::release(); }
 };
 
 template <typename T, u32 N, typename Allcator_t = Default_Allocator> //

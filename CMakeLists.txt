@@ -15,10 +15,12 @@ ELSE()
   message(STATUS "$ENV{VULKAN_SDK}/include")
 ENDIF()
 add_subdirectory(3rdparty/meshoptimizer)
-add_subdirectory(3rdparty/zstd/build/cmake)
 
 IF (WIN32)
   set(SDL2_PATH ${CMAKE_SOURCE_DIR}/bin/SDL2)
+  set(IMPLS
+    src/vk_backend.cpp
+    src/dx12_backend.cpp)
   if(EXISTS "${SDL2_PATH}/lib/x64/SDL2.lib")
   else()
   message(FATAL_ERROR "Please provide path to SLD2! e.g. -D SDL2_PATH=C:/SDL2")
@@ -48,16 +50,20 @@ IF (WIN32)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Od /GR- /EHs- /EHc- /D _HAS_ITERATOR_DEBUGGING=0 /D _ITERATOR_DEBUG_LEVEL=0")
   
 ELSE()
+  set(IMPLS
+    src/vk_backend.cpp)
   set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
   set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} \
   -march=skylake \
-  -pedantic-errors -Wall -Wextra -Werror -ferror-limit=1 \
+  -ferror-limit=1 -fsanitize=thread \
   -Wno-c99-extensions -Wno-comment \
-  -fno-exceptions -fno-rtti -fvisibility=hidden")
+  -fno-exceptions -fno-rtti -fvisibility=hidden -fms-extensions")
   set (LIBS SDL2 pthread ncurses z dl
-    "$ENV{VULKAN_SDK}/lib/libSPIRV-Tools-shared.so"
+    "$ENV{VULKAN_SDK}/lib/libSPIRV-Tools.a"
+    "$ENV{VULKAN_SDK}/lib/libspirv-cross-core.a"
+    "$ENV{VULKAN_SDK}/lib/libspirv-cross-c-shared.so"
     "$ENV{VULKAN_SDK}/lib/libshaderc_shared.so"
-    "$ENV{VULKAN_SDK}/lib/libspirv-cross-core.so"
+    "libX11-xcb.so"
     )
   set (INCLUDES "")
 ENDIF()
@@ -71,8 +77,7 @@ function(ADD_EXAMPLE example_name example_file)
     )
     add_executable(${example_name}
     ${example_file}
-    src/vk_backend.cpp
-    src/dx12_backend.cpp
+    ${IMPLS}
     src/files.cpp
     3rdparty/imgui/imgui.cpp
     3rdparty/imgui/imgui_widgets.cpp
@@ -103,7 +108,6 @@ function(ADD_EXAMPLE example_name example_file)
     target_link_libraries(${example_name}
     ${Vulkan_LIBRARY}
     meshoptimizer
-    libzstd_shared
     ${LIBS}
     )
 
@@ -118,4 +122,3 @@ add_example(simple_compute examples/simple_compute.cpp)
 add_example(oit examples/oit.cpp)
 add_example(virtual_textures examples/virtual_textures.cpp)
 add_example(sdf examples/sdf.cpp)
-add_example(dx12_test examples/dx12_test.cpp)

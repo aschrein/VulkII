@@ -8,6 +8,7 @@
 #include <3rdparty/half.hpp>
 #include <imgui.h>
 #include <mutex>
+#include <condition_variable>
 #include <thread>
 
 struct RenderingContext {

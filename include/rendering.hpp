@@ -13,6 +13,11 @@ struct ID {
 
 static_assert(sizeof(ID) == 4, "blimey!");
 
+struct Ptr2 {
+  void *ptr1;
+  void *ptr2;
+};
+
 struct Resource_ID {
   union {
     struct {
@@ -24,6 +29,7 @@ struct Resource_ID {
   static Resource_ID null() { return {0, 0}; }
   u32                index() { return id.index(); }
   bool               is_null() const { return id.is_null(); }
+    bool               is_valid() const { return type != 0 && !id.is_null(); }
   void               reset() { memset(this, 0, sizeof(*this)); }
   bool               operator==(Resource_ID const &that) const { return data == that.data; }
 };
@@ -45,6 +51,7 @@ enum class Format : u32 {
   UNKNOWN = 0,
   NATIVE  = 1,
   BGRA8_UNORM,
+  BGRA8_SRGBA,
   BGR8_UNORM,
   RGBA8_UNORM,
   RGBA8_SNORM,

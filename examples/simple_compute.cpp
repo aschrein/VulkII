@@ -127,6 +127,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
   factory->release_resource(event_id);
   u32 *map = (u32 *)factory->map_buffer(res_id);
   ito(1024) fprintf(stdout, "%i ", map[i]);
+  fflush(stdout);
   factory->unmap_buffer(res_id);
   factory->release_resource(res_id);
   RenderDoc_CTX::end();

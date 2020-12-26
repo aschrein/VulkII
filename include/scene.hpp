@@ -1418,6 +1418,61 @@ template <typename T> struct BVH_Helper {
 
 static_assert(sizeof(BVH_Node) == 28, "Blamey!");
 
+static float dot2(float3 a) { return dot(a, a); }
+
+struct Tri {
+  u32    surface_id;
+  u32    triangle_id;
+  float3 a;
+  float3 b;
+  float3 c;
+  void   get_aabb(float3 &min, float3 &max) const {
+    ito(3) min[i] = MIN(a[i], MIN(b[i], c[i]));
+    ito(3) max[i] = MAX(a[i], MAX(b[i], c[i]));
+  }
+  float2 get_end_points(u8 dim, float3 min, float3 max) const {
+    float3 sp;
+    ito(i) sp[i] = MIN(a[i], MIN(b[i], c[i]));
+    float3 ep;
+    ito(i) ep[i] = MAX(a[i], MAX(b[i], c[i]));
+
+    bool fully_inside = //
+        sp.x > min.x && //
+        sp.y > min.y && //
+        sp.z > min.z && //
+        ep.x < max.x && //
+        ep.y < max.y && //
+        ep.z < max.z && //
+        true;
+    if (fully_inside) return float2{sp[dim], ep[dim]};
+  }
+  // https://www.iquilezles.org/www/articles/triangledistance/triangledistance.htm
+  float distance(float3 p) {
+    // prepare data
+    float3 v21 = b - a;
+    float3 p1  = p - a;
+    float3 v32 = c - b;
+    float3 p2  = p - b;
+    float3 v13 = a - c;
+    float3 p3  = p - c;
+    float3 nor = cross(v21, v13);
+
+    return -(dot(nor, p1) < 0.0f ? -1.0f : 1.0f) *
+           sqrt( // inside/outside test
+               (sign(dot(cross(v21, nor), p1)) + sign(dot(cross(v32, nor), p2)) +
+                    sign(dot(cross(v13, nor), p3)) <
+                2.0)
+                   ?
+                   // 3 edges
+                   min(min(dot2(v21 * clamp(dot(v21, p1) / dot2(v21), 0.0f, 1.0f) - p1),
+                           dot2(v32 * clamp(dot(v32, p2) / dot2(v32), 0.0f, 1.0f) - p2)),
+                       dot2(v13 * clamp(dot(v13, p3) / dot2(v13), 0.0f, 1.0f) - p3))
+                   :
+                   // 1 face
+                   dot(nor, p1) * dot(nor, p1) / dot2(nor));
+  }
+};
+
 template <typename T> struct BVH {
   Array<T>        item_pool;
   Array<BVH_Node> node_pool;
@@ -1523,7 +1578,7 @@ template <typename T> struct BVH {
     bool  found        = false;
     float min_distance = 1.0e6f;
     while (!found) {
-      traverse(p, r, [&](Tri *items, u32 num_items) {
+      traverse(p, r, [&](T *items, u32 num_items) {
         ito(num_items) {
           float dist = items[i].distance(p);
           if (abs(dist) < abs(min_distance)) {
@@ -2165,61 +2220,6 @@ class GfxSurface {
     ctx->draw_indexed(surface->mesh.num_indices, 1, index_cursor, 0, vertex_cursor);
     index_cursor += surface->mesh.num_indices;
     vertex_cursor += surface->mesh.num_vertices;
-  }
-};
-
-static float dot2(float3 a) { return dot(a, a); }
-
-struct Tri {
-  u32    surface_id;
-  u32    triangle_id;
-  float3 a;
-  float3 b;
-  float3 c;
-  void   get_aabb(float3 &min, float3 &max) const {
-    ito(3) min[i] = MIN(a[i], MIN(b[i], c[i]));
-    ito(3) max[i] = MAX(a[i], MAX(b[i], c[i]));
-  }
-  float2 get_end_points(u8 dim, float3 min, float3 max) const {
-    float3 sp;
-    ito(i) sp[i] = MIN(a[i], MIN(b[i], c[i]));
-    float3 ep;
-    ito(i) ep[i] = MAX(a[i], MAX(b[i], c[i]));
-
-    bool fully_inside = //
-        sp.x > min.x && //
-        sp.y > min.y && //
-        sp.z > min.z && //
-        ep.x < max.x && //
-        ep.y < max.y && //
-        ep.z < max.z && //
-        true;
-    if (fully_inside) return float2{sp[dim], ep[dim]};
-  }
-  // https://www.iquilezles.org/www/articles/triangledistance/triangledistance.htm
-  float distance(float3 p) {
-    // prepare data
-    float3 v21 = b - a;
-    float3 p1  = p - a;
-    float3 v32 = c - b;
-    float3 p2  = p - b;
-    float3 v13 = a - c;
-    float3 p3  = p - c;
-    float3 nor = cross(v21, v13);
-
-    return -(dot(nor, p1) < 0.0f ? -1.0f : 1.0f) *
-           sqrt( // inside/outside test
-               (sign(dot(cross(v21, nor), p1)) + sign(dot(cross(v32, nor), p2)) +
-                    sign(dot(cross(v13, nor), p3)) <
-                2.0)
-                   ?
-                   // 3 edges
-                   min(min(dot2(v21 * clamp(dot(v21, p1) / dot2(v21), 0.0f, 1.0f) - p1),
-                           dot2(v32 * clamp(dot(v32, p2) / dot2(v32), 0.0f, 1.0f) - p2)),
-                       dot2(v13 * clamp(dot(v13, p3) / dot2(v13), 0.0f, 1.0f) - p3))
-                   :
-                   // 1 face
-                   dot(nor, p1) * dot(nor, p1) / dot2(nor));
   }
 };
 

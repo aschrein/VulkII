@@ -15,10 +15,13 @@
 #include <thread>
 
 LPCWSTR towstr_tmp(string_ref str) {
-  std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
-  std::wstring wide = converter.from_bytes(str.ptr, str.ptr + str.len);
-  WCHAR *      tmp  = (WCHAR *)tl_alloc_tmp(wide.size() * 2 + 2);
-  memcpy(tmp, wide.c_str(), wide.size() * 2);
+//  std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+//  std::wstring wide = converter.from_bytes(str.ptr, str.ptr + str.len);
+std::wstring wide = std::wstring(str.ptr, str.ptr + str.len);
+size_t wide_len = sizeof(wchar_t) * wide.size();
+WCHAR const *src = wide.c_str();
+WCHAR *      tmp  = (WCHAR *)tl_alloc_tmp(wide_len+ sizeof(wchar_t));
+  memcpy(tmp, wide.c_str(), wide_len);
   tmp[wide.size()] = L'\0';
   return tmp;
 }
@@ -296,6 +299,8 @@ VkFormat to_vk(rd::Format format) {
   case rd::Format::RGBA8_SRGBA     : return VK_FORMAT_R8G8B8A8_SRGB       ;
   case rd::Format::RGBA8_UINT      : return VK_FORMAT_R8G8B8A8_UINT       ;
 
+  case rd::Format::BGRA8_SRGBA     : return VK_FORMAT_B8G8R8A8_SRGB       ;
+
   case rd::Format::RGB8_UNORM      : return VK_FORMAT_R8G8B8_UNORM        ;
   case rd::Format::RGB8_SNORM      : return VK_FORMAT_R8G8B8_SNORM        ;
   case rd::Format::RGB8_SRGBA      : return VK_FORMAT_R8G8B8_SRGB         ;
@@ -320,6 +325,7 @@ rd::Format from_vk(VkFormat format) {
   // clang-format off
   switch (format) {
   case VK_FORMAT_B8G8R8A8_UNORM      : return rd::Format::BGRA8_UNORM     ;
+  case VK_FORMAT_B8G8R8A8_SRGB       : return rd::Format::BGRA8_SRGBA     ;
   case VK_FORMAT_B8G8R8_UNORM        : return rd::Format::BGR8_UNORM      ;
 
   case VK_FORMAT_R8G8B8A8_UNORM      : return rd::Format::RGBA8_UNORM     ;
@@ -528,17 +534,26 @@ static Array<u32> compile_glsl(VkDevice device, string_ref text, shaderc_shader_
 
 static Array<u32> compile_hlsl(VkDevice device, string_ref text, shaderc_shader_kind kind,
                                Pair<string_ref, string_ref> *defines, size_t num_defines) {
+#ifdef WIN32
   static HMODULE dxcompilerDLL = LoadLibraryA("dxcompiler.dll");
   ASSERT_ALWAYS(dxcompilerDLL);
   static DxcCreateInstanceProc DxcCreateInstance =
       (DxcCreateInstanceProc)GetProcAddress(dxcompilerDLL, "DxcCreateInstance");
-
+#else
+  static void *dxcompilerDLL = dlopen("libdxcompiler.so", RTLD_NOW);
+  ASSERT_ALWAYS(dxcompilerDLL);
+  static DxcCreateInstanceProc DxcCreateInstance =
+      (DxcCreateInstanceProc)dlsym(dxcompilerDLL, "DxcCreateInstance");
+  ASSERT_ALWAYS(DxcCreateInstance);
+#endif
+  
   static CComPtr<IDxcLibrary> library;
-  ASSERT_ALWAYS(S_OK == DxcCreateInstance(CLSID_DxcLibrary, IID_PPV_ARGS(&library)));
-
   static CComPtr<IDxcCompiler> compiler;
+  static int init = [&] {
   ASSERT_ALWAYS(S_OK == DxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler)));
-
+  ASSERT_ALWAYS(S_OK == DxcCreateInstance(CLSID_DxcLibrary, IID_PPV_ARGS(&library)));
+  return 0;
+  }();
   CComPtr<IDxcBlobEncoding> blob;
   ASSERT_ALWAYS(S_OK ==
                 library->CreateBlobWithEncodingFromPinned(text.ptr, (uint32_t)text.len, 0, &blob));
@@ -581,7 +596,7 @@ static Array<u32> compile_hlsl(VkDevice device, string_ref text, shaderc_shader_
       CComPtr<IDxcBlobEncoding> errorsBlob;
       hr = result->GetErrorBuffer(&errorsBlob);
       if (SUCCEEDED(hr) && errorsBlob) {
-        wprintf(L"Compilation failed with errors:\n%hs\n",
+        fprintf(stdout, "Compilation failed with errors:\n%s\n",
                 (const char *)errorsBlob->GetBufferPointer());
       }
     }
@@ -1749,7 +1764,7 @@ struct Resource_Array {
   }*/
   T operator[](ID id) {
     ASSERT_DEBUG(!id.is_null() && items[id.index()].get_id().index() == id.index());
-    std::lock_guard<std::mutex> _lock(mutex);
+    //std::lock_guard<std::mutex> _lock(mutex);
     return items[id.index()];
   }
   void add_ref(ID id) {
@@ -2636,7 +2651,7 @@ struct VkDeviceContext {
 #ifdef VK_USE_PLATFORM_WIN32_KHR
         VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
 #else
-#  error
+        VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_XCB_SURFACE_EXTENSION_NAME,
 #endif
         VK_EXT_DEBUG_REPORT_EXTENSION_NAME};
 
@@ -2651,7 +2666,7 @@ struct VkDeviceContext {
     const char *layerNames[]      = {"VK_LAYER_KHRONOS_validation"};
     bool        enable_validation = false;
 #ifndef NDEBUG
-    enable_validation = true;
+    enable_validation = false;
 #endif
     VkInstanceCreateInfo info;
     MEMZERO(info);
@@ -2678,7 +2693,15 @@ struct VkDeviceContext {
       VK_ASSERT_OK(vkCreateWin32SurfaceKHR(instance, &createInfo, nullptr, &surface));
     }
 #else
-#  error
+    if (window_handler) {
+      VkXcbSurfaceCreateInfoKHR createInfo;
+      MEMZERO(createInfo);
+      createInfo.sType     = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+      Ptr2 ptrs = *(Ptr2*)window_handler;
+      createInfo.window      = (xcb_window_t)ptrs.ptr1;
+      createInfo.connection = (xcb_connection_t*)ptrs.ptr2;
+      VK_ASSERT_OK(vkCreateXcbSurfaceKHR(instance, &createInfo, nullptr, &surface));
+    }
 #endif
 
     const u32               MAX_COUNT = 0x100;
@@ -2812,6 +2835,8 @@ struct VkDeviceContext {
     }
 
     ito(sc_image_count) {
+      if (sc_images[i].is_null())
+        continue;
       Image image = images[sc_images[i]];
       _image_barrier_sync(image, 0, VK_IMAGE_LAYOUT_UNDEFINED, 0, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     }

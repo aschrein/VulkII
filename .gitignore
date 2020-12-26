@@ -1,1 +1,5 @@
 build/
+models/
+images/
+.vscode/
+*.user

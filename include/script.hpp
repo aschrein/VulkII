@@ -45,9 +45,9 @@ static inline bool parse_decimal_int(char const *str, size_t len, int32_t *resul
   return true;
 }
 
-template <typename T> static inline bool parse_float(char const *str, size_t len, T *result) {
+template <typename T> static inline bool parse_float(char const *str, i32 len, T *result) {
   T        final = 0.0;
-  uint32_t i     = 0;
+  i32 i     = 0;
   T        sign  = 1.0;
   if (str[0] == '-') {
     sign = -1.0;
@@ -101,7 +101,7 @@ template <typename T> static inline bool parse_float(char const *str, size_t len
       i++;
       i32 exp = -1;
       i32 l   = 0;
-      for (; l < len - i; l++)
+      for (; l < (i32)len - i; l++)
         if (str[i + l] == 'f' || str[i + l] == 'F') break;
       if (!parse_decimal_int(str + i, l, &exp)) return false;
       final = final * std::pow((T)10.0, (T)exp);
@@ -815,7 +815,7 @@ static Expr *tmp_alloc_expr() {
   memset(out, 0, sizeof(Expr));
   return out;
 }
-static bool isLiteral(char c) { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_'; }
+static bool isLiteral(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; }
 static bool isPrintable(char c) { return c >= 0x20 && c <= 0x7F; }
 static bool isNumeral(char c) { return c >= '0' && c <= '9'; }
 static void skipSpaces(char const *&cursor) {
@@ -827,7 +827,7 @@ static char        single_char_ops[] = {'+', '-', '*', '/', ',', '>', '<', '^', 
 static char const *two_char_ops[]    = {"<=", ">=", "!=", "+=", "-=", "*=", "/="};
 static int         precedence[0x100];
 static int         prec_init = [] {
-  ito(ARRAYSIZE(precedence)) precedence[i] = -1;
+  ito(ARRAY_SIZE(precedence)) precedence[i] = -1;
   // semicolon is used to chain expressions
   precedence[(int)';'] = 0;
   precedence[(int)','] = 1;
