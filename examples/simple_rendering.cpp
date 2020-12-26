@@ -18,69 +18,100 @@ struct RenderingContext {
 };
 class GBufferPass {
   public:
-  Resource_ID normal_rt;
-  Resource_ID depth_rt;
+  Resource_ID normal_rt{};
+  Resource_ID depth_rt{};
+  Resource_ID gbuffer_vs{};
+  Resource_ID gbuffer_ps{};
 
-  struct GPU_Cube {
-    Resource_ID vertex_buffer = {};
-    Resource_ID index_buffer  = {};
-    void        init(rd::IFactory *factory) {
-      if (vertex_buffer.is_null()) {
+  void render_once(rd::Imm_Ctx *ctx, Scene *scene, float4x4 viewproj, float4x4 world) {
+    ctx->push_constants(&viewproj, 0, sizeof(float4x4));
+    setup_default_state(ctx, 1);
+    rd::DS_State ds_state;
+    rd::RS_State rs_state;
+    MEMZERO(ds_state);
+    ds_state.cmp_op             = rd::Cmp::GE;
+    ds_state.enable_depth_test  = true;
+    ds_state.enable_depth_write = true;
+    ctx->DS_set_state(ds_state);
 
-        rd::Buffer_Create_Info buf_info;
-        MEMZERO(buf_info);
-        buf_info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
-        buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER |
-                              (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
-        buf_info.size = sizeof(float3) * 8;
-        vertex_buffer = factory->create_buffer(buf_info);
+    ctx->VS_set_shader(gbuffer_vs);
+    ctx->PS_set_shader(gbuffer_ps);
+    static u32 attribute_to_location[] = {
+        0xffffffffu, 0, 1, 2, 3, 4, 5, 6, 7, 8,
+    };
+    // if (rctx.config->get_bool("render_scene")) {
+    MEMZERO(ds_state);
+    ds_state.cmp_op             = rd::Cmp::GE;
+    ds_state.enable_depth_test  = true;
+    ds_state.enable_depth_write = true;
+    ctx->DS_set_state(ds_state);
 
-        float3 dvertices[8] = {float3(-1, -1, -1), float3(1, -1, -1), float3(1, 1, -1),
-                               float3(-1, 1, -1),  float3(-1, -1, 1), float3(1, -1, 1),
-                               float3(1, 1, 1),    float3(-1, 1, 1)};
-        init_buffer(factory, vertex_buffer, dvertices, sizeof(dvertices));
+    MEMZERO(rs_state);
+    rs_state.polygon_mode = rd::Polygon_Mode::FILL;
+    rs_state.front_face   = rd::Front_Face::CCW;
+    rs_state.cull_mode    = rd::Cull_Mode::BACK;
+    ctx->RS_set_state(rs_state);
+
+    scene->traverse([&](Node *node) {
+      if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
+        GfxSufraceComponent *gs    = mn->getComponent<GfxSufraceComponent>();
+        float4x4             model = world * mn->get_transform();
+        ctx->push_constants(&model, 64, sizeof(model));
+        ito(gs->getNumSurfaces()) {
+          GfxSurface *s = gs->getSurface(i);
+          s->draw(ctx, attribute_to_location);
+        }
       }
-      if (index_buffer.is_null()) {
-        rd::Buffer_Create_Info buf_info;
-        MEMZERO(buf_info);
-        buf_info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
-        buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER |
-                              (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
-        buf_info.size           = 6 * 2 * 3 * sizeof(u32);
-        index_buffer            = factory->create_buffer(buf_info);
-        u32 dindices[6 * 2 * 3] = {0, 1, 3, 3, 1, 2, 1, 5, 2, 2, 5, 6, 5, 4, 6, 6, 4, 7,
-                                   4, 0, 7, 7, 0, 3, 3, 2, 7, 7, 2, 6, 4, 5, 0, 0, 5, 1};
-        init_buffer(factory, index_buffer, dindices, sizeof(dindices));
-      }
-    }
-    void bind(rd::Imm_Ctx *ctx) {
-      ctx->IA_set_vertex_buffer(0, vertex_buffer, 0, 12, rd::Input_Rate::VERTEX);
-      ctx->IA_set_index_buffer(index_buffer, 0, rd::Index_t::UINT32);
-      {
-        rd::Attribute_Info info;
-        MEMZERO(info);
-        info.binding  = 0;
-        info.format   = rd::Format::RGB32_FLOAT;
-        info.location = 0;
-        info.offset   = 0;
-        info.type     = rd::Attriute_t::POSITION;
-        ctx->IA_set_attribute(info);
-      }
-    }
-    void draw(rd::Imm_Ctx *ctx) { ctx->draw_indexed(36, 1, 0, 0, 0); }
-    void release(rd::IFactory *factory) {
-      if (vertex_buffer.is_null() == false) factory->release_resource(vertex_buffer);
-      if (index_buffer.is_null() == false) factory->release_resource(index_buffer);
-    }
-  };
+    });
+    //}
+    MEMZERO(rs_state);
+    rs_state.polygon_mode = rd::Polygon_Mode::LINE;
+    rs_state.front_face   = rd::Front_Face::CCW;
+    rs_state.cull_mode    = rd::Cull_Mode::BACK;
+    ctx->RS_set_state(rs_state);
+    ctx->RS_set_depth_bias(0.1f);
+    /* if (rctx.config->get_bool("render_scene_wireframe")) {
+       ctx->PS_set_shader(rctx.factory->create_shader_raw(rd::Stage_t::PIXEL, stref_s(R"(
+ struct PSInput {
+   [[vk::location(0)]] float4 pos     : SV_POSITION;
+   [[vk::location(1)]] float3 normal  : TEXCOORD0;
+   [[vk::location(2)]] float2 uv      : TEXCOORD1;
+ };
+
+ float4 main(in PSInput input) : SV_TARGET0 {
+   return float4_splat(0.0f);
+ }
+ )"),
+                                                          NULL, 0));
+       rctx.scene->traverse([&](Node *node) {
+         if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
+           GfxSufraceComponent *gs    = mn->getComponent<GfxSufraceComponent>();
+           float4x4             model = mn->get_transform();
+           ctx->push_constants(&model, 64, sizeof(model));
+           ito(gs->getNumSurfaces()) {
+             GfxSurface *s = gs->getSurface(i);
+             s->draw(ctx, attribute_to_location);
+           }
+         }
+       });
+     }*/
+  }
+  std::vector<std::thread>    threads;
+  std::condition_variable     work_finish_cv;
+  std::mutex                  work_finish_mutex;
+  std::condition_variable     work_start_cv;
+  std::mutex                  work_start_mutex;
+  std::atomic<bool>           working;
+  std::atomic<int>            new_work;
+  rd::Render_Pass_Create_Info info{};
 
   public:
   TimeStamp_Pool timestamps = {};
 
-  void init() { MEMZERO(*this); }
+  void init() {}
   void render(RenderingContext rctx) {
     timestamps.update(rctx.factory);
-    float4x4 bvh_visualizer_offset = glm::translate(float4x4(1.0f), float3(-10.0f, 0.0f, 0.0f));
+    // float4x4 bvh_visualizer_offset = glm::translate(float4x4(1.0f), float3(-10.0f, 0.0f, 0.0f));
     rctx.scene->traverse([&](Node *node) {
       if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
         if (mn->getComponent<GfxSufraceComponent>() == NULL) {
@@ -125,13 +156,12 @@ class GBufferPass {
       rt0_info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_DT;
       depth_rt            = get_or_create_image(rctx.factory, rt0_info, depth_rt);
     }
+    // Clear Images
     {
-      rd::Render_Pass_Create_Info info;
-      MEMZERO(info);
+      rd::Render_Pass_Create_Info info{};
       info.width  = width;
       info.height = height;
-      rd::RT_View rt0;
-      MEMZERO(rt0);
+      rd::RT_View rt0{};
       rt0.image             = normal_rt;
       rt0.format            = rd::Format::NATIVE;
       rt0.clear_color.clear = true;
@@ -144,23 +174,41 @@ class GBufferPass {
       info.depth_target.image             = depth_rt;
       info.depth_target.clear_depth.clear = true;
       info.depth_target.format            = rd::Format::NATIVE;
+      auto ctx                            = rctx.factory->start_render_pass(info);
+      rctx.factory->end_render_pass(ctx);
+    }
+    {
+      MEMZERO(info);
+      info.width  = width;
+      info.height = height;
+      rd::RT_View rt0;
+      MEMZERO(rt0);
+      rt0.image             = normal_rt;
+      rt0.format            = rd::Format::NATIVE;
+      rt0.clear_color.clear = false;
+      info.rts.push(rt0);
+      info.depth_target.image             = depth_rt;
+      info.depth_target.clear_depth.clear = false;
+      info.depth_target.format            = rd::Format::NATIVE;
+      if (rctx.config->get_bool("render_gizmo")) {
+        auto g_camera = rctx.gizmo_layer->get_camera();
+        {
+          float dx = 1.0e-1f * g_camera.distance;
+          rctx.gizmo_layer->draw_sphere(g_camera.look_at, dx * 0.04f, float3{1.0f, 1.0f, 1.0f});
+          rctx.gizmo_layer->draw_cylinder(g_camera.look_at,
+                                          g_camera.look_at + float3{dx, 0.0f, 0.0f}, dx * 0.04f,
+                                          float3{1.0f, 0.0f, 0.0f});
+          rctx.gizmo_layer->draw_cylinder(g_camera.look_at,
+                                          g_camera.look_at + float3{0.0f, dx, 0.0f}, dx * 0.04f,
+                                          float3{0.0f, 1.0f, 0.0f});
+          rctx.gizmo_layer->draw_cylinder(g_camera.look_at,
+                                          g_camera.look_at + float3{0.0f, 0.0f, dx}, dx * 0.04f,
+                                          float3{0.0f, 0.0f, 1.0f});
+        }
+      }
 
-      rd::Imm_Ctx *ctx = rctx.factory->start_render_pass(info);
-      timestamps.insert(rctx.factory, ctx);
-      setup_default_state(ctx, 1);
-      rd::DS_State ds_state;
-      rd::RS_State rs_state;
-      float4x4     viewproj = rctx.gizmo_layer->get_camera().viewproj();
-      ctx->push_constants(&viewproj, 0, sizeof(float4x4));
-      ctx->set_viewport(0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f);
-      ctx->set_scissor(0, 0, width, height);
-      MEMZERO(ds_state);
-      ds_state.cmp_op             = rd::Cmp::GE;
-      ds_state.enable_depth_test  = true;
-      ds_state.enable_depth_write = true;
-      ctx->DS_set_state(ds_state);
-
-      ctx->VS_set_shader(rctx.factory->create_shader_raw(rd::Stage_t::VERTEX, stref_s(R"(
+      if (gbuffer_vs.is_null()) {
+        gbuffer_vs = rctx.factory->create_shader_raw(rd::Stage_t::VERTEX, stref_s(R"(
 struct PushConstants
 {
   float4x4 viewproj;
@@ -188,8 +236,10 @@ PSInput main(in VSInput input) {
   return output;
 }
 )"),
-                                                         NULL, 0));
-      ctx->PS_set_shader(rctx.factory->create_shader_raw(rd::Stage_t::PIXEL, stref_s(R"(
+                                                     NULL, 0);
+      }
+      if (gbuffer_ps.is_null()) {
+        gbuffer_ps = rctx.factory->create_shader_raw(rd::Stage_t::PIXEL, stref_s(R"(
 struct PSInput {
   [[vk::location(0)]] float4 pos     : SV_POSITION;
   [[vk::location(1)]] float3 normal  : TEXCOORD0;
@@ -207,86 +257,71 @@ float4 main(in PSInput input) : SV_TARGET0 {
          );
 }
 )"),
-                                                         NULL, 0));
-      static u32 attribute_to_location[] = {
-          0xffffffffu, 0, 1, 2, 3, 4, 5, 6, 7, 8,
-      };
-      if (rctx.config->get_bool("render_scene")) {
-        MEMZERO(ds_state);
-        ds_state.cmp_op             = rd::Cmp::GE;
-        ds_state.enable_depth_test  = true;
-        ds_state.enable_depth_write = true;
-        ctx->DS_set_state(ds_state);
-
-        MEMZERO(rs_state);
-        rs_state.polygon_mode = rd::Polygon_Mode::FILL;
-        rs_state.front_face   = rd::Front_Face::CCW;
-        rs_state.cull_mode    = rd::Cull_Mode::BACK;
-        ctx->RS_set_state(rs_state);
-
-        rctx.scene->traverse([&](Node *node) {
-          if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
-            GfxSufraceComponent *gs    = mn->getComponent<GfxSufraceComponent>();
-            float4x4             model = mn->get_transform();
-            ctx->push_constants(&model, 64, sizeof(model));
-            ito(gs->getNumSurfaces()) {
-              GfxSurface *s = gs->getSurface(i);
-              s->draw(ctx, attribute_to_location);
-            }
-          }
-        });
+                                                     NULL, 0);
       }
-      MEMZERO(rs_state);
-      rs_state.polygon_mode = rd::Polygon_Mode::LINE;
-      rs_state.front_face   = rd::Front_Face::CCW;
-      rs_state.cull_mode    = rd::Cull_Mode::BACK;
-      ctx->RS_set_state(rs_state);
-      ctx->RS_set_depth_bias(0.1f);
-      if (rctx.config->get_bool("render_scene_wireframe")) {
-        ctx->PS_set_shader(rctx.factory->create_shader_raw(rd::Stage_t::PIXEL, stref_s(R"(
-struct PSInput {
-  [[vk::location(0)]] float4 pos     : SV_POSITION;
-  [[vk::location(1)]] float3 normal  : TEXCOORD0;
-  [[vk::location(2)]] float2 uv      : TEXCOORD1;
-};
+      //{
+      //  int          i   = 0;
+      //  rd::Imm_Ctx *ctx = rctx.factory->start_render_pass(info);
 
-float4 main(in PSInput input) : SV_TARGET0 {
-  return float4_splat(0.0f);
-}
-)"),
-                                                           NULL, 0));
-        rctx.scene->traverse([&](Node *node) {
-          if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
-            GfxSufraceComponent *gs    = mn->getComponent<GfxSufraceComponent>();
-            float4x4             model = mn->get_transform();
-            ctx->push_constants(&model, 64, sizeof(model));
-            ito(gs->getNumSurfaces()) {
-              GfxSurface *s = gs->getSurface(i);
-              s->draw(ctx, attribute_to_location);
+      //  float4x4 viewproj = rctx.gizmo_layer->get_camera().viewproj();
+      //  // timestamps.insert(rctx.factory, ctx);
+      //  ctx->set_viewport(0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f);
+      //  ctx->set_scissor(0, 0, width, height);
+      //  float    dx    = 1.0f;
+      //  float4x4 model = float4x4(    //
+      //      1.0f, 0.0f, 0.0f, dx * i, //
+      //      0.0f, 1.0f, 0.0f, 0.0f,   //
+      //      0.0f, 0.0f, 1.0f, 0.0f,   //
+      //      0.0f, 0.0f, 0.0f, 1.0f    //
+      //  );
+      //  render_once(ctx, rctx.scene, viewproj, model);
+      //  if (i == 0) {
+      //    rctx.gizmo_layer->render(rctx.factory, ctx, width, height);
+      //  }
+      //  rctx.factory->end_render_pass(ctx);
+      //}
+
+      if (threads.size() == 0) {
+        working = true;
+        ito(16) {
+          int thread_id = i;
+          threads.emplace_back(std::thread([this, rctx, width, height, thread_id] {
+            while (working) {
+              std::unique_lock<std::mutex> lk(work_start_mutex);
+              work_start_cv.wait(lk, [&] { return new_work != 0; });
+              rd::Imm_Ctx *ctx      = rctx.factory->start_render_pass(info);
+              float4x4     viewproj = rctx.gizmo_layer->get_camera().viewproj();
+              // timestamps.insert(rctx.factory, ctx);
+              ctx->set_viewport(0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f);
+              ctx->set_scissor(0, 0, width, height);
+              float    dx    = 1.0f;
+              float4x4 model = float4x4(            //
+                  1.0f, 0.0f, 0.0f, dx * thread_id, //
+                  0.0f, 1.0f, 0.0f, 0.0f,           //
+                  0.0f, 0.0f, 1.0f, 0.0f,           //
+                  0.0f, 0.0f, 0.0f, 1.0f            //
+              );
+              render_once(ctx, rctx.scene, viewproj, transpose(model));
+              if (thread_id == 0) {
+                rctx.gizmo_layer->render(rctx.factory, ctx, width, height);
+              }
+              rctx.factory->end_render_pass(ctx);
+              if (--new_work == 0) {
+                work_finish_cv.notify_one();
+              }
             }
-          }
-        });
-      }
-      if (rctx.config->get_bool("render_gizmo")) {
-        auto g_camera = rctx.gizmo_layer->get_camera();
-        {
-          float dx = 1.0e-1f * g_camera.distance;
-          rctx.gizmo_layer->draw_sphere(g_camera.look_at, dx * 0.04f, float3{1.0f, 1.0f, 1.0f});
-          rctx.gizmo_layer->draw_cylinder(g_camera.look_at,
-                                          g_camera.look_at + float3{dx, 0.0f, 0.0f}, dx * 0.04f,
-                                          float3{1.0f, 0.0f, 0.0f});
-          rctx.gizmo_layer->draw_cylinder(g_camera.look_at,
-                                          g_camera.look_at + float3{0.0f, dx, 0.0f}, dx * 0.04f,
-                                          float3{0.0f, 1.0f, 0.0f});
-          rctx.gizmo_layer->draw_cylinder(g_camera.look_at,
-                                          g_camera.look_at + float3{0.0f, 0.0f, dx}, dx * 0.04f,
-                                          float3{0.0f, 0.0f, 1.0f});
+          }));
+          // timestamps.insert(rctx.factory, ctx);
         }
-        rctx.gizmo_layer->render(rctx.factory, ctx, width, height);
       }
+      new_work = threads.size();
+      work_start_cv.notify_all();
+      std::unique_lock<std::mutex> lk(work_finish_mutex);
+      work_finish_cv.wait(lk, [&] { return new_work == 0; });
+      new_work = 0;
       rctx.gizmo_layer->reset();
-      timestamps.insert(rctx.factory, ctx);
-      rctx.factory->end_render_pass(ctx);
+      // for (auto &th : threads) th.join();
+      // threads.clear();
     }
   }
   void release(rd::IFactory *factory) { factory->release_resource(normal_rt); }

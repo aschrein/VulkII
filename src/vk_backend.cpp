@@ -10,7 +10,9 @@
 #include <3rdparty/dxc/dxcapi.h>
 #include <codecvt>
 #include <locale>
+#include <mutex>
 #include <string>
+#include <thread>
 
 LPCWSTR towstr_tmp(string_ref str) {
   std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
@@ -600,7 +602,8 @@ template <typename F> static char const *parse_parentheses(char const *cur, char
   return fn(cur, end);
   ;
 }
-
+#if 0
+				
 static void execute_preprocessor(List *l, char const *list_end, String_Builder &builder) {
   struct Parameter_Evaluator {
     i32        set;
@@ -912,6 +915,7 @@ bool any(bvec3 a) {
     }
   }
 }
+#endif // 0
 
 struct Shader_Info : public Slot {
   rd::Stage_t stage;
@@ -1227,18 +1231,18 @@ struct Descriptor_Pool {
   VkDescriptorPool pool;
   void             init(VkDevice device) {
     VkDescriptorPoolSize aPoolSizes[] = {
-        {VK_DESCRIPTOR_TYPE_SAMPLER, 100000},                //
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 100000}, //
-        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 100000},          //
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 100000},         //
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 100000},         //
+        {VK_DESCRIPTOR_TYPE_SAMPLER, 4096},                //
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4096}, //
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4096},          //
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},         //
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4096},         //
     };
     VkDescriptorPoolCreateInfo info;
     MEMZERO(info);
     info.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     info.poolSizeCount = ARRAY_SIZE(aPoolSizes);
     info.pPoolSizes    = aPoolSizes;
-    info.maxSets       = 1 << 14;
+    info.maxSets       = 1024;
     VK_ASSERT_OK(vkCreateDescriptorPool(device, &info, NULL, &pool));
     this->device = device;
   }
@@ -1693,6 +1697,7 @@ template <typename T, typename Parent_t> //
 struct Resource_Array {
   Array<T>   items;
   Array<u32> free_items;
+  std::mutex mutex;
   struct Deferred_Release {
     u32 timer;
     u32 item_index;
@@ -1738,8 +1743,13 @@ struct Resource_Array {
     items.back().set_index(items.size - 1);
     return {(u32)items.size};
   }
-  T &operator[](ID id) {
+  /*T &operator[](ID id) {
     ASSERT_DEBUG(!id.is_null() && items[id.index()].get_id().index() == id.index());
+    return items[id.index()];
+  }*/
+  T operator[](ID id) {
+    ASSERT_DEBUG(!id.is_null() && items[id.index()].get_id().index() == id.index());
+    std::lock_guard<std::mutex> _lock(mutex);
     return items[id.index()];
   }
   void add_ref(ID id) {
@@ -1782,22 +1792,31 @@ struct Resource_Array {
   }
 };
 
+namespace {
+static std::atomic<int> g_thread_counter;
+static int              get_thread_id() {
+  static thread_local int id = g_thread_counter++;
+  return id;
+};
+} // namespace
+
 struct VkDeviceContext {
   static constexpr u32 MAX_SC_IMAGES = 0x10;
+  static constexpr u32 MAX_THREADS   = 0x100;
 
   VkSurfaceKHR surface       = VK_NULL_HANDLE;
   i32          window_width  = 1280;
   i32          window_height = 720;
 
-  VkInstance                 instance                 = VK_NULL_HANDLE;
-  VkPhysicalDevice           physdevice               = VK_NULL_HANDLE;
-  VkPhysicalDeviceProperties device_properties        = {};
-  VkQueue                    queue                    = VK_NULL_HANDLE;
-  VkDevice                   device                   = VK_NULL_HANDLE;
-  VkCommandPool              cmd_pools[MAX_SC_IMAGES] = {};
-  VkQueryPool                query_pool               = VK_NULL_HANDLE;
-  u32                        timestamp_frequency      = 0;
-  u32                        query_cursor             = 0;
+  VkInstance                 instance                              = VK_NULL_HANDLE;
+  VkPhysicalDevice           physdevice                            = VK_NULL_HANDLE;
+  VkPhysicalDeviceProperties device_properties                     = {};
+  VkQueue                    queue                                 = VK_NULL_HANDLE;
+  VkDevice                   device                                = VK_NULL_HANDLE;
+  VkCommandPool              cmd_pools[MAX_SC_IMAGES][MAX_THREADS] = {};
+  VkQueryPool                query_pool                            = VK_NULL_HANDLE;
+  u32                        timestamp_frequency;
+  std::atomic<u32>           query_cursor;
   // VkCommandBuffer            cmd_buffers[MAX_SC_IMAGES] = {};
 
   VkSwapchainKHR     swapchain                = VK_NULL_HANDLE;
@@ -1806,13 +1825,13 @@ struct VkDeviceContext {
   VkExtent2D         sc_extent                = {};
   VkSurfaceFormatKHR sc_format                = {};
 
-  u32             frame_id                         = 0;
-  u32             cmd_index                        = 0;
-  u32             image_index                      = 0;
-  VkFence         frame_fences[MAX_SC_IMAGES]      = {};
-  VkSemaphore     sc_free_sem[MAX_SC_IMAGES]       = {};
-  VkSemaphore     render_finish_sem[MAX_SC_IMAGES] = {};
-  Descriptor_Pool desc_pools[MAX_SC_IMAGES]        = {};
+  u32             frame_id                               = 0;
+  u32             cmd_index                              = 0;
+  u32             image_index                            = 0;
+  VkFence         frame_fences[MAX_SC_IMAGES]            = {};
+  VkSemaphore     sc_free_sem[MAX_SC_IMAGES]             = {};
+  VkSemaphore     render_finish_sem[MAX_SC_IMAGES]       = {};
+  Descriptor_Pool desc_pools[MAX_SC_IMAGES][MAX_THREADS] = {};
 
   u32 graphics_queue_id = 0;
   u32 compute_queue_id  = 0;
@@ -1978,11 +1997,13 @@ struct VkDeviceContext {
       Resource_Array::init();
     }
   } samplers;
-  ID                                          cur_pass;
+  // ID                                          cur_pass;
   Hash_Table<Graphics_Pipeline_State, ID>     pipeline_cache;
   Hash_Table<ID, ID>                          compute_pipeline_cache;
   Hash_Table<u64, ID>                         shader_cache;
   Hash_Table<rd::Render_Pass_Create_Info, ID> pass_cache;
+  std::mutex                                  mutex;
+  std::mutex                                  mutex2;
 
   void init_ds() {
     shader_cache.init();
@@ -2024,13 +2045,14 @@ struct VkDeviceContext {
     semaphores.release();
     ito(mem_chunks.size) mem_chunks[i].release(device);
     mem_chunks.release();
-    ito(sc_image_count) vkDestroyCommandPool(device, cmd_pools[i], NULL);
+    ito(sc_image_count) jto(MAX_THREADS) if (cmd_pools[i][j] != VK_NULL_HANDLE)
+        vkDestroyCommandPool(device, cmd_pools[i][j], NULL);
     vkDeviceWaitIdle(device);
     vkDestroyQueryPool(device, query_pool, NULL);
     ito(sc_image_count) vkDestroySemaphore(device, sc_free_sem[i], NULL);
     ito(sc_image_count) vkDestroySemaphore(device, render_finish_sem[i], NULL);
     ito(sc_image_count) vkDestroyFence(device, frame_fences[i], NULL);
-    ito(sc_image_count) desc_pools[i].release();
+    ito(sc_image_count) jto(MAX_THREADS) desc_pools[i][j].release();
     vkDestroySwapchainKHR(device, swapchain, NULL);
     vkDestroyDevice(device, NULL);
     if (surface != VK_NULL_HANDLE) vkDestroySurfaceKHR(instance, surface, NULL);
@@ -2038,11 +2060,11 @@ struct VkDeviceContext {
     delete this;
   }
 
-  Descriptor_Pool &get_descriptor_pool() { return desc_pools[cmd_index]; }
+  Descriptor_Pool &get_descriptor_pool() { return desc_pools[cmd_index][get_thread_id()]; }
 
   u32 allocate_timestamp_id() { return (query_cursor++ % 1000); }
 
-  u32 find_mem_chunk(u32 prop_flags, u32 memory_type_bits, u32 alignment, u32 size) {
+  u32 _find_mem_chunk(u32 prop_flags, u32 memory_type_bits, u32 alignment, u32 size) {
     (void)alignment;
     ito(mem_chunks.size) { // look for a suitable memory chunk
       Mem_Chunk &chunk = mem_chunks[i];
@@ -2059,7 +2081,7 @@ struct VkDeviceContext {
     if (alloc_size < size) {
       alloc_size = (size + alloc_size - 1) & ~(alloc_size - 1);
     }
-    new_chunk.init(device, alloc_size, find_mem_type(memory_type_bits, prop_flags), prop_flags,
+    new_chunk.init(device, alloc_size, _find_mem_type(memory_type_bits, prop_flags), prop_flags,
                    memory_type_bits);
     ito(mem_chunks.size) { // look for a free memory chunk slot
       Mem_Chunk &chunk = mem_chunks[i];
@@ -2073,7 +2095,7 @@ struct VkDeviceContext {
     return mem_chunks.size - 1;
   }
 
-  u32 find_mem_type(u32 type, VkMemoryPropertyFlags prop_flags) {
+  u32 _find_mem_type(u32 type, VkMemoryPropertyFlags prop_flags) {
     VkPhysicalDeviceMemoryProperties props;
     vkGetPhysicalDeviceMemoryProperties(physdevice, &props);
     ito(props.memoryTypeCount) {
@@ -2084,20 +2106,21 @@ struct VkDeviceContext {
     TRAP;
   }
 
-  VkDeviceMemory alloc_memory(u32 property_flags, VkMemoryRequirements reqs) {
+  VkDeviceMemory _alloc_memory(u32 property_flags, VkMemoryRequirements reqs) {
     VkMemoryAllocateInfo info;
     MEMZERO(info);
     info.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     info.allocationSize  = reqs.size;
-    info.memoryTypeIndex = find_mem_type(reqs.memoryTypeBits, property_flags);
+    info.memoryTypeIndex = _find_mem_type(reqs.memoryTypeBits, property_flags);
     VkDeviceMemory mem;
     VK_ASSERT_OK(vkAllocateMemory(device, &info, nullptr, &mem));
     return mem;
   }
 
   Pair<VkBuffer, VkDeviceMemory> create_transient_buffer(u32 size) {
-    VkBuffer           buf;
-    VkBufferCreateInfo cinfo;
+    std::lock_guard<std::mutex> _lock(mutex);
+    VkBuffer                    buf;
+    VkBufferCreateInfo          cinfo;
     MEMZERO(cinfo);
     cinfo.sType                 = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     cinfo.pQueueFamilyIndices   = &graphics_queue_id;
@@ -2109,16 +2132,17 @@ struct VkDeviceContext {
     VK_ASSERT_OK(vkCreateBuffer(device, &cinfo, NULL, &buf));
     VkMemoryRequirements reqs;
     vkGetBufferMemoryRequirements(device, buf, &reqs);
-    VkDeviceMemory mem = alloc_memory(
+    VkDeviceMemory mem = _alloc_memory(
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, reqs);
     VK_ASSERT_OK(vkBindBufferMemory(device, buf, mem, 0));
     return {buf, mem};
   }
 
   Resource_ID create_buffer(rd::Buffer_Create_Info info) {
-    u32                prop_flags = to_vk_memory_bits(info.mem_bits);
-    VkBuffer           buf;
-    VkBufferCreateInfo cinfo;
+    std::lock_guard<std::mutex> _lock(mutex);
+    u32                         prop_flags = to_vk_memory_bits(info.mem_bits);
+    VkBuffer                    buf;
+    VkBufferCreateInfo          cinfo;
     {
       MEMZERO(cinfo);
       cinfo.sType                 = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -2137,7 +2161,7 @@ struct VkDeviceContext {
     new_buf.create_info = cinfo;
     // new_buf.ref_cnt      = 1;
 
-    u32 chunk_index = find_mem_chunk(prop_flags, reqs.memoryTypeBits, reqs.alignment, reqs.size);
+    u32 chunk_index = _find_mem_chunk(prop_flags, reqs.memoryTypeBits, reqs.alignment, reqs.size);
     new_buf.mem_chunk_id = ID{chunk_index + 1};
     Mem_Chunk &chunk     = mem_chunks[chunk_index];
     new_buf.mem_offset   = chunk.alloc(reqs.alignment, reqs.size);
@@ -2148,8 +2172,9 @@ struct VkDeviceContext {
   }
 
   void *map_buffer(Resource_ID res_id) {
+    std::lock_guard<std::mutex> _lock(mutex);
     ASSERT_DEBUG(res_id.type == (i32)Resource_Type::BUFFER);
-    Buffer &   buf   = buffers[res_id.id];
+    Buffer     buf   = buffers[res_id.id];
     Mem_Chunk &chunk = mem_chunks[buf.mem_chunk_id.index()];
     void *     data  = NULL;
     VK_ASSERT_OK(vkMapMemory(device, chunk.mem, buf.mem_offset, buf.create_info.size, 0, &data));
@@ -2157,14 +2182,16 @@ struct VkDeviceContext {
   }
 
   void unmap_buffer(Resource_ID res_id) {
+    std::lock_guard<std::mutex> _lock(mutex);
     ASSERT_DEBUG(res_id.type == (i32)Resource_Type::BUFFER);
-    Buffer &   buf   = buffers[res_id.id];
+    Buffer     buf   = buffers[res_id.id];
     Mem_Chunk &chunk = mem_chunks[buf.mem_chunk_id.index()];
     vkUnmapMemory(device, chunk.mem);
   }
 
   VkShaderModule compile_spirv(size_t len, u32 *bytecode) {
-    VkShaderModuleCreateInfo info;
+    std::lock_guard<std::mutex> _lock(mutex);
+    VkShaderModuleCreateInfo    info;
     MEMZERO(info);
     info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
     info.codeSize = len;
@@ -2175,10 +2202,11 @@ struct VkDeviceContext {
     return module;
   }
 
-  VkCommandPool cur_cmd_pool() { return cmd_pools[cmd_index]; }
+  VkCommandPool cur_cmd_pool() { return cmd_pools[cmd_index][get_thread_id()]; }
 
   Resource_ID create_fence(bool signaled) {
-    VkFenceCreateInfo info;
+    std::lock_guard<std::mutex> _lock(mutex);
+    VkFenceCreateInfo           info;
     MEMZERO(info);
     info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     if (signaled) info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
@@ -2190,7 +2218,8 @@ struct VkDeviceContext {
   }
 
   Resource_ID create_event() {
-    VkEventCreateInfo info;
+    std::lock_guard<std::mutex> _lock(mutex);
+    VkEventCreateInfo           info;
     MEMZERO(info);
     info.sType = VK_STRUCTURE_TYPE_EVENT_CREATE_INFO;
     Event event;
@@ -2203,12 +2232,12 @@ struct VkDeviceContext {
   Resource_ID create_command_buffer() {
     CommandBuffer cmd;
     MEMZERO(cmd);
-    cmd.pool = cmd_pools[cmd_index];
+    cmd.pool = cmd_pools[cmd_index][get_thread_id()];
 
     VkCommandBufferAllocateInfo info;
     MEMZERO(info);
     info.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    info.commandPool        = cmd_pools[cmd_index];
+    info.commandPool        = cmd_pools[cmd_index][get_thread_id()];
     info.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     info.commandBufferCount = 1;
     VK_ASSERT_OK(vkAllocateCommandBuffers(device, &info, &cmd.cmd));
@@ -2217,7 +2246,8 @@ struct VkDeviceContext {
   }
 
   Resource_ID create_semaphore() {
-    VkSemaphoreCreateInfo info;
+    std::lock_guard<std::mutex> _lock(mutex);
+    VkSemaphoreCreateInfo       info;
     MEMZERO(info);
     info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
     info.pNext = NULL;
@@ -2231,8 +2261,9 @@ struct VkDeviceContext {
 
   Resource_ID create_image_view(ID res_id, u32 base_level, u32 levels, u32 base_layer, u32 layers,
                                 VkFormat format) {
-    Image &   img = images[res_id];
-    ImageView img_view;
+    std::lock_guard<std::mutex> _lock(mutex);
+    Image                       img = images[res_id];
+    ImageView                   img_view;
     MEMZERO(img_view);
     VkImageViewCreateInfo cinfo;
     MEMZERO(cinfo);
@@ -2268,7 +2299,7 @@ struct VkDeviceContext {
     img_view.flags.viewType         = cinfo.viewType;
     // check if there's already a view with needed properties
     ito(img.views.size) {
-      ImageView &view = image_views[img.views[i]];
+      ImageView view = image_views[img.views[i]];
       if (view.flags == img_view.flags) {
         return {img.views[i], (u32)Resource_Type::IMAGE_VIEW};
       }
@@ -2284,9 +2315,10 @@ struct VkDeviceContext {
 
   Resource_ID create_image(u32 width, u32 height, u32 depth, u32 layers, u32 levels,
                            VkFormat format, u32 usage_flags, u32 mem_flags) {
-    u32               prop_flags = to_vk_memory_bits(mem_flags);
-    VkImage           image;
-    VkImageCreateInfo cinfo;
+    std::lock_guard<std::mutex> _lock(mutex);
+    u32                         prop_flags = to_vk_memory_bits(mem_flags);
+    VkImage                     image;
+    VkImageCreateInfo           cinfo;
     {
       MEMZERO(cinfo);
       cinfo.flags                 = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
@@ -2332,7 +2364,7 @@ struct VkDeviceContext {
       new_image.aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
     else
       new_image.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
-    u32 chunk_index = find_mem_chunk(prop_flags, reqs.memoryTypeBits, reqs.alignment, reqs.size);
+    u32 chunk_index = _find_mem_chunk(prop_flags, reqs.memoryTypeBits, reqs.alignment, reqs.size);
     new_image.mem_chunk_id = ID{chunk_index + 1};
     Mem_Chunk &chunk       = mem_chunks[chunk_index];
     new_image.mem_offset   = chunk.alloc(reqs.alignment, reqs.size);
@@ -2345,7 +2377,8 @@ struct VkDeviceContext {
 
   Resource_ID create_shader_raw(rd::Stage_t type, string_ref body,
                                 Pair<string_ref, string_ref> *defines, size_t num_defines) {
-    u64 shader_hash = hash_of(body);
+    std::lock_guard<std::mutex> _lock(mutex);
+    u64                         shader_hash = hash_of(body);
     ito(num_defines) { shader_hash ^= hash_of(defines[0].first) ^ hash_of(defines[0].second); }
     if (shader_cache.contains(shader_hash)) {
       return {shader_cache.get(shader_hash), (u32)Resource_Type::SHADER};
@@ -2386,7 +2419,8 @@ struct VkDeviceContext {
     return {shid, (u32)Resource_Type::SHADER};
   }
   Resource_ID create_sampler(rd::Sampler_Create_Info const &info) {
-    Sampler sm;
+    std::lock_guard<std::mutex> _lock(mutex);
+    Sampler                     sm;
     sm.create_info = info;
     VkSamplerCreateInfo cinfo;
     MEMZERO(cinfo);
@@ -2411,9 +2445,10 @@ struct VkDeviceContext {
     return {id, (u32)Resource_Type::SAMPLER};
   }
   rd::Image2D_Info get_swapchain_image_info() {
-    rd::Image2D_Info info;
+    std::lock_guard<std::mutex> _lock(mutex);
+    rd::Image2D_Info            info;
     MEMZERO(info);
-    Image &img  = images[sc_images[image_index]];
+    Image img   = images[sc_images[image_index]];
     info.format = from_vk(img.info.format);
     info.height = img.info.extent.height;
     info.width  = img.info.extent.width;
@@ -2422,9 +2457,10 @@ struct VkDeviceContext {
     return info;
   }
   rd::Image_Info get_image_info(Resource_ID res_id) {
-    rd::Image_Info info;
+    std::lock_guard<std::mutex> _lock(mutex);
+    rd::Image_Info              info;
     MEMZERO(info);
-    Image &img    = images[res_id.id];
+    Image img     = images[res_id.id];
     info.format   = from_vk(img.info.format);
     info.height   = img.info.extent.height;
     info.depth    = img.info.extent.depth;
@@ -2436,27 +2472,28 @@ struct VkDeviceContext {
   }
 
   void release_resource(Resource_ID res_id) {
+    std::lock_guard<std::mutex> _lock(mutex2);
     if (res_id.type == (u32)Resource_Type::PASS) {
-      Render_Pass &pass = render_passes[res_id.id];
+      Render_Pass pass = render_passes[res_id.id];
       render_passes.remove(res_id.id, 3);
       if (pass_cache.contains(pass.create_info)) pass_cache.remove(pass.create_info);
     } else if (res_id.type == (u32)Resource_Type::BUFFER) {
-      Buffer &buf = buffers[res_id.id];
+      Buffer buf = buffers[res_id.id];
       // buf.rem_reference();
       ito(buf.views.size) buffer_views.remove(buf.views[i], 3);
       buffers.remove(res_id.id, 4);
     } else if (res_id.type == (u32)Resource_Type::BUFFER_VIEW) {
-      BufferView &view = buffer_views[res_id.id];
-      Buffer &    buf  = buffers[view.buf_id];
+      BufferView view = buffer_views[res_id.id];
+      Buffer     buf  = buffers[view.buf_id];
       buf.views.remove(res_id.id);
       buffer_views.remove(res_id.id, 3);
     } else if (res_id.type == (u32)Resource_Type::IMAGE_VIEW) {
-      ImageView &view = image_views[res_id.id];
-      Image &    img  = images[view.img_id];
+      ImageView view = image_views[res_id.id];
+      Image     img  = images[view.img_id];
       img.views.remove(res_id.id);
       image_views.remove(res_id.id, 3);
     } else if (res_id.type == (u32)Resource_Type::IMAGE) {
-      Image &img = images[res_id.id];
+      Image img = images[res_id.id];
       images.remove(res_id.id, 3);
       // img.rem_reference();
       ito(img.views.size) image_views.remove(img.views[i], 3);
@@ -2483,7 +2520,7 @@ struct VkDeviceContext {
       vkDestroySwapchainKHR(device, swapchain, NULL);
     }
     ito(sc_image_count) {
-      Image &img = images[sc_images[i]];
+      Image img = images[sc_images[i]];
       // img.rem_reference();
       jto(img.views.size) { image_views.remove(img.views[j], 3); }
       images.remove(sc_images[i], 3);
@@ -2769,11 +2806,13 @@ struct VkDeviceContext {
       info.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
       info.queueFamilyIndex = graphics_queue_id;
 
-      ito(sc_image_count) VK_ASSERT_OK(vkCreateCommandPool(device, &info, 0, &cmd_pools[i]));
+      ito(sc_image_count) {
+        jto(MAX_THREADS) { VK_ASSERT_OK(vkCreateCommandPool(device, &info, 0, &cmd_pools[i][j])); }
+      }
     }
 
     ito(sc_image_count) {
-      Image &image = images[sc_images[i]];
+      Image image = images[sc_images[i]];
       _image_barrier_sync(image, 0, VK_IMAGE_LAYOUT_UNDEFINED, 0, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     }
     {
@@ -2800,7 +2839,7 @@ struct VkDeviceContext {
       info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
       ito(sc_image_count) vkCreateFence(device, &info, 0, &frame_fences[i]);
     }
-    ito(sc_image_count) desc_pools[i].init(device);
+    ito(sc_image_count) jto(MAX_THREADS) desc_pools[i][j].init(device);
   }
 
   void update_surface_size() {
@@ -2815,7 +2854,7 @@ struct VkDeviceContext {
   void _image_barrier_sync(Image const &img, VkAccessFlags old_mem_access,
                            VkImageLayout old_image_layout, VkAccessFlags new_mem_access,
                            VkImageLayout new_image_layout) {
-    if (cmd_pools[cmd_index] == VK_NULL_HANDLE) return;
+    if (cmd_pools[cmd_index][get_thread_id()] == VK_NULL_HANDLE) return;
     Resource_ID              cmd_id = create_command_buffer();
     CommandBuffer            cmd    = cmd_buffers[cmd_id.id];
     VkCommandBufferBeginInfo begin_info;
@@ -2935,6 +2974,7 @@ struct VkDeviceContext {
       }
     });
     ito(resources_to_remove.size) release_resource(resources_to_remove[i]);
+
   restart:
     cmd_index = (frame_id++) % sc_image_count;
 
@@ -2948,7 +2988,6 @@ struct VkDeviceContext {
         goto restart;
       }
       vkResetFences(device, 1, &frame_fences[cmd_index]);
-      desc_pools[cmd_index].reset();
       VkResult acquire_res = vkAcquireNextImageKHR(
           device, swapchain, UINT64_MAX, sc_free_sem[cmd_index], VK_NULL_HANDLE, &image_index);
 
@@ -2958,18 +2997,20 @@ struct VkDeviceContext {
       } else if (acquire_res != VK_SUCCESS) {
         TRAP;
       }
-      VK_ASSERT_OK(vkResetCommandPool(device, cmd_pools[cmd_index],
-                                      VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT));
+      jto(MAX_THREADS) VK_ASSERT_OK(vkResetCommandPool(
+          device, cmd_pools[cmd_index][j], VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT));
+      jto(MAX_THREADS) desc_pools[cmd_index][j].reset();
       if (1) {
 
-        Image &     img = images[sc_images[image_index]];
+        Image       img = images[sc_images[image_index]];
         Resource_ID sem = _image_barrier_async(img, 0, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, 0,
                                                VK_IMAGE_LAYOUT_GENERAL);
         return sem;
       }
     } else {
-      VK_ASSERT_OK(vkResetCommandPool(device, cmd_pools[cmd_index],
-                                      VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT));
+      jto(MAX_THREADS) VK_ASSERT_OK(vkResetCommandPool(
+          device, cmd_pools[cmd_index][j], VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT));
+      jto(MAX_THREADS) desc_pools[cmd_index][j].reset();
     }
     return {0u};
   }
@@ -2984,7 +3025,7 @@ struct VkDeviceContext {
       begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
       vkBeginCommandBuffer(cmd.cmd, &begin_info);
 
-      Image &img = images[sc_images[image_index]];
+      Image img = images[sc_images[image_index]];
       {
         VkImageMemoryBarrier bar;
         MEMZERO(bar);
@@ -3262,7 +3303,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       buffer_layouts.insert(buf_id, BufferLaoutTracker{});
     }
     BufferLaoutTracker &bt     = buffer_layouts.get(buf_id);
-    Buffer &            buffer = dev_ctx->buffers[buf_id.id];
+    Buffer              buffer = dev_ctx->buffers[buf_id.id];
     bt.barrier(cmd, &buffer, bits);
   }
 
@@ -3272,14 +3313,14 @@ class Vk_Ctx : public rd::Imm_Ctx {
       image_layouts.insert(img_id, ImageLayoutTracker{});
     }
     ImageLayoutTracker &il  = image_layouts.get(img_id);
-    Image &             img = dev_ctx->images[img_id.id];
+    Image               img = dev_ctx->images[img_id.id];
     il.barrier(cmd, &img, bits, layout);
   }
 
   void _copy_buffer(Resource_ID src_buf_id, size_t src_offset, Resource_ID dst_buf_id,
                     size_t dst_offset, u32 size) {
-    Buffer &src_buffer = dev_ctx->buffers[src_buf_id.id];
-    Buffer &dst_buffer = dev_ctx->buffers[dst_buf_id.id];
+    Buffer src_buffer = dev_ctx->buffers[src_buf_id.id];
+    Buffer dst_buffer = dev_ctx->buffers[dst_buf_id.id];
     _buffer_barrier(cmd, src_buf_id, VK_ACCESS_TRANSFER_READ_BIT);
     _buffer_barrier(cmd, dst_buf_id, VK_ACCESS_TRANSFER_WRITE_BIT);
     VkBufferCopy info;
@@ -3292,8 +3333,8 @@ class Vk_Ctx : public rd::Imm_Ctx {
 
   void _copy_image_buffer(Resource_ID buf_id, size_t offset, Resource_ID img_id,
                           rd::Image_Copy const &dst_info) {
-    Buffer &buffer = dev_ctx->buffers[buf_id.id];
-    Image & image  = dev_ctx->images[img_id.id];
+    Buffer buffer = dev_ctx->buffers[buf_id.id];
+    Image  image  = dev_ctx->images[img_id.id];
 
     _image_barrier(cmd, img_id, VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     VkBufferImageCopy info;
@@ -3333,8 +3374,8 @@ class Vk_Ctx : public rd::Imm_Ctx {
 
   void _copy_buffer_image(Resource_ID buf_id, size_t offset, Resource_ID img_id,
                           rd::Image_Copy const &dst_info) {
-    Buffer &buffer = dev_ctx->buffers[buf_id.id];
-    Image & image  = dev_ctx->images[img_id.id];
+    Buffer buffer = dev_ctx->buffers[buf_id.id];
+    Image  image  = dev_ctx->images[img_id.id];
 
     _image_barrier(cmd, img_id, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     VkBufferImageCopy info;
@@ -3436,7 +3477,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
     cpu_cmd.write(Cmd_t::BARRIER, &db);
   }
   void flush_render_pass() {
-    Render_Pass &pass = dev_ctx->render_passes[cur_pass];
+    Render_Pass pass = dev_ctx->render_passes[cur_pass];
     ito(pass.create_info.rts.size) {
       _image_barrier(cmd, pass.create_info.rts[i].image, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -3497,7 +3538,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       } else if (type == Cmd_t::DRAW) {
         Deferred_Draw dd;
         cpu_cmd.read(&dd);
-        Graphics_Pipeline_Wrapper &gw = dev_ctx->pipelines[dd.pso];
+        Graphics_Pipeline_Wrapper gw = dev_ctx->pipelines[dd.pso];
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gw.pipeline);
         if (dd.sets.size > 0)
           vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gw.pipeline_layout, 0,
@@ -3534,8 +3575,8 @@ class Vk_Ctx : public rd::Imm_Ctx {
           break;
         }
         case Deferred_Draw::Type::MULTI_DRAW_INDEXED_INDIRECT: {
-          Buffer &arg_buf = dev_ctx->buffers[dd.multi_draw_indexed_indirect.arg_buf_id];
-          Buffer &cnt_buf = dev_ctx->buffers[dd.multi_draw_indexed_indirect.cnt_buf_id];
+          Buffer arg_buf = dev_ctx->buffers[dd.multi_draw_indexed_indirect.arg_buf_id];
+          Buffer cnt_buf = dev_ctx->buffers[dd.multi_draw_indexed_indirect.cnt_buf_id];
           vkCmdBindIndexBuffer(cmd, dd.ibo.buffer, dd.ibo.offset, dd.ibo.indexType);
           vkCmdDrawIndexedIndirectCount(
               cmd, arg_buf.buffer, dd.multi_draw_indexed_indirect.arg_buf_offset, cnt_buf.buffer,
@@ -3596,7 +3637,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       } else if (type == Cmd_t::BUFFER_FILL) {
         Deferred_Buffer_Fill df;
         cpu_cmd.read(&df);
-        Buffer &buf = dev_ctx->buffers[df.buf_id];
+        Buffer buf = dev_ctx->buffers[df.buf_id];
         vkCmdFillBuffer(cmd, buf.buffer, df.offset, df.size, df.val);
       } else if (type == Cmd_t::COPY_BUFFER_IMAGE) {
         Deferred_Copy_Buffer_Image dci;
@@ -3613,7 +3654,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       } else if (type == Cmd_t::CLEAR_IMAGE) {
         Deferred_Clear_Image cl;
         cpu_cmd.read(&cl);
-        Image &img = dev_ctx->images[cl.img_id];
+        Image img = dev_ctx->images[cl.img_id];
         /* img.barrier(cmd, VK_ACCESS_MEMORY_WRITE_BIT,
                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);*/
 
@@ -3623,7 +3664,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       } else if (type == Cmd_t::DISPATCH) {
         Deferred_Dispatch dd;
         cpu_cmd.read(&dd);
-        Compute_Pipeline_Wrapper &gw = dev_ctx->compute_pipelines[dd.pso];
+        Compute_Pipeline_Wrapper gw = dev_ctx->compute_pipelines[dd.pso];
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gw.pipeline);
         if (dd.sets.size > 0)
           vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gw.pipeline_layout, 0,
@@ -3653,15 +3694,16 @@ class Vk_Ctx : public rd::Imm_Ctx {
     cpu_cmd.reset();
   }
 
-  Graphics_Pipeline_Wrapper &get_or_bake_graphics_pipeline() {
+  Graphics_Pipeline_Wrapper get_or_bake_graphics_pipeline() {
+    std::lock_guard<std::mutex> _lock(dev_ctx->mutex);
     if (!dev_ctx->pipeline_cache.contains(graphics_state)) {
       Graphics_Pipeline_Wrapper gw;
       ASSERT_DEBUG(!graphics_state.ps.is_null());
       ASSERT_DEBUG(!graphics_state.vs.is_null());
-      Shader_Info &ps = dev_ctx->shaders[graphics_state.ps];
-      Shader_Info &vs = dev_ctx->shaders[graphics_state.vs];
+      Shader_Info ps = dev_ctx->shaders[graphics_state.ps];
+      Shader_Info vs = dev_ctx->shaders[graphics_state.vs];
       ASSERT_DEBUG(!cur_pass.is_null());
-      Render_Pass &pass = dev_ctx->render_passes[cur_pass];
+      Render_Pass pass = dev_ctx->render_passes[cur_pass];
       gw.init(dev_ctx->device, pass, vs, ps, graphics_state);
       ID pipe_id = dev_ctx->pipelines.push(gw);
       dev_ctx->pipeline_cache.insert(graphics_state, pipe_id);
@@ -3671,11 +3713,12 @@ class Vk_Ctx : public rd::Imm_Ctx {
     return dev_ctx->pipelines[pipe_id];
   }
 
-  Compute_Pipeline_Wrapper &get_or_bake_compute_pipeline() {
+  Compute_Pipeline_Wrapper get_or_bake_compute_pipeline() {
+    std::lock_guard<std::mutex> _lock(dev_ctx->mutex);
     if (!dev_ctx->compute_pipeline_cache.contains(cs)) {
       Compute_Pipeline_Wrapper gw;
       ASSERT_DEBUG(!cs.is_null());
-      Shader_Info &cs_info = dev_ctx->shaders[cs];
+      Shader_Info cs_info = dev_ctx->shaders[cs];
       gw.init(dev_ctx->device, cs_info);
       ID pipe_id = dev_ctx->compute_pipelines.push(gw);
       dev_ctx->compute_pipeline_cache.insert(cs, pipe_id);
@@ -3691,14 +3734,14 @@ class Vk_Ctx : public rd::Imm_Ctx {
 
     deferred_bindings.iter_pairs([&](Resource_Path const &path, Resource_Binding const &rb) {
       if (rb.type == Binding_t::UNIFORM_BUFFER) {
-        Buffer &buffer = dev_ctx->buffers[rb.uniform_buffer.buf_id];
+        Buffer buffer = dev_ctx->buffers[rb.uniform_buffer.buf_id];
         if (type == rd::Pass_t::COMPUTE) {
           push_buffer_barrier(buffer.id, VK_ACCESS_SHADER_READ_BIT);
         } else {
           _buffer_barrier(cmd, buffer.get_resource_id(), VK_ACCESS_SHADER_READ_BIT);
         }
       } else if (rb.type == Binding_t::STORAGE_BUFFER) {
-        Buffer &buffer = dev_ctx->buffers[rb.uniform_buffer.buf_id];
+        Buffer buffer = dev_ctx->buffers[rb.uniform_buffer.buf_id];
         if (type == rd::Pass_t::COMPUTE) {
           push_buffer_barrier(buffer.id, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
         } else {
@@ -3709,7 +3752,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       } else if (rb.type == Binding_t::IMAGE) {
         VkDescriptorImageInfo binfo;
         MEMZERO(binfo);
-        Image &img = dev_ctx->images[rb.image.image_id];
+        Image img = dev_ctx->images[rb.image.image_id];
         if (type == rd::Pass_t::COMPUTE) {
           push_image_barrier(img.id, VK_ACCESS_SHADER_READ_BIT,
                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -3721,7 +3764,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       } else if (rb.type == Binding_t::STORAGE_IMAGE) {
         VkDescriptorImageInfo binfo;
         MEMZERO(binfo);
-        Image &img = dev_ctx->images[rb.image.image_id];
+        Image img = dev_ctx->images[rb.image.image_id];
 
         if (type == rd::Pass_t::COMPUTE) {
           push_image_barrier(img.id, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
@@ -3745,7 +3788,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       if (bindings->contains({path.set, path.binding}) == false) return;
       if (rb.set != index) return;
       if (rb.type == Binding_t::UNIFORM_BUFFER) {
-        Buffer &               buffer = dev_ctx->buffers[rb.uniform_buffer.buf_id];
+        Buffer                 buffer = dev_ctx->buffers[rb.uniform_buffer.buf_id];
         VkDescriptorBufferInfo binfo;
         MEMZERO(binfo);
         binfo.buffer = buffer.buffer;
@@ -3762,7 +3805,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
         wset.pBufferInfo     = &binfo;
         vkUpdateDescriptorSets(dev_ctx->device, 1, &wset, 0, NULL);
       } else if (rb.type == Binding_t::STORAGE_BUFFER) {
-        Buffer &buffer = dev_ctx->buffers[rb.uniform_buffer.buf_id];
+        Buffer buffer = dev_ctx->buffers[rb.uniform_buffer.buf_id];
 
         VkDescriptorBufferInfo binfo;
         MEMZERO(binfo);
@@ -3782,13 +3825,13 @@ class Vk_Ctx : public rd::Imm_Ctx {
       } else if (rb.type == Binding_t::IMAGE) {
         VkDescriptorImageInfo binfo;
         MEMZERO(binfo);
-        Image &img     = dev_ctx->images[rb.image.image_id];
-        ID     view_id = dev_ctx
+        Image img     = dev_ctx->images[rb.image.image_id];
+        ID    view_id = dev_ctx
                          ->create_image_view(img.id, rb.image.sr.baseMipLevel,
                                              rb.image.sr.levelCount, rb.image.sr.baseArrayLayer,
                                              rb.image.sr.layerCount, rb.image.format)
                          .id;
-        ImageView &view   = dev_ctx->image_views[view_id];
+        ImageView view    = dev_ctx->image_views[view_id];
         binfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         binfo.imageView   = view.view;
         binfo.sampler     = VK_NULL_HANDLE;
@@ -3805,13 +3848,13 @@ class Vk_Ctx : public rd::Imm_Ctx {
       } else if (rb.type == Binding_t::STORAGE_IMAGE) {
         VkDescriptorImageInfo binfo;
         MEMZERO(binfo);
-        Image &img     = dev_ctx->images[rb.image.image_id];
-        ID     view_id = dev_ctx
+        Image img     = dev_ctx->images[rb.image.image_id];
+        ID    view_id = dev_ctx
                          ->create_image_view(img.id, rb.image.sr.baseMipLevel,
                                              rb.image.sr.levelCount, rb.image.sr.baseArrayLayer,
                                              rb.image.sr.layerCount, rb.image.format)
                          .id;
-        ImageView &view   = dev_ctx->image_views[view_id];
+        ImageView view    = dev_ctx->image_views[view_id];
         binfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         binfo.imageView   = view.view;
         binfo.sampler     = VK_NULL_HANDLE;
@@ -3828,7 +3871,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       } else if (rb.type == Binding_t::SAMPLER) {
         VkDescriptorImageInfo binfo;
         MEMZERO(binfo);
-        Sampler &sampler  = dev_ctx->samplers[rb.sampler.sampler_id];
+        Sampler sampler   = dev_ctx->samplers[rb.sampler.sampler_id];
         binfo.imageLayout = VK_IMAGE_LAYOUT_MAX_ENUM;
         binfo.imageView   = VK_NULL_HANDLE;
         binfo.sampler     = sampler.sampler;
@@ -3992,7 +4035,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       UNIMPLEMENTED;
     }
     ASSERT_DEBUG(res_id.type == (i32)Resource_Type::BUFFER);
-    Buffer &buf = dev_ctx->buffers[res_id.id];
+    Buffer buf = dev_ctx->buffers[res_id.id];
     _buffer_barrier(cmd, res_id, VK_ACCESS_INDEX_READ_BIT);
     VkIndexType type;
     switch (format) {
@@ -4011,7 +4054,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       UNIMPLEMENTED;
     }
     ASSERT_DEBUG(res_id.type == (i32)Resource_Type::BUFFER);
-    Buffer &buf = dev_ctx->buffers[res_id.id];
+    Buffer buf = dev_ctx->buffers[res_id.id];
     _buffer_barrier(cmd, res_id, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT);
     VkDeviceSize doffset                   = (VkDeviceSize)offset;
     current_draw.vbos.size                 = MAX(index + 1, current_draw.vbos.size);
@@ -4139,7 +4182,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
   }
   void bind_image(u32 set, u32 binding, u32 index, Resource_ID image_id,
                   rd::Image_Subresource const &range, rd::Format format) override {
-    Image &          image = dev_ctx->images[image_id.id];
+    Image            image = dev_ctx->images[image_id.id];
     Resource_Binding rb;
     MEMZERO(rb);
     rb.type                    = Binding_t::IMAGE;
@@ -4170,7 +4213,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
   }
   void bind_rw_image(u32 set, u32 binding, u32 index, Resource_ID image_id,
                      rd::Image_Subresource const &range, rd::Format format) override {
-    Image &          image = dev_ctx->images[image_id.id];
+    Image            image = dev_ctx->images[image_id.id];
     Resource_Binding rb;
     MEMZERO(rb);
     rb.type                    = Binding_t::STORAGE_IMAGE;
@@ -4202,14 +4245,14 @@ class Vk_Ctx : public rd::Imm_Ctx {
     u32                       num_sets    = 0;
     Hash_Set<Pair<u32, u32>> *bindings    = NULL;
     if (type == rd::Pass_t::RENDER) {
-      Graphics_Pipeline_Wrapper &gw = get_or_bake_graphics_pipeline();
+      Graphics_Pipeline_Wrapper gw = get_or_bake_graphics_pipeline();
       current_draw.sets.resize(gw.set_layouts.size);
       num_sets    = gw.set_layouts.size;
       set_layouts = &gw.set_layouts[0];
       set_dst     = &current_draw.sets[0];
       bindings    = &gw.bindings;
     } else {
-      Compute_Pipeline_Wrapper &gw = get_or_bake_compute_pipeline();
+      Compute_Pipeline_Wrapper gw = get_or_bake_compute_pipeline();
       current_dispatch.sets.resize(gw.set_layouts.size);
       num_sets    = gw.set_layouts.size;
       set_layouts = &gw.set_layouts[0];
@@ -4301,11 +4344,11 @@ class Vk_Ctx : public rd::Imm_Ctx {
                                    Resource_ID cnt_buf_id, u32 cnt_buf_offset, u32 max_count,
                                    u32 stride) override {
     {
-      Buffer &buffer = dev_ctx->buffers[arg_buf_id.id];
+      Buffer buffer = dev_ctx->buffers[arg_buf_id.id];
       _buffer_barrier(cmd, arg_buf_id, VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
     }
     {
-      Buffer &buffer = dev_ctx->buffers[cnt_buf_id.id];
+      Buffer buffer = dev_ctx->buffers[cnt_buf_id.id];
       _buffer_barrier(cmd, cnt_buf_id, VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
     }
     ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
@@ -4349,7 +4392,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       bf.val  = value;
       cpu_cmd.write(Cmd_t::BUFFER_FILL, &bf);
     } else {
-      Buffer &buf = dev_ctx->buffers[id.id];
+      Buffer buf = dev_ctx->buffers[id.id];
       vkCmdFillBuffer(cmd, buf.buffer, offset, size, value);
     }
   }
@@ -4358,7 +4401,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
     if (type == rd::Pass_t::COMPUTE) {
       Deferred_Clear_Image cl;
       MEMZERO(cl);
-      Image &           img = dev_ctx->images[id.id];
+      Image             img = dev_ctx->images[id.id];
       VkClearColorValue _cv;
       MEMZERO(_cv);
       memcpy(&_cv, &cv, 16);
@@ -4374,7 +4417,7 @@ class Vk_Ctx : public rd::Imm_Ctx {
       cl.img_id        = id.id;
       cpu_cmd.write(Cmd_t::CLEAR_IMAGE, &cl);
     } else {
-      Image &img = dev_ctx->images[id.id];
+      Image img = dev_ctx->images[id.id];
       _image_barrier(cmd, id, VK_ACCESS_MEMORY_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
       VkClearColorValue _cv;
       MEMZERO(_cv);
@@ -4397,9 +4440,20 @@ class Vk_Ctx : public rd::Imm_Ctx {
 class VkFactory : public rd::IFactory {
   VkDeviceContext *  dev_ctx;
   Array<Resource_ID> release_queue;
+  ID                 last_sem;
+  std::mutex         mutex;
+
+  void on_frame_begin() { last_sem = {0}; }
+  void on_frame_end() {
+    if (last_sem.is_null() == false) {
+      dev_ctx->release_resource({last_sem, (u32)Resource_Type::SEMAPHORE});
+    }
+    last_sem = {0};
+    ito(release_queue.size) dev_ctx->release_resource(release_queue[i]);
+    release_queue.release();
+  }
 
   public:
-  ID last_sem;
   VkFactory(void *window_handler) {
     dev_ctx = new VkDeviceContext();
     dev_ctx->init(window_handler);
@@ -4411,23 +4465,17 @@ class VkFactory : public rd::IFactory {
     dev_ctx->release();
     delete this;
   }
-  void on_frame_begin() { last_sem = {0}; }
-  void on_frame_end() {
-    if (last_sem.is_null() == false) {
-      dev_ctx->release_resource({last_sem, (u32)Resource_Type::SEMAPHORE});
-    }
-    last_sem = {0};
-    ito(release_queue.size) dev_ctx->release_resource(release_queue[i]);
-    release_queue.release();
-  }
+
   bool get_timestamp_state(Resource_ID t0) override {
-    u64      timestamp_results[1];
+    std::lock_guard<std::mutex> _lock(mutex);
+    u64                         timestamp_results[1];
     VkResult res = vkGetQueryPoolResults(dev_ctx->device, dev_ctx->query_pool, t0.id._id, 1, 8,
                                          timestamp_results, 8, VK_QUERY_RESULT_64_BIT);
     return res == VK_SUCCESS;
   }
   double get_timestamp_ms(Resource_ID t0, Resource_ID t1) override {
-    u64      timestamp_results[2];
+    std::lock_guard<std::mutex> _lock(mutex);
+    u64                         timestamp_results[2];
     VkResult res0 = vkGetQueryPoolResults(dev_ctx->device, dev_ctx->query_pool, t0.id._id, 1, 8,
                                           timestamp_results + 0, 8, VK_QUERY_RESULT_64_BIT);
     VkResult res1 = vkGetQueryPoolResults(dev_ctx->device, dev_ctx->query_pool, t1.id._id, 1, 8,
@@ -4439,42 +4487,58 @@ class VkFactory : public rd::IFactory {
     return 0.0;
   }
   Resource_ID create_image(rd::Image_Create_Info info) override {
+    std::lock_guard<std::mutex> _lock(mutex);
     return dev_ctx->create_image(info.width, info.height, info.depth, info.layers, info.levels,
                                  to_vk(info.format), info.usage_bits, info.mem_bits);
   }
   Resource_ID create_buffer(rd::Buffer_Create_Info info) override {
+    std::lock_guard<std::mutex> _lock(mutex);
     return dev_ctx->create_buffer(info);
   }
   bool get_event_state(Resource_ID fence_id) override {
-    Event &  event    = dev_ctx->events[fence_id.id];
-    VkResult wait_res = vkGetEventStatus(dev_ctx->device, event.event);
+    std::lock_guard<std::mutex> _lock(mutex);
+    Event                       event    = dev_ctx->events[fence_id.id];
+    VkResult                    wait_res = vkGetEventStatus(dev_ctx->device, event.event);
     ASSERT_DEBUG(wait_res == VK_EVENT_SET || wait_res == VK_EVENT_RESET);
     return wait_res == VK_EVENT_SET;
   }
   Resource_ID create_shader_raw(rd::Stage_t type, string_ref body,
                                 Pair<string_ref, string_ref> *defines,
                                 size_t                        num_defines) override {
-
+    std::lock_guard<std::mutex> _lock(mutex);
     return dev_ctx->create_shader_raw(type, body, defines, num_defines);
   }
-  void *      map_buffer(Resource_ID res_id) override { return dev_ctx->map_buffer(res_id); }
-  void        unmap_buffer(Resource_ID res_id) override { dev_ctx->unmap_buffer(res_id); }
+  void *map_buffer(Resource_ID res_id) override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    return dev_ctx->map_buffer(res_id);
+  }
+  void unmap_buffer(Resource_ID res_id) override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    dev_ctx->unmap_buffer(res_id);
+  }
   Resource_ID create_sampler(rd::Sampler_Create_Info const &info) override {
+    std::lock_guard<std::mutex> _lock(mutex);
     return dev_ctx->create_sampler(info);
   }
-  void        release_resource(Resource_ID id) override { release_queue.push(id); }
+  void release_resource(Resource_ID id) override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    release_queue.push(id);
+  }
   Resource_ID get_swapchain_image() override {
+    std::lock_guard<std::mutex> _lock(mutex);
     return {dev_ctx->sc_images[dev_ctx->image_index], (u32)Resource_Type::IMAGE};
   }
   rd::Image2D_Info get_swapchain_image_info() override {
+    std::lock_guard<std::mutex> _lock(mutex);
     return dev_ctx->get_swapchain_image_info();
   }
   rd::Image_Info get_image_info(Resource_ID res_id) override {
+    std::lock_guard<std::mutex> _lock(mutex);
     return dev_ctx->get_image_info(res_id);
   }
-
   rd::Imm_Ctx *start_render_pass(rd::Render_Pass_Create_Info const &info) override {
-    ID pass_id = {0};
+    std::lock_guard<std::mutex> _lock(mutex);
+    ID                          pass_id = {0};
     if (dev_ctx->pass_cache.contains(info)) {
       pass_id = dev_ctx->pass_cache.get(info);
       dev_ctx->render_passes.add_ref(pass_id);
@@ -4522,7 +4586,7 @@ class VkFactory : public rd::IFactory {
       ito(info.rts.size) {
         VkAttachmentDescription attachment;
         MEMZERO(attachment);
-        Image &img = dev_ctx->images[info.rts[i].image.id];
+        Image img = dev_ctx->images[info.rts[i].image.id];
         if (width == 0)
           width = img.info.extent.width;
         else
@@ -4556,7 +4620,7 @@ class VkFactory : public rd::IFactory {
       if (info.depth_target.image.is_null() == false) {
         VkAttachmentDescription attachment;
         MEMZERO(attachment);
-        Image &img = dev_ctx->images[info.depth_target.image.id];
+        Image img = dev_ctx->images[info.depth_target.image.id];
         if (width == 0)
           width = img.info.extent.width;
         else
@@ -4645,9 +4709,10 @@ class VkFactory : public rd::IFactory {
     return ctx;
   }
   void end_render_pass(rd::Imm_Ctx *_ctx) override {
-    Vk_Ctx *    ctx = (Vk_Ctx *)_ctx;
-    Resource_ID f   = dev_ctx->create_fence(false);
-    ID          finish_sem;
+    std::lock_guard<std::mutex> _lock(mutex);
+    Vk_Ctx *                    ctx = (Vk_Ctx *)_ctx;
+    Resource_ID                 f   = dev_ctx->create_fence(false);
+    ID                          finish_sem;
     if (last_sem.is_null() == false) {
       Semaphore s = dev_ctx->semaphores[last_sem];
       finish_sem  = ctx->submit(dev_ctx->fences[f.id].fence, &s.sem);
@@ -4661,14 +4726,19 @@ class VkFactory : public rd::IFactory {
     ctx->release();
   }
   rd::Imm_Ctx *start_compute_pass() override {
-    Vk_Ctx *ctx = new Vk_Ctx();
+    std::lock_guard<std::mutex> _lock(mutex);
+    Vk_Ctx *                    ctx = new Vk_Ctx();
     ctx->init(rd::Pass_t::COMPUTE, dev_ctx, {0});
     return ctx;
   }
-  void wait_idle() { vkDeviceWaitIdle(dev_ctx->device); }
+  void wait_idle() {
+    std::lock_guard<std::mutex> _lock(mutex);
+    vkDeviceWaitIdle(dev_ctx->device);
+  }
   void end_compute_pass(rd::Imm_Ctx *_ctx) override {
-    Vk_Ctx *    ctx = (Vk_Ctx *)_ctx;
-    Resource_ID f   = dev_ctx->create_fence(false);
+    std::lock_guard<std::mutex> _lock(mutex);
+    Vk_Ctx *                    ctx = (Vk_Ctx *)_ctx;
+    Resource_ID                 f   = dev_ctx->create_fence(false);
 
     ID finish_sem;
     if (last_sem.is_null() == false) {
@@ -4686,11 +4756,13 @@ class VkFactory : public rd::IFactory {
   }
   rd::Impl_t getImplType() override { return rd::Impl_t::VULKAN; }
   void       start_frame() override {
-    Resource_ID sem = dev_ctx->start_frame();
+    std::lock_guard<std::mutex> _lock(mutex);
+    Resource_ID                 sem = dev_ctx->start_frame();
     on_frame_begin();
     last_sem = sem.id;
   }
   void end_frame() override {
+    std::lock_guard<std::mutex> _lock(mutex);
     on_frame_end();
     VkSemaphore sem = VK_NULL_HANDLE;
     if (last_sem.is_null() == false) {

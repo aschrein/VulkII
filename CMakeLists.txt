@@ -79,10 +79,7 @@ function(ADD_EXAMPLE example_name example_file)
     3rdparty/imgui/imgui_draw.cpp
     3rdparty/imgui/imgui_demo.cpp
     3rdparty/marching_cubes/marching_cubes.cpp
-    3rdparty/ImGuiColorTextEdit/TextEditor.cpp
     ${INCLUDES_SRC}
-    3rdparty/imguinodegrapheditor.h
-    3rdparty/imguinodegrapheditor.cpp
     3rdparty/imgui/examples/imgui_impl_sdl.cpp
     )
     IF (WIN32)

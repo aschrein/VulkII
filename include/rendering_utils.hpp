@@ -1230,6 +1230,7 @@ PSInput main(in VSInput input) {
         pc.viewproj,
         float4(input.in_position, 1.0f)
       );
+  return output;
 }
 #endif
 #ifdef PIXEL
