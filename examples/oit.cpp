@@ -92,7 +92,7 @@ struct TressFX_Hair {
   Resource_ID gfx_tangents;
   Resource_ID gfx_indices;
 
-  void init_gfx(rd::IFactory *factory) {
+  void init_gfx(rd::IDevice *factory) {
     {
       rd::Buffer_Create_Info info;
       MEMZERO(info);
@@ -124,8 +124,8 @@ struct TressFX_Hair {
       init_buffer(factory, gfx_indices, m_triangleIndices.ptr, info.size);
     }
   }
-  void draw(rd::IFactory *factory) {}
-  void release_gfx(rd::IFactory *factory) {
+  void draw(rd::IDevice *factory) {}
+  void release_gfx(rd::IDevice *factory) {
     factory->release_resource(gfx_positions);
     factory->release_resource(gfx_tangents);
     factory->release_resource(gfx_indices);
@@ -457,12 +457,12 @@ struct Hair_Renderer {
 
   static constexpr u32 MAX_NODES = 16u;
 
-  void init(rd::IFactory *factory) { //
+  void init(rd::IDevice *factory) { //
     MEMZERO(*this);
     ASSERT_ALWAYS(LoadHairData(stref_s("Ratboy_short.tfx"), hair));
     hair.init_gfx(factory);
   }
-  void render(rd::IFactory *factory) {
+  void render(rd::IDevice *factory) {
     clear_timestamp.update(factory);
     prepass_timestamp.update(factory);
     resolve_timestamp.update(factory);
@@ -539,7 +539,7 @@ struct Hair_Renderer {
     }
     // Init
     {
-      rd::Imm_Ctx *ctx = factory->start_compute_pass();
+      rd::ICtx *ctx = factory->start_compute_pass();
       clear_timestamp.insert(factory, ctx);
       ctx->fill_buffer(ppll_counter, 0, 4, 1);
       ctx->fill_buffer(ppll_heads, 0, width * height * 4, 0);
@@ -563,7 +563,7 @@ struct Hair_Renderer {
         info.depth_target.clear_depth.clear = true;
         info.depth_target.format            = rd::Format::NATIVE;
       }
-      rd::Imm_Ctx *ctx = factory->start_render_pass(info);
+      rd::ICtx *ctx = factory->start_render_pass(info);
       prepass_timestamp.insert(factory, ctx);
       ctx->VS_set_shader(factory->create_shader_raw(rd::Stage_t::VERTEX, stref_s(R"(
 @(DECLARE_UNIFORM_BUFFER
@@ -718,7 +718,7 @@ u32 float4_to_u32(float4 c) {
     // Resolve
     if (!g_config.get_bool("forward")) {
 
-      rd::Imm_Ctx *ctx = factory->start_compute_pass();
+      rd::ICtx *ctx = factory->start_compute_pass();
       resolve_timestamp.insert(factory, ctx);
       ctx->CS_set_shader(factory->create_shader_raw(rd::Stage_t::COMPUTE, stref_s(R"(
 struct PPLL_Node {
@@ -820,7 +820,7 @@ float4 u32_to_float4(u32 c) {
       factory->end_compute_pass(ctx);
     }
   }
-  void release(rd::IFactory *factory) { //
+  void release(rd::IDevice *factory) { //
     hair.release_gfx(factory);
     factory->release_resource(hair_img);
     factory->release_resource(hair_depth);
@@ -835,7 +835,7 @@ class Event_Consumer : public IGUI_Pass {
     IGUI_Pass::init(pmng);
     g_camera.init();
   }
-  void on_gui(rd::IFactory *factory) override { //
+  void on_gui(rd::IDevice *factory) override { //
     ImGui::Begin("Config");
     g_config.on_imgui();
     ImGui::LabelText("clear pass", "%f ms", hr.clear_timestamp.duration);
@@ -891,17 +891,17 @@ class Event_Consumer : public IGUI_Pass {
     g_camera.update();
     ImGui::End();
   }
-  void on_init(rd::IFactory *factory) override { //
+  void on_init(rd::IDevice *factory) override { //
     hr.init(factory);
   }
-  void on_release(rd::IFactory *factory) override { //
+  void on_release(rd::IDevice *factory) override { //
     IGUI_Pass::release(factory);
     hr.release(factory);
   }
   void consume(void *_event) override { //
     IGUI_Pass::consume(_event);
   }
-  void on_frame(rd::IFactory *factory) override { //
+  void on_frame(rd::IDevice *factory) override { //
     hr.render(factory);
     IGUI_Pass::on_frame(factory);
   }

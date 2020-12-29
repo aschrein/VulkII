@@ -258,7 +258,7 @@ class Feedback_Pass : public rd::IPass {
       feedback_buffers[feedback_buffers.size - 1].init(pc);
     }
   }
-  void exec(rd::Imm_Ctx *ctx) override {
+  void exec(rd::ICtx *ctx) override {
     setup_default_state(ctx, 1);
     rd::DS_State ds_state;
     MEMZERO(ds_state);

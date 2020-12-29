@@ -21,7 +21,7 @@ class GBufferPass {
   struct GPU_Cube {
     Resource_ID vertex_buffer = {};
     Resource_ID index_buffer  = {};
-    void        init(rd::IFactory *factory) {
+    void        init(rd::IDevice *factory) {
       if (vertex_buffer.is_null()) {
 
         rd::Buffer_Create_Info buf_info;
@@ -50,7 +50,7 @@ class GBufferPass {
         init_buffer(factory, index_buffer, dindices, sizeof(dindices));
       }
     }
-    void bind(rd::Imm_Ctx *ctx) {
+    void bind(rd::ICtx *ctx) {
       ctx->IA_set_vertex_buffer(0, vertex_buffer, 0, 12, rd::Input_Rate::VERTEX);
       ctx->IA_set_index_buffer(index_buffer, 0, rd::Index_t::UINT32);
       {
@@ -64,8 +64,8 @@ class GBufferPass {
         ctx->IA_set_attribute(info);
       }
     }
-    void draw(rd::Imm_Ctx *ctx) { ctx->draw_indexed(36, 1, 0, 0, 0); }
-    void release(rd::IFactory *factory) {
+    void draw(rd::ICtx *ctx) { ctx->draw_indexed(36, 1, 0, 0, 0); }
+    void release(rd::IDevice *factory) {
       if (vertex_buffer.is_null() == false) factory->release_resource(vertex_buffer);
       if (index_buffer.is_null() == false) factory->release_resource(index_buffer);
     }
@@ -75,7 +75,7 @@ class GBufferPass {
   TimeStamp_Pool timestamps = {};
 
   void init() { MEMZERO(*this); }
-  void render(rd::IFactory *factory) {
+  void render(rd::IDevice *factory) {
     timestamps.update(factory);
     float4x4 bvh_visualizer_offset = glm::translate(float4x4(1.0f), float3(-10.0f, 0.0f, 0.0f));
     g_scene->traverse([&](Node *node) {
@@ -140,7 +140,7 @@ class GBufferPass {
       info.depth_target.clear_depth.clear = true;
       info.depth_target.format            = rd::Format::NATIVE;
 
-      rd::Imm_Ctx *ctx = factory->start_render_pass(info);
+      rd::ICtx *ctx = factory->start_render_pass(info);
       timestamps.insert(factory, ctx);
       setup_default_state(ctx, 1);
       rd::DS_State ds_state;
@@ -281,7 +281,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
       factory->end_render_pass(ctx);
     }
   }
-  void release(rd::IFactory *factory) { factory->release_resource(normal_rt); }
+  void release(rd::IDevice *factory) { factory->release_resource(normal_rt); }
 };
 
 class Event_Consumer : public IGUI_Pass {
@@ -305,7 +305,7 @@ class Event_Consumer : public IGUI_Pass {
       }
     }
   }
-  void on_gui(rd::IFactory *factory) override { //
+  void on_gui(rd::IDevice *factory) override { //
     // bool show = true;
     // ShowExampleAppCustomNodeGraph(&show);
     // ImGui::TestNodeGraphEditor();
@@ -341,7 +341,7 @@ class Event_Consumer : public IGUI_Pass {
     { Ray ray = gizmo_layer->getMouseRay(); }
     ImGui::End();
   }
-  void on_init(rd::IFactory *factory) override { //
+  void on_init(rd::IDevice *factory) override { //
     TMP_STORAGE_SCOPE;
     gizmo_layer = Gizmo_Layer::create(factory);
     // new XYZDragGizmo(gizmo_layer, &pos);
@@ -363,7 +363,7 @@ class Event_Consumer : public IGUI_Pass {
 
     gbuffer_pass.init();
   }
-  void on_release(rd::IFactory *factory) override { //
+  void on_release(rd::IDevice *factory) override { //
     // thread_pool.release();
     FILE *scene_dump = fopen("scene_state", "wb");
     fprintf(scene_dump, "(\n");
@@ -385,7 +385,7 @@ class Event_Consumer : public IGUI_Pass {
   void consume(void *_event) override { //
     IGUI_Pass::consume(_event);
   }
-  void on_frame(rd::IFactory *factory) override { //
+  void on_frame(rd::IDevice *factory) override { //
     g_scene->traverse([&](Node *node) {
       if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
         if (mn->getComponent<GizmoComponent>() == NULL) {

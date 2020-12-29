@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <type_traits>
 
 static inline double time() { return ((double)clock()) / CLOCKS_PER_SEC; }
 
@@ -61,6 +62,7 @@ using f64 = double;
 #define CLAMP(x, a, b) ((x) < (a) ? (a) : ((x) > (b) ? (b) : (x)))
 #define OFFSETOF(class, field) ((unsigned int)(size_t) & (((class *)0)->field))
 #define MEMZERO(x) memset(&x, 0, sizeof(x))
+#define ASSERT_ISPOD(x) static_assert(std::is_pod<x>::value, "")
 #define ito(N) for (uint32_t i = 0; i < N; ++i)
 #define jto(N) for (uint32_t j = 0; j < N; ++j)
 #define uto(N) for (uint32_t u = 0; u < N; ++u)

@@ -6,13 +6,13 @@
 #include <atomic>
 //#include <functional>
 #include <3rdparty/half.hpp>
+#include <condition_variable>
 #include <imgui.h>
 #include <mutex>
-#include <condition_variable>
 #include <thread>
 
 struct RenderingContext {
-  rd::IFactory *factory     = NULL;
+  rd::IDevice *factory     = NULL;
   Config *      config      = NULL;
   Scene *       scene       = NULL;
   Gizmo_Layer * gizmo_layer = NULL;
@@ -24,7 +24,7 @@ class GBufferPass {
   Resource_ID gbuffer_vs{};
   Resource_ID gbuffer_ps{};
 
-  void render_once(rd::Imm_Ctx *ctx, Scene *scene, float4x4 viewproj, float4x4 world) {
+  void render_once(rd::ICtx *ctx, Scene *scene, float4x4 viewproj, float4x4 world) {
     ctx->push_constants(&viewproj, 0, sizeof(float4x4));
     setup_default_state(ctx, 1);
     rd::DS_State ds_state;
@@ -104,6 +104,7 @@ class GBufferPass {
   std::mutex                  work_start_mutex;
   std::atomic<bool>           working;
   std::atomic<int>            new_work;
+  std::atomic<bool>           one_time_wake[0x100];
   rd::Render_Pass_Create_Info info{};
 
   public:
@@ -191,6 +192,7 @@ class GBufferPass {
       info.depth_target.image             = depth_rt;
       info.depth_target.clear_depth.clear = false;
       info.depth_target.format            = rd::Format::NATIVE;
+
       if (rctx.config->get_bool("render_gizmo")) {
         auto g_camera = rctx.gizmo_layer->get_camera();
         {
@@ -215,7 +217,8 @@ struct PushConstants
   float4x4 viewproj;
   float4x4 world_transform;
 };
-[[vk::push_constant]] ConstantBuffer<PushConstants> pc : register(b0, space0);
+[[vk::binding(0, 0)]] ConstantBuffer<PushConstants> pc : register(b0, space0);
+//[[vk::push_constant]] ConstantBuffer<PushConstants> pc : register(b0, space0);
 
 struct PSInput {
   [[vk::location(0)]] float4 pos     : SV_POSITION;
@@ -262,7 +265,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
       }
       //{
       //  int          i   = 0;
-      //  rd::Imm_Ctx *ctx = rctx.factory->start_render_pass(info);
+      //  rd::ICtx *ctx = rctx.factory->start_render_pass(info);
 
       //  float4x4 viewproj = rctx.gizmo_layer->get_camera().viewproj();
       //  // timestamps.insert(rctx.factory, ctx);
@@ -281,32 +284,63 @@ float4 main(in PSInput input) : SV_TARGET0 {
       //  }
       //  rctx.factory->end_render_pass(ctx);
       //}
-
+      //fprintf(stdout, "[START FRAME]\n");
+      //fflush(stdout);
       if (threads.size() == 0) {
         working = true;
-        ito(16) {
-          int thread_id = i;
-          threads.emplace_back(std::thread([this, rctx, width, height, thread_id] {
+        ito(2) {
+          int _thread_id = i;
+          threads.emplace_back(std::thread([this, rctx, _thread_id] {
+            int thread_id = _thread_id;
             while (working) {
+              u32 width  = rctx.config->get_u32("g_buffer_width");
+              u32 height = rctx.config->get_u32("g_buffer_height");
+
               std::unique_lock<std::mutex> lk(work_start_mutex);
-              work_start_cv.wait(lk, [&] { return new_work != 0; });
-              rd::Imm_Ctx *ctx      = rctx.factory->start_render_pass(info);
-              float4x4     viewproj = rctx.gizmo_layer->get_camera().viewproj();
+              work_start_cv.wait(lk, [&] { return one_time_wake[thread_id] && new_work != 0; });
+              one_time_wake[thread_id] = false;
+              //fprintf(stdout, "[START RECORDING] thread %i\n", thread_id);
+              //fflush(stdout);
+              // if (thread_id == 0) {
+              struct PushConstants {
+                float4x4 viewproj;
+                float4x4 world_transform;
+              } pc;
+
+              rd::Buffer_Create_Info buf_info;
+              MEMZERO(buf_info);
+              buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+              buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER |
+                                    (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
+              buf_info.size        = sizeof(PushConstants);
+              Resource_ID cbuffer  = rctx.factory->create_buffer(buf_info);
+              float4x4    viewproj = rctx.gizmo_layer->get_camera().viewproj();
+              rctx.factory->release_resource(cbuffer);
+
+              rd::ICtx *ctx = rctx.factory->start_render_pass(info);
+
               // timestamps.insert(rctx.factory, ctx);
               ctx->set_viewport(0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f);
               ctx->set_scissor(0, 0, width, height);
-              float    dx    = 1.0f;
-              float4x4 model = float4x4(            //
+              float    dx        = 1.0f;
+              float4x4 model     = float4x4(            //
                   1.0f, 0.0f, 0.0f, dx * thread_id, //
                   0.0f, 1.0f, 0.0f, 0.0f,           //
                   0.0f, 0.0f, 1.0f, 0.0f,           //
                   0.0f, 0.0f, 0.0f, 1.0f            //
               );
+              pc.viewproj        = viewproj;
+              pc.world_transform = transpose(model);
+              ctx->update_buffer(cbuffer, 0, &pc, sizeof(PushConstants));
+              ctx->bind_uniform_buffer(0, 0, cbuffer, 0, sizeof(pc));
               render_once(ctx, rctx.scene, viewproj, transpose(model));
               if (thread_id == 0) {
                 rctx.gizmo_layer->render(rctx.factory, ctx, width, height);
               }
               rctx.factory->end_render_pass(ctx);
+              //}
+              //fprintf(stdout, "[END RECORDING] thread %i\n", thread_id);
+              //fflush(stdout);
               if (--new_work == 0) {
                 work_finish_cv.notify_one();
               }
@@ -315,17 +349,20 @@ float4 main(in PSInput input) : SV_TARGET0 {
           // timestamps.insert(rctx.factory, ctx);
         }
       }
-      new_work = threads.size();
+      ito(0x100) one_time_wake[i] = true;
+      new_work                    = threads.size();
       work_start_cv.notify_all();
       std::unique_lock<std::mutex> lk(work_finish_mutex);
       work_finish_cv.wait(lk, [&] { return new_work == 0; });
       new_work = 0;
       rctx.gizmo_layer->reset();
+      //fprintf(stdout, "[END FRAME]\n");
+      //fflush(stdout);
       // for (auto &th : threads) th.join();
       // threads.clear();
     }
   }
-  void release(rd::IFactory *factory) { factory->release_resource(normal_rt); }
+  void release(rd::IDevice *factory) { factory->release_resource(normal_rt); }
 };
 
 class Event_Consumer : public IGUIApp {

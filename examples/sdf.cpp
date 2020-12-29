@@ -549,14 +549,14 @@ Array<TestData> td;
 
 template <typename T> class GPUBuffer {
   private:
-  rd::IFactory *factory;
+  rd::IDevice *factory;
   Array<T>      cpu_array;
   Resource_ID   gpu_buffer;
   Resource_ID   cpu_buffer;
   size_t        gpu_buffer_size;
 
   public:
-  void init(rd::IFactory *factory) {
+  void init(rd::IDevice *factory) {
     this->factory = factory;
     cpu_array.init();
     gpu_buffer.reset();
@@ -572,7 +572,7 @@ template <typename T> class GPUBuffer {
   }
   Resource_ID get() { return gpu_buffer; }
   void        reset() { cpu_array.reset(); }
-  void        flush(rd::Imm_Ctx *ctx = NULL) {
+  void        flush(rd::ICtx *ctx = NULL) {
     if (gpu_buffer.is_null() || cpu_array.size * sizeof(T) < gpu_buffer_size) {
       if (cpu_buffer) factory->release_resource(cpu_buffer);
       if (gpu_buffer) factory->release_resource(gpu_buffer);
@@ -664,7 +664,7 @@ void build_nn_shader(String_Builder &sb, NN *nn) {
   sb.putf("}\n");
 }
 
-void render_mesh(Mesh const &mesh, float4x4 const &model, rd::IFactory *factory, rd::Imm_Ctx *ctx) {
+void render_mesh(Mesh const &mesh, float4x4 const &model, rd::IDevice *factory, rd::ICtx *ctx) {
   if (mesh.vertexCount) {
     ctx->push_state();
     defer(ctx->pop_state());
@@ -806,7 +806,7 @@ void render_mesh(Mesh const &mesh, float4x4 const &model, rd::IFactory *factory,
   }
 }
 
-void render_layers(NN *_nn, rd::IFactory *factory, rd::Imm_Ctx *ctx) {
+void render_layers(NN *_nn, rd::IDevice *factory, rd::ICtx *ctx) {
   int num_meshes = 0;
   jto(nn->layers.size) {
     kto(nn->layers[j]->getOutputSize()) { num_meshes++; }
@@ -862,14 +862,14 @@ class GBufferPass {
   Resource_ID depth_rt;
 
   public:
-  void render_sdf(rd::Imm_Ctx *ctx, NN *nn, float3 origin) {
+  void render_sdf(rd::ICtx *ctx, NN *nn, float3 origin) {
     String_Builder sb;
     sb.init();
     defer(sb.release());
   }
 
   void init() { MEMZERO(*this); }
-  void render(rd::IFactory *factory) {
+  void render(rd::IDevice *factory) {
     float4x4 bvh_visualizer_offset = translate(float4x4(1.0f), float3(-10.0f, 0.0f, 0.0f));
     g_scene->traverse([&](Node *node) {
       if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
@@ -933,7 +933,7 @@ class GBufferPass {
       info.depth_target.clear_depth.clear = true;
       info.depth_target.format            = rd::Format::NATIVE;
 
-      rd::Imm_Ctx *ctx = factory->start_render_pass(info);
+      rd::ICtx *ctx = factory->start_render_pass(info);
       ctx->VS_set_shader(factory->create_shader_raw(rd::Stage_t::VERTEX, stref_s(R"(
 @(DECLARE_PUSH_CONSTANTS
   (add_field (type float4x4)  (name viewproj))
@@ -1486,7 +1486,7 @@ continue;*/
       factory->end_compute_pass(ctx);
     }
   }
-  void release(rd::IFactory *factory) { factory->release_resource(normal_rt); }
+  void release(rd::IDevice *factory) { factory->release_resource(normal_rt); }
 };
 
 class Event_Consumer : public IGUI_Pass {
@@ -1580,7 +1580,7 @@ class Event_Consumer : public IGUI_Pass {
     //}
   }
 
-  void on_gui(rd::IFactory *factory) override { //
+  void on_gui(rd::IDevice *factory) override { //
     // bool show = true;
     // ShowExampleAppCustomNodeGraph(&show);
     // ImGui::TestNodeGraphEditor();
@@ -1651,7 +1651,7 @@ class Event_Consumer : public IGUI_Pass {
     //  ImGui::End();
     //}
   }
-  void on_init(rd::IFactory *factory) override { //
+  void on_init(rd::IDevice *factory) override { //
     TMP_STORAGE_SCOPE;
     gizmo_layer = Gizmo_Layer::create(factory);
     // new XYZDragGizmo(gizmo_layer, &pos);
@@ -1799,7 +1799,7 @@ class Event_Consumer : public IGUI_Pass {
     //}
     // defer(nn->release());
   }
-  void on_release(rd::IFactory *factory) override { //
+  void on_release(rd::IDevice *factory) override { //
     // thread_pool.release();
     FILE *scene_dump = fopen("scene_state", "wb");
     fprintf(scene_dump, "(\n");
@@ -1821,7 +1821,7 @@ class Event_Consumer : public IGUI_Pass {
   void consume(void *_event) override { //
     IGUI_Pass::consume(_event);
   }
-  void on_frame(rd::IFactory *factory) override { //
+  void on_frame(rd::IDevice *factory) override { //
     g_scene->traverse([&](Node *node) {
       if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
         if (mn->getComponent<GizmoComponent>() == NULL) {

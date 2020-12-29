@@ -1,26 +1,18 @@
-
-#include "marching_cubes/marching_cubes.h"
 #include "rendering.hpp"
-#include "rendering_utils.hpp"
-
-#include <atomic>
-//#include <functional>
-#include <3rdparty/half.hpp>
-#include <imgui.h>
-#include <mutex>
-#include <thread>
 
 int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
 
-  rd::IFactory *factory = rd::create_vulkan(NULL);
+  rd::IDevice *factory = rd::create_vulkan(NULL);
   factory->start_frame();
   defer({
     factory->end_frame();
     factory->release();
   });
-  Image2D *image = load_image(stref_s("images/ECurtis.png"));
+  rd::ICtx *ctx = factory->start_compute_pass();
+#if 0
+				Image2D *image = load_image(stref_s("images/ECurtis.png"));
   defer(if (image) image->release());
   ASSERT_ALWAYS(image);
   RenderDoc_CTX::start();
@@ -41,7 +33,7 @@ int main(int argc, char *argv[]) {
     rw_texture      = factory->create_image(info);
   }
   defer(factory->release_resource(texture));
-  rd::Imm_Ctx *ctx = factory->start_compute_pass();
+  
   ctx->CS_set_shader(factory->create_shader_raw(rd::Stage_t::COMPUTE, stref_s(R"(
 [[vk::binding(0, 0)]] Texture2D<float4>   rtex          : register(t0, space0);
 [[vk::binding(1, 0)]] RWTexture2D<float4> rwtex         : register(u1, space0);
@@ -60,9 +52,9 @@ void main(uint3 tid : SV_DispatchThreadID)
 )"),
                                                 NULL, 0));
   ctx->image_barrier(texture, (u32)rd::Access_Bits::SHADER_READ,
-                     rd::Image_Layout::SHADER_READ_ONLY_OPTIMAL);
+                     rd::Image_Layout::READ_ONLY_OPTIMAL);
   ctx->image_barrier(rw_texture, (u32)rd::Access_Bits::SHADER_WRITE,
-                     rd::Image_Layout::SHADER_READ_WRITE_OPTIMAL);
+                     rd::Image_Layout::READ_WRITE_OPTIMAL);
   ctx->bind_image(0, 0, 0, texture, rd::Image_Subresource::top_level(), rd::Format::NATIVE);
   ctx->bind_rw_image(0, 1, 0, rw_texture, rd::Image_Subresource::top_level(), rd::Format::NATIVE);
   Resource_ID sampler_state{};
@@ -82,26 +74,8 @@ void main(uint3 tid : SV_DispatchThreadID)
   defer(factory->release_resource(sampler_state));
   ctx->bind_sampler(0, 2, sampler_state);
   ctx->dispatch(image->width / 16 + 1, image->height / 16 + 1, 1);
-  ctx->CS_set_shader(factory->create_shader_raw(rd::Stage_t::COMPUTE, stref_s(R"(
-[[vk::binding(0, 0)]] RWByteAddressBuffer BufferOut : register(u0, space0);
-
-[numthreads(1024, 1, 1)]
-void main(uint3 DTid : SV_DispatchThreadID)
-{
-    BufferOut.Store(DTid.x * 4, DTid.x);
-}
-)"),
-                                                NULL, 0));
-  rd::Buffer_Create_Info buf_info;
-  MEMZERO(buf_info);
-  buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
-  buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_UAV;
-  buf_info.size       = sizeof(u32) * 1024;
-  Resource_ID res_id  = factory->create_buffer(buf_info);
-  ctx->bind_storage_buffer(0, 0, res_id, 0, buf_info.size);
-  ctx->bind_storage_buffer(0, 1, res_id, 0, buf_info.size);
-  ctx->dispatch(1, 1, 1);
-  ctx->CS_set_shader(factory->create_shader_raw(rd::Stage_t::COMPUTE, stref_s(R"(
+#endif // 0
+  Resource_ID         cs2  = factory->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
 [[vk::binding(0, 0)]] RWByteAddressBuffer BufferOut : register(u0, space0);
 [[vk::binding(1, 0)]] RWStructuredBuffer<uint> BufferIn : register(u1, space0);
 
@@ -117,11 +91,40 @@ void main(uint3 DTid : SV_DispatchThreadID)
     BufferOut.Store(DTid.x * 4, BufferIn.Load(DTid.x) * pc.val);
 }
 )"),
-                                                NULL, 0));
+                                           NULL, 0);
+  Resource_ID         cs   = factory->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
+[[vk::binding(0, 0)]] RWByteAddressBuffer BufferOut : register(u0, space0);
+[[vk::binding(1, 0)]] RWStructuredBuffer<uint> BufferIn : register(u1, space0);
+
+[numthreads(1024, 1, 1)]
+void main(uint3 DTid : SV_DispatchThreadID)
+{
+    BufferOut.Store(DTid.x * 4, DTid.x);
+}
+)"),
+                                          NULL, 0);
+  rd::IBinding_Table *set0 = factory->create_binding_table(cs, 0);
+  rd::IBinding_Table *set1 = factory->create_binding_table(cs2, 0);
+  ctx->bind_compute(cs);
+  rd::Buffer_Create_Info buf_info;
+  MEMZERO(buf_info);
+  buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+  buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_UAV;
+  buf_info.size       = sizeof(u32) * 1024;
+  Resource_ID res_id  = factory->create_buffer(buf_info);
+  set0->bind_UAV_buffer(0, res_id, 0, buf_info.size);
+  ctx->bind_table(0, set0);
+  set0->release();
+  ctx->dispatch(1, 1, 1);
+  ctx->bind_compute(cs2);
+  set1->bind_UAV_buffer(0, res_id, 0, buf_info.size);
+  set1->bind_UAV_buffer(1, res_id, 0, buf_info.size);
+  ctx->bind_table(0, set1);
   u32 val = 3;
   ctx->push_constants(&val, 0, 4);
   ctx->dispatch(1, 1, 1);
-  Resource_ID event_id = ctx->insert_event();
+  Resource_ID event_id = factory->create_event();
+  ctx->insert_event(event_id);
   factory->end_compute_pass(ctx);
   while (!factory->get_event_state(event_id)) fprintf(stdout, "waiting...\n");
   factory->release_resource(event_id);
@@ -129,8 +132,8 @@ void main(uint3 DTid : SV_DispatchThreadID)
   ito(1024) fprintf(stdout, "%i ", map[i]);
   fflush(stdout);
   factory->unmap_buffer(res_id);
-  factory->release_resource(res_id);
-  RenderDoc_CTX::end();
+  // factory->release_resource(res_id);
+  // RenderDoc_CTX::end();
 
   return 0;
 }

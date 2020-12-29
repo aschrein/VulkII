@@ -284,7 +284,7 @@ Image2D *load_image(string_ref filename, rd::Format format) {
   }
 }
 
-Node *load_gltf_pbr(IFactory *factory, string_ref filename) {
+Node *load_gltf_pbr(ISceneFactory *factory, string_ref filename) {
   string_ref dir_path = get_dir(filename);
   TMP_STORAGE_SCOPE;
   cgltf_options options;

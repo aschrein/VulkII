@@ -1,23 +1,23 @@
 #ifndef RENDERING_UTILS_HPP
-#define RENDERING_UTILS_HPP
+#  define RENDERING_UTILS_HPP
 
-#include "rendering.hpp"
-#include "scene.hpp"
-#include "simplefont.h"
-#include "utils.hpp"
+#  include "rendering.hpp"
+#  include "scene.hpp"
+#  include "simplefont.h"
+#  include "utils.hpp"
 
-#ifdef __linux__
-#  include <SDL2/SDL.h>
-#  include <SDL2/SDL_syswm.h>
-#include <xcb/xcb.h>
-#include <X11/Xlib-xcb.h>
-#else
-#  include <SDL.h>
-#  include <SDL_syswm.h>
-#endif
+#  ifdef __linux__
+#    include <SDL2/SDL.h>
+#    include <SDL2/SDL_syswm.h>
+#    include <X11/Xlib-xcb.h>
+#    include <xcb/xcb.h>
+#  else
+#    include <SDL.h>
+#    include <SDL_syswm.h>
+#  endif
 
-#include <imgui.h>
-#include <imgui/examples/imgui_impl_sdl.h>
+#  include <imgui.h>
+#  include <imgui/examples/imgui_impl_sdl.h>
 
 #endif
 
@@ -210,15 +210,15 @@ class IGUIApp {
     SDL_VERSION(&wmInfo.version);
     SDL_GetWindowWMInfo(window, &wmInfo);
     HWND hwnd = wmInfo.info.win.window;
-    handle = (void*)hwnd;
+    handle    = (void *)hwnd;
 #else
     SDL_SysWMinfo wmInfo;
     SDL_VERSION(&wmInfo.version);
     SDL_GetWindowWMInfo(window, &wmInfo);
-    Window hwnd = wmInfo.info.x11.window;
+    Window            hwnd       = wmInfo.info.x11.window;
     xcb_connection_t *connection = XGetXCBConnection(wmInfo.info.x11.display);
-    Ptr2 ptrs{(void*)hwnd, (void*)connection};
-    handle = (void*)&ptrs;
+    Ptr2              ptrs{(void *)hwnd, (void *)connection};
+    handle = (void *)&ptrs;
 #endif
     if (impl_t == rd::Impl_t::VULKAN) {
       factory = rd::create_vulkan(handle);
@@ -887,7 +887,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     MEMZERO(pc);
     pc.op = 0;
     switch (image->format) {
-      // clang-format off
+    // clang-format off
       case rd::Format::RGBA8_SRGBA:  {  pc.format = 0; } break;
       case rd::Format::RGBA8_UNORM:  {  pc.format = 1; } break;
       case rd::Format::RGB32_FLOAT:  {  pc.format = 2; } break;
@@ -1847,64 +1847,64 @@ float4 main(in PSInput input) : SV_TARGET0 {
         }
       }
       if (num_glyphs != 0) {
-      rd::Buffer_Create_Info buf_info;
-      MEMZERO(buf_info);
-      buf_info.mem_bits                 = (u32)rd::Memory_Bits::HOST_VISIBLE;
-      buf_info.usage_bits               = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
-      buf_info.size                     = num_glyphs * sizeof(Glyph_Instance);
-      Resource_ID gizmo_instance_buffer = f->create_buffer(buf_info);
-      rm->release_resource(gizmo_instance_buffer);
-      Glyph_Instance *ptr = (Glyph_Instance *)f->map_buffer(gizmo_instance_buffer);
-      memcpy(ptr, glyphs, buf_info.size);
-      f->unmap_buffer(gizmo_instance_buffer);
-      ctx->IA_set_topology(rd::Primitive::TRIANGLE_LIST);
-      ctx->IA_set_vertex_buffer(1, gizmo_instance_buffer, 0, sizeof(Glyph_Instance),
-                                rd::Input_Rate::INSTANCE);
-      rd::Attribute_Info info;
-      MEMZERO(info);
-      info.binding  = 0;
-      info.format   = rd::Format::RGB32_FLOAT;
-      info.location = 0;
-      info.offset   = 0;
-      info.type     = rd::Attriute_t::POSITION;
-      ctx->IA_set_attribute(info);
-      MEMZERO(info);
-      info.binding  = 1;
-      info.format   = rd::Format::RGB32_FLOAT;
-      info.location = 1;
-      info.offset   = 0;
-      info.type     = rd::Attriute_t::TEXCOORD0;
-      ctx->IA_set_attribute(info);
-      MEMZERO(info);
-      info.binding  = 1;
-      info.format   = rd::Format::RG32_FLOAT;
-      info.location = 2;
-      info.offset   = 12;
-      info.type     = rd::Attriute_t::TEXCOORD1;
-      ctx->IA_set_attribute(info);
-      MEMZERO(info);
-      info.binding  = 1;
-      info.format   = rd::Format::RGB32_FLOAT;
-      info.location = 3;
-      info.offset   = 20;
-      info.type     = rd::Attriute_t::TEXCOORD2;
-      ctx->IA_set_attribute(info);
-      struct PC {
-        float2 glyph_uv_size;
-        float2 glyph_size;
-        float2 viewport_size;
-      } pc;
-      pc.glyph_uv_size = {glyph_uv_width, glyph_uv_height};
-      pc.glyph_size    = {glyphs_screen_width, -glyphs_screen_height};
-      pc.viewport_size = {(f32)width, (f32)height};
-      ctx->VS_set_shader(font_vs);
-      ctx->PS_set_shader(font_ps);
-      ctx->push_constants(&pc, 0, sizeof(pc));
-      ctx->bind_sampler(0, 1, font_sampler);
-      ctx->bind_image(0, 0, 0, font_texture, rd::Image_Subresource::top_level(),
-                      rd::Format::NATIVE);
-      glyph_wrapper.draw(ctx, num_glyphs, 0);
-    }
+        rd::Buffer_Create_Info buf_info;
+        MEMZERO(buf_info);
+        buf_info.mem_bits                 = (u32)rd::Memory_Bits::HOST_VISIBLE;
+        buf_info.usage_bits               = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
+        buf_info.size                     = num_glyphs * sizeof(Glyph_Instance);
+        Resource_ID gizmo_instance_buffer = f->create_buffer(buf_info);
+        rm->release_resource(gizmo_instance_buffer);
+        Glyph_Instance *ptr = (Glyph_Instance *)f->map_buffer(gizmo_instance_buffer);
+        memcpy(ptr, glyphs, buf_info.size);
+        f->unmap_buffer(gizmo_instance_buffer);
+        ctx->IA_set_topology(rd::Primitive::TRIANGLE_LIST);
+        ctx->IA_set_vertex_buffer(1, gizmo_instance_buffer, 0, sizeof(Glyph_Instance),
+                                  rd::Input_Rate::INSTANCE);
+        rd::Attribute_Info info;
+        MEMZERO(info);
+        info.binding  = 0;
+        info.format   = rd::Format::RGB32_FLOAT;
+        info.location = 0;
+        info.offset   = 0;
+        info.type     = rd::Attriute_t::POSITION;
+        ctx->IA_set_attribute(info);
+        MEMZERO(info);
+        info.binding  = 1;
+        info.format   = rd::Format::RGB32_FLOAT;
+        info.location = 1;
+        info.offset   = 0;
+        info.type     = rd::Attriute_t::TEXCOORD0;
+        ctx->IA_set_attribute(info);
+        MEMZERO(info);
+        info.binding  = 1;
+        info.format   = rd::Format::RG32_FLOAT;
+        info.location = 2;
+        info.offset   = 12;
+        info.type     = rd::Attriute_t::TEXCOORD1;
+        ctx->IA_set_attribute(info);
+        MEMZERO(info);
+        info.binding  = 1;
+        info.format   = rd::Format::RGB32_FLOAT;
+        info.location = 3;
+        info.offset   = 20;
+        info.type     = rd::Attriute_t::TEXCOORD2;
+        ctx->IA_set_attribute(info);
+        struct PC {
+          float2 glyph_uv_size;
+          float2 glyph_size;
+          float2 viewport_size;
+        } pc;
+        pc.glyph_uv_size = {glyph_uv_width, glyph_uv_height};
+        pc.glyph_size    = {glyphs_screen_width, -glyphs_screen_height};
+        pc.viewport_size = {(f32)width, (f32)height};
+        ctx->VS_set_shader(font_vs);
+        ctx->PS_set_shader(font_ps);
+        ctx->push_constants(&pc, 0, sizeof(pc));
+        ctx->bind_sampler(0, 1, font_sampler);
+        ctx->bind_image(0, 0, 0, font_texture, rd::Image_Subresource::top_level(),
+                        rd::Format::NATIVE);
+        glyph_wrapper.draw(ctx, num_glyphs, 0);
+      }
     }
     if (line_segments.size != 0) {
       ctx->push_state();

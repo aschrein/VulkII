@@ -95,7 +95,7 @@ class Bake_Position_Pass {
 
   Bake_Position_Pass() {}
   void init() { MEMZERO(*this); }
-  void exec(rd::IFactory *factory) {
+  void exec(rd::IDevice *factory) {
     width         = g_config.get_u32("baking_resolution");
     height        = g_config.get_u32("baking_resolution");
     bool recreate = false;
@@ -201,7 +201,7 @@ class Bake_Position_Pass {
     rtv1.clear_color.clear = true;
     info.rts.push(rtv1);
 
-    rd::Imm_Ctx *ctx = factory->start_render_pass(info);
+    rd::ICtx *ctx = factory->start_render_pass(info);
 
     setup_default_state(ctx, 2);
     rd::DS_State ds_state;
@@ -234,7 +234,7 @@ class Bake_Position_Pass {
         g_scene.get_node(stref_s("HIGH")));
     factory->end_render_pass(ctx);
   }
-  void release(rd::IFactory *rm) {
+  void release(rd::IDevice *rm) {
     rm->release_resource(vs);
     rm->release_resource(ps);
   }
@@ -256,7 +256,7 @@ class Feedback_Pass {
     Resource_ID buffer;
     Resource_ID event;
     bool        in_fly;
-    void        init(rd::IFactory *rm) {
+    void        init(rd::IDevice *rm) {
       MEMZERO(*this);
       in_fly = false;
       rd::Buffer_Create_Info buf_info;
@@ -267,8 +267,8 @@ class Feedback_Pass {
       buf_info.size = 16;
       buffer        = rm->create_buffer(buf_info);
     }
-    void on_pass_end(rd::Imm_Ctx *ctx) { event = ctx->insert_event(); }
-    void release(rd::IFactory *rm) {
+    void on_pass_end(rd::ICtx *ctx) { event = ctx->insert_event(); }
+    void release(rd::IDevice *rm) {
       if (buffer.is_null() == false) rm->release_resource(buffer);
       MEMZERO(*this);
     }
@@ -280,7 +280,7 @@ class Feedback_Pass {
     MEMZERO(*this);
     feedback_buffers.init();
   }
-  void exec(rd::IFactory *factory) {
+  void exec(rd::IDevice *factory) {
     if (gizmo_initialized == false) {
       gizmo_initialized = true;
       gizmo_layer.init(factory);
@@ -445,7 +445,7 @@ class Feedback_Pass {
     rp.depth_target.clear_depth.clear = true;
     rp.depth_target.format            = rd::Format::NATIVE;
 
-    rd::Imm_Ctx *ctx = factory->start_render_pass(rp);
+    rd::ICtx *ctx = factory->start_render_pass(rp);
 
     setup_default_state(ctx, 1);
     rd::DS_State ds_state;
@@ -640,7 +640,7 @@ class Feedback_Pass {
     g_scene.on_pass_end(factory);
     factory->end_render_pass(ctx);
   }
-  void release(rd::IFactory *rm) {
+  void release(rd::IDevice *rm) {
     rm->release_resource(vs);
     rm->release_resource(ps);
     ito(feedback_buffers.size) feedback_buffers[i].release(rm);
@@ -671,7 +671,7 @@ class Compute_Rendering_Pass {
     width  = 0;
     height = 0;
   }
-  void exec(rd::IFactory *rm) override {
+  void exec(rd::IDevice *rm) override {
     position_texture        = rm->get_resource(stref_s("bake_pass/rt0"));
     normal_texture          = rm->get_resource(stref_s("bake_pass/rt1"));
     rd::Image2D_Info info   = rm->get_swapchain_image_info();
@@ -876,7 +876,7 @@ class Compute_Rendering_Pass {
     ctx->release_resource(uniform_buffer);
   }
   string_ref get_name() override { return stref_s("Compute_Rendering_Pass"); }
-  void       release(rd::IFactory *rm) override { delete this; }
+  void       release(rd::IDevice *rm) override { delete this; }
 };
 
 
@@ -917,9 +917,9 @@ class GUI_Pass : public IGUI_Pass {
     staging_buffer.reset();
     copy_fence.reset();
   }
-  void on_end(rd::IFactory *rm) override { IGUI_Pass::on_end(rm); }
-  void on_begin(rd::IFactory *rm) override { IGUI_Pass::on_begin(rm); }
-  void exec(rd::Imm_Ctx *ctx) override {
+  void on_end(rd::IDevice *rm) override { IGUI_Pass::on_end(rm); }
+  void on_begin(rd::IDevice *rm) override { IGUI_Pass::on_begin(rm); }
+  void exec(rd::ICtx *ctx) override {
     if (save_position_buffer) {
       save_position_buffer = false;
       ctx->copy_image_to_buffer(staging_buffer, 0, ctx->get_resource(stref_s("bake_pass/rt0")),
@@ -939,7 +939,7 @@ class GUI_Pass : public IGUI_Pass {
     }
     IGUI_Pass::exec(ctx);
   }
-  void on_gui(rd::IFactory *pc) override {
+  void on_gui(rd::IDevice *pc) override {
     {
       ImGui::Begin("Config");
       if (ImGui::Button("save position") && staging_buffer.is_null()) {
@@ -1070,7 +1070,7 @@ class Event_Consumer : public IGUI_Pass {
     bake_pass.init();
     g_camera.init();
   }
-  void on_gui(rd::IFactory *factory) override { //
+  void on_gui(rd::IDevice *factory) override { //
     ImGui::Begin("Config");
     g_config.on_imgui();
     ImGui::End();
@@ -1148,9 +1148,9 @@ class Event_Consumer : public IGUI_Pass {
     g_camera.update();
     ImGui::End();
   }
-  void on_init(rd::IFactory *factory) override { //
+  void on_init(rd::IDevice *factory) override { //
   }
-  void on_release(rd::IFactory *factory) override { //
+  void on_release(rd::IDevice *factory) override { //
     IGUI_Pass::release(factory);
     bake_pass.release(factory);
     g_scene.release();
@@ -1158,7 +1158,7 @@ class Event_Consumer : public IGUI_Pass {
   void consume(void *_event) override { //
     IGUI_Pass::consume(_event);
   }
-  void on_frame(rd::IFactory *factory) override { //
+  void on_frame(rd::IDevice *factory) override { //
     g_camera.update();
     g_scene.on_pass_begin(factory);
     bake_pass.exec(factory);

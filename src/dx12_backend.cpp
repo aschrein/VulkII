@@ -297,7 +297,7 @@ u64 hash_of(Resource_Path const &path) {
 }
 
 #if 0
-				class Dx12Factory : public rd::IFactory {
+				class Dx12Factory : public rd::IDevice {
   Window *           wnd;
   Array<Resource_ID> release_queue;
 
@@ -339,11 +339,11 @@ u64 hash_of(Resource_Path const &path) {
   Resource_ID      get_swapchain_image() override { TRAP; }
   rd::Image2D_Info get_swapchain_image_info() override { TRAP; }
   rd::Image_Info   get_image_info(Resource_ID res_id) override { TRAP; }
-  rd::Imm_Ctx *    start_render_pass(rd::Render_Pass_Create_Info const &info) override { TRAP; }
-  void             end_render_pass(rd::Imm_Ctx *_ctx) override { TRAP; }
-  rd::Imm_Ctx *    start_compute_pass() override { TRAP; }
+  rd::ICtx *    start_render_pass(rd::Render_Pass_Create_Info const &info) override { TRAP; }
+  void             end_render_pass(rd::ICtx *_ctx) override { TRAP; }
+  rd::ICtx *    start_compute_pass() override { TRAP; }
   void             wait_idle() { TRAP; }
-  void             end_compute_pass(rd::Imm_Ctx *_ctx) override { TRAP; }
+  void             end_compute_pass(rd::ICtx *_ctx) override { TRAP; }
 };
 class Dx12Pass_Mng : public rd::Pass_Mng {
   public:

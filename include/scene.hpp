@@ -1959,7 +1959,7 @@ struct Camera {
   }
 };
 
-class IFactory {
+class ISceneFactory {
   public:
   virtual Node *    add_node(string_ref name)                             = 0;
   virtual MeshNode *add_mesh_node(string_ref name)                        = 0;
@@ -1967,7 +1967,7 @@ class IFactory {
   virtual u32       add_image(Image2D *img)                               = 0;
 };
 
-Node *              load_gltf_pbr(IFactory *factory, string_ref filename);
+Node *              load_gltf_pbr(ISceneFactory *factory, string_ref filename);
 Raw_Mesh_Opaque     optimize_mesh(Raw_Mesh_Opaque const &opaque_mesh);
 Raw_Mesh_Opaque     simplify_mesh(Raw_Mesh_Opaque const &opaque_mesh);
 Raw_Meshlets_Opaque build_meshlets(Raw_Mesh_Opaque &opaque_mesh);
@@ -2018,7 +2018,7 @@ class Scene {
   Asset_Manager *assets;
 
   friend class SceneFactory;
-  class SceneFactory : public IFactory {
+  class SceneFactory : public ISceneFactory {
 public:
     Scene *scene;
     SceneFactory(Scene *scene) : scene(scene) {}
@@ -2109,11 +2109,11 @@ class GfxSurface {
 
   Resource_ID buffer;
 
-  rd::IFactory *factory;
+  rd::IDevice *factory;
   Surface *     surface;
   rd::Index_t   index_type;
 
-  void init(rd::IFactory *factory, Surface *surface) {
+  void init(rd::IDevice *factory, Surface *surface) {
     MEMZERO(*this);
     this->index_type    = surface->mesh.index_type;
     this->factory       = factory;
@@ -2174,10 +2174,10 @@ class GfxSurface {
 
       ito(attributes.size) {
         jto(i) { attribute_offsets[i] += attribute_sizes[j]; }
-        attribute_offsets[i] = rd::IFactory::align_up(attribute_offsets[i]);
+        attribute_offsets[i] = rd::IDevice::align_up(attribute_offsets[i]);
         total_memory_needed  = attribute_offsets[i] + attribute_sizes[i];
       }
-      total_memory_needed = rd::IFactory::align_up(total_memory_needed);
+      total_memory_needed = rd::IDevice::align_up(total_memory_needed);
       index_offset        = total_memory_needed;
       total_memory_needed += surface->mesh.get_bytes_per_index() * surface->mesh.num_indices;
     }
@@ -2191,7 +2191,7 @@ class GfxSurface {
   }
 
   public:
-  static GfxSurface *create(rd::IFactory *factory, Surface *surface) {
+  static GfxSurface *create(rd::IDevice *factory, Surface *surface) {
     GfxSurface *out = new GfxSurface;
     out->init(factory, surface);
     return out;
@@ -2200,8 +2200,9 @@ class GfxSurface {
     factory->release_resource(buffer);
     delete this;
   }
-  void draw(rd::Imm_Ctx *ctx, u32 *attribute_to_location) {
-    ito(attributes.size) {
+  void draw(rd::ICtx *ctx, u32 *attribute_to_location) {
+    TRAP;
+    /*ito(attributes.size) {
       Attribute attr = attributes[i];
       ctx->IA_set_vertex_buffer(i, buffer, attribute_offsets[i], attr.stride,
                                 rd::Input_Rate::VERTEX);
@@ -2219,7 +2220,7 @@ class GfxSurface {
     u32 index_cursor  = 0;
     ctx->draw_indexed(surface->mesh.num_indices, 1, index_cursor, 0, vertex_cursor);
     index_cursor += surface->mesh.num_indices;
-    vertex_cursor += surface->mesh.num_vertices;
+    vertex_cursor += surface->mesh.num_vertices;*/
   }
 };
 
@@ -2233,7 +2234,7 @@ class GfxSufraceComponent : public Node::Component {
   BVH<Tri> *getBVH() { return bvh; }
   ~GfxSufraceComponent() override {}
   GfxSufraceComponent(Node *n) : Component(n) { gfx_surfaces.init(); }
-  static GfxSufraceComponent *create(rd::IFactory *factory, Node *n) {
+  static GfxSufraceComponent *create(rd::IDevice *factory, Node *n) {
     ASSERT_DEBUG(n->isa<MeshNode>());
     GfxSufraceComponent *s  = new GfxSufraceComponent(n);
     MeshNode *           mn = n->dyn_cast<MeshNode>();

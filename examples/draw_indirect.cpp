@@ -378,7 +378,7 @@ class GfxMeshNode : public MeshNode {
     }
   }
 
-  void draw(rd::Imm_Ctx *ctx, Resource_ID vertex_buffer, size_t offset) {
+  void draw(rd::ICtx *ctx, Resource_ID vertex_buffer, size_t offset) {
     ito(attributes.size) {
       Attribute attr = attributes[i];
       ctx->IA_set_vertex_buffer(i, vertex_buffer, offset + attribute_offsets[i],
@@ -409,7 +409,7 @@ class GfxMeshNode : public MeshNode {
       vertex_cursor += primitives[i].mesh.num_vertices;
     }
   }
-  void dispatch(rd::Imm_Ctx *ctx, Resource_ID vertex_buffer, size_t offset,
+  void dispatch(rd::ICtx *ctx, Resource_ID vertex_buffer, size_t offset,
                 u32 push_offset) {
     static u32 attribute_to_location[] = {
         0xffffffffu, 0, 1, 2, 3, 4, 5, 6, 7, 8,
@@ -436,7 +436,7 @@ class GfxMeshNode : public MeshNode {
       vertex_cursor += primitives[i].mesh.num_vertices;
     }
   }
-  void dispatch_meshlets(rd::Imm_Ctx *ctx, Resource_ID vertex_buffer,
+  void dispatch_meshlets(rd::ICtx *ctx, Resource_ID vertex_buffer,
                          size_t offset, u32 push_offset) {
     static u32 attribute_to_location[] = {
         0xffffffffu, 0, 1, 2, 3, 4, 5, 6, 7, 8,
@@ -485,7 +485,7 @@ class Scene {
   bool                 dummy_initialized;
 
   friend class SceneFactory;
-  class SceneFactory : public IFactory {
+  class SceneFactory : public IDevice {
     Scene *scene;
 
 public:
@@ -591,7 +591,7 @@ public:
       staging_buffer      = rm->create_buffer(buf_info);
     }
   }
-  void gfx_bind(rd::Imm_Ctx *ctx) {
+  void gfx_bind(rd::ICtx *ctx) {
     if (dummy_initialized == false) {
       {
         u32 *ptr = (u32 *)ctx->map_buffer(staging_buffer);
@@ -621,17 +621,17 @@ public:
       }
     }
   }
-  void gfx_exec(rd::Imm_Ctx *ctx) {
+  void gfx_exec(rd::ICtx *ctx) {
     gfx_bind(ctx);
     ito(meshes.size) { meshes[i]->draw(ctx, vertex_buffer, mesh_offsets[i]); }
   }
-  void gfx_dispatch(rd::Imm_Ctx *ctx, u32 push_offset) {
+  void gfx_dispatch(rd::ICtx *ctx, u32 push_offset) {
     gfx_bind(ctx);
     ito(meshes.size) {
       meshes[i]->dispatch(ctx, vertex_buffer, mesh_offsets[i], push_offset);
     }
   }
-  void gfx_dispatch_meshlets(rd::Imm_Ctx *ctx, u32 push_offset) {
+  void gfx_dispatch_meshlets(rd::ICtx *ctx, u32 push_offset) {
     gfx_bind(ctx);
     ito(meshes.size) {
       meshes[i]->dispatch_meshlets(ctx, vertex_buffer, mesh_offsets[i],
@@ -659,7 +659,7 @@ public:
   }
 } g_scene;
 
-static void setup_default_state(rd::Imm_Ctx *ctx, u32 num_rts = 1) {
+static void setup_default_state(rd::ICtx *ctx, u32 num_rts = 1) {
   rd::Blend_State bs;
   MEMZERO(bs);
   bs.enabled          = false;
@@ -878,7 +878,7 @@ struct Instance_Info {
     }
     g_scene.on_pass_begin(pc);
   }
-  void exec(rd::Imm_Ctx *ctx) override {
+  void exec(rd::ICtx *ctx) override {
     if (g_config.enable_rasterization_pass == false) return;
     setup_default_state(ctx);
     rd::DS_State ds_state;
@@ -1151,7 +1151,7 @@ Vertex fetch(u32 index) {
       pc->assign_name(output_image, stref_s("compute_render/img0"));
     }
   }
-  void exec(rd::Imm_Ctx *ctx) override {
+  void exec(rd::ICtx *ctx) override {
     if (g_config.enable_compute_render_pass == false) return;
     ctx->image_barrier(output_image, (u32)rd::Access_Bits::SHADER_WRITE,
                        rd::Image_Layout::SHADER_READ_WRITE_OPTIMAL);
@@ -1442,7 +1442,7 @@ u32 fetch_index(u32 index) {
       pc->assign_name(output_image, stref_s("meshlet_render/img0"));
     }
   }
-  void exec(rd::Imm_Ctx *ctx) override {
+  void exec(rd::ICtx *ctx) override {
     if (g_config.enable_meshlets_render_pass == false) return;
     ctx->image_barrier(output_image, (u32)rd::Access_Bits::SHADER_WRITE,
                        rd::Image_Layout::SHADER_READ_WRITE_OPTIMAL);
@@ -1630,7 +1630,7 @@ float4 op_laplace(int2 coords) {
       feedback_buffer.fence = pc->get_fence(rd::Fence_Position::PASS_FINISED);
     }
   }
-  void exec(rd::Imm_Ctx *ctx) override {
+  void exec(rd::ICtx *ctx) override {
     if (input_image.is_null()) return;
     timer.update();
     ctx->CS_set_shader(cs);
@@ -1785,7 +1785,7 @@ class Merge_Pass : public rd::IPass {
     }
     my_image = pc->get_resource(stref_s("postprocess/img0"));
   }
-  void exec(rd::Imm_Ctx *ctx) override {
+  void exec(rd::ICtx *ctx) override {
     if (my_image.is_null()) return;
     timer.update();
     setup_default_state(ctx);
@@ -2125,7 +2125,7 @@ class GUI_Pass : public rd::IPass, public rd::IEvent_Consumer {
       index_buffer        = pc->create_buffer(buf_info);
     }
   }
-  void exec(rd::Imm_Ctx *ctx) override {
+  void exec(rd::ICtx *ctx) override {
     {
       ImDrawVert *vtx_dst = (ImDrawVert *)ctx->map_buffer(vertex_buffer);
       ImDrawIdx * idx_dst = (ImDrawIdx *)ctx->map_buffer(index_buffer);
