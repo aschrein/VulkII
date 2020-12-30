@@ -389,6 +389,29 @@ struct Render_Pass_Create_Info {
 
 static_assert(std::is_pod<Render_Pass_Create_Info>::value, "");
 
+enum class Binding_t : u32 { //
+  SAMPLER,
+  UNIFORM_BUFFER,
+  READ_ONLY_BUFFER,
+  UAV_BUFFER,
+  TEXTURE,
+  UAV_TEXTURE
+};
+
+struct Binding_Desc {
+  u32       binding;
+  Binding_t type;
+  u32       num_array_elems;
+};
+
+struct Binding_Table_Create_Info {
+  static constexpr u32                    MAX_BINDINGS = 0x40;
+  InlineArray<Binding_Desc, MAX_BINDINGS> bindings;
+  void                                    reset() { MEMZERO(*this); }
+};
+
+static_assert(std::is_pod<Binding_Table_Create_Info>::value, "");
+
 static inline u64 hash_of(RT_View const &pc) {
   return hash_of(string_ref{(char *)&pc, sizeof(pc)});
 }
@@ -487,31 +510,34 @@ class IDevice {
   virtual Resource_ID     create_buffer(Buffer_Create_Info info) = 0;
   virtual Resource_ID     create_shader(Stage_t type, string_ref text,
                                         Pair<string_ref, string_ref> *defines, size_t num_defines) = 0;
-  virtual Resource_ID     create_sampler(Sampler_Create_Info const &info)         = 0;
-  virtual void            release_resource(Resource_ID id)                        = 0;
-  virtual Resource_ID     create_event()                                          = 0;
-  virtual Resource_ID     create_timestamp()                                      = 0;
-  virtual Resource_ID     get_swapchain_image()                                   = 0;
-  virtual Image2D_Info    get_swapchain_image_info()                              = 0;
-  virtual Image_Info      get_image_info(Resource_ID res_id)                      = 0;
-  virtual void *          map_buffer(Resource_ID id)                              = 0;
-  virtual void            unmap_buffer(Resource_ID id)                            = 0;
-  virtual Resource_ID     create_render_pass(Render_Pass_Create_Info const &info) = 0;
-  virtual Resource_ID     create_graphics_pso(Resource_ID render_pass,
-                                              Graphics_Pipeline_State const &)    = 0;
-  virtual IBinding_Table *create_binding_table(Resource_ID pso_or_cs, u32 set)    = 0;
-  virtual ICtx *          start_render_pass(Resource_ID render_pass)              = 0;
-  virtual void            end_render_pass(ICtx *ctx)                              = 0;
-  virtual ICtx *          start_compute_pass()                                    = 0;
-  virtual void            end_compute_pass(ICtx *ctx)                             = 0;
-  virtual bool            get_timestamp_state(Resource_ID)                        = 0;
-  virtual double          get_timestamp_ms(Resource_ID t0, Resource_ID t1)        = 0;
-  virtual void            wait_idle()                                             = 0;
-  virtual bool            get_event_state(Resource_ID id)                         = 0;
-  virtual Impl_t          getImplType()                                           = 0;
-  virtual void            release()                                               = 0;
-  virtual void            start_frame()                                           = 0;
-  virtual void            end_frame()                                             = 0;
+  virtual Resource_ID     create_sampler(Sampler_Create_Info const &info)             = 0;
+  virtual void            release_resource(Resource_ID id)                            = 0;
+  virtual Resource_ID     create_event()                                              = 0;
+  virtual Resource_ID     create_timestamp()                                          = 0;
+  virtual Resource_ID     get_swapchain_image()                                       = 0;
+  virtual Image2D_Info    get_swapchain_image_info()                                  = 0;
+  virtual Image_Info      get_image_info(Resource_ID res_id)                          = 0;
+  virtual void *          map_buffer(Resource_ID id)                                  = 0;
+  virtual void            unmap_buffer(Resource_ID id)                                = 0;
+  virtual Resource_ID     create_render_pass(Render_Pass_Create_Info const &info)     = 0;
+  virtual Resource_ID     create_compute_pso(IBinding_Table **table, u32 num_tables,
+                                             Resource_ID cs)                          = 0;
+  virtual Resource_ID     create_graphics_pso(IBinding_Table **table, u32 num_tables,
+                                              Resource_ID render_pass,
+                                              Graphics_Pipeline_State const &)        = 0;
+  virtual IBinding_Table *create_binding_table(Binding_Table_Create_Info const &info) = 0;
+  virtual ICtx *          start_render_pass(Resource_ID render_pass)                  = 0;
+  virtual void            end_render_pass(ICtx *ctx)                                  = 0;
+  virtual ICtx *          start_compute_pass()                                        = 0;
+  virtual void            end_compute_pass(ICtx *ctx)                                 = 0;
+  virtual bool            get_timestamp_state(Resource_ID)                            = 0;
+  virtual double          get_timestamp_ms(Resource_ID t0, Resource_ID t1)            = 0;
+  virtual void            wait_idle()                                                 = 0;
+  virtual bool            get_event_state(Resource_ID id)                             = 0;
+  virtual Impl_t          getImplType()                                               = 0;
+  virtual void            release()                                                   = 0;
+  virtual void            start_frame()                                               = 0;
+  virtual void            end_frame()                                                 = 0;
 };
 
 class ICtx {

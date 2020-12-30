@@ -1,23 +1,23 @@
 #ifndef RENDERING_UTILS_HPP
-#  define RENDERING_UTILS_HPP
+#define RENDERING_UTILS_HPP
 
-#  include "rendering.hpp"
-#  include "scene.hpp"
-#  include "simplefont.h"
-#  include "utils.hpp"
+#include "rendering.hpp"
+#include "scene.hpp"
+#include "simplefont.h"
+#include "utils.hpp"
 
-#  ifdef __linux__
-#    include <SDL2/SDL.h>
-#    include <SDL2/SDL_syswm.h>
-#    include <X11/Xlib-xcb.h>
-#    include <xcb/xcb.h>
-#  else
-#    include <SDL.h>
-#    include <SDL_syswm.h>
-#  endif
+#ifdef __linux__
+#  include <SDL2/SDL.h>
+#  include <SDL2/SDL_syswm.h>
+#  include <X11/Xlib-xcb.h>
+#  include <xcb/xcb.h>
+#else
+#  include <SDL.h>
+#  include <SDL_syswm.h>
+#endif
 
-#  include <imgui.h>
-#  include <imgui/examples/imgui_impl_sdl.h>
+#include <imgui.h>
+#include <imgui/examples/imgui_impl_sdl.h>
 
 #endif
 
@@ -80,7 +80,8 @@ class RenderDoc_CTX {
 };
 
 f32 max3(float3 const &a) { return MAX3(a.x, a.y, a.z); }
-
+#if 0
+				
 static void setup_default_state(rd::Imm_Ctx *ctx, u32 num_rts = 1) {
   rd::Blend_State bs;
   MEMZERO(bs);
@@ -710,10 +711,10 @@ struct TimeStamp_Pool {
     ito(0x10) { factory->release_resource(timestamps[i]); }
   }
 };
-
+#endif // 0
 #if 1
 struct Mip_Builder {
-  static Resource_ID create_image(rd::IFactory *factory, Image2D const *image,
+  static Resource_ID create_image(rd::IDevice *factory, Image2D const *image,
                                   u32 usage = (u32)rd::Image_Usage_Bits::USAGE_SAMPLED) {
     Resource_ID           output_image;
     rd::Image_Create_Info info;
@@ -741,7 +742,13 @@ struct Mip_Builder {
     staging_buffer = factory->create_buffer(buf_info);
 
     TMP_STORAGE_SCOPE;
-    cs = factory->create_shader_raw(rd::Stage_t::COMPUTE, stref_s(R"(
+    rd::Binding_Table_Create_Info set_info{};
+    set_info.bindings.push({0, rd::Binding_t::UAV_BUFFER, 1});
+    set_info.bindings.push({1, rd::Binding_t::UAV_BUFFER, 1});
+    rd::IBinding_Table *set0 = factory->create_binding_table(set_info);
+    defer(set0->release());
+    cs = factory->create_compute_pso(&set0, 1,
+                                     factory->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
 struct PushConstants
 {
   u32 src_offset;
@@ -869,7 +876,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
 }
 
 )"),
-                                    NULL, 0);
+                                                            NULL, 0));
 
     void *ptr = factory->map_buffer(staging_buffer);
     memcpy(ptr, image->data, image->get_size_in_bytes());
@@ -896,10 +903,11 @@ void main(uint3 tid : SV_DispatchThreadID) {
       // clang-format on
     default: TRAP;
     }
-    rd::Imm_Ctx *ctx = factory->start_compute_pass();
-    ctx->bind_storage_buffer(0, 0, staging_buffer, 0, 0);
-    ctx->bind_storage_buffer(0, 1, staging_buffer, 0, 0);
-    ctx->CS_set_shader(cs);
+    rd::ICtx *ctx = factory->start_compute_pass();
+    set0->bind_UAV_buffer(0, staging_buffer, 0, 0);
+    set0->bind_UAV_buffer(1, staging_buffer, 0, 0);
+    ctx->bind_table(0, set0);
+    ctx->bind_compute(cs);
 
     InlineArray<u32, 0x10>  mip_offsets;
     InlineArray<int2, 0x10> mip_sizes;
@@ -948,7 +956,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     return output_image;
   }
 };
-
+#if 0
 struct Raw_Mesh_3p16i_Wrapper {
   Resource_ID vertex_buffer;
   Resource_ID index_buffer;
@@ -2195,4 +2203,5 @@ template <typename T> static void render_bvh(float4x4 const &t, BVH<T> *bvh, Giz
     gl->render_linebox(transform(t, node->min), transform(t, node->max), float3(1.0f, 0.0f, 0.0f));
   });
 }
+#endif
 #endif // RENDERING_UTILS_HPP

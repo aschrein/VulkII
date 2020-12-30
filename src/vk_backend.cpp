@@ -289,6 +289,20 @@ VkAccessFlags to_vk_access_flags(u32 flags) {
   return out;
 }
 
+VkDescriptorType to_vk(rd::Binding_t type) {
+  // clang-format off
+  switch (type) {
+  case rd::Binding_t::SAMPLER             : return VK_DESCRIPTOR_TYPE_SAMPLER;
+  case rd::Binding_t::READ_ONLY_BUFFER    : return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  case rd::Binding_t::TEXTURE             : return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+  case rd::Binding_t::UAV_BUFFER          : return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  case rd::Binding_t::UAV_TEXTURE         : return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+  case rd::Binding_t::UNIFORM_BUFFER      : return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+  default: UNIMPLEMENTED;
+  }
+  // clang-format on
+}
+
 VkImageLayout to_vk(rd::Image_Layout layout) {
   // clang-format off
   switch (layout) {
@@ -903,6 +917,8 @@ struct Descriptor_Pool {
     info.poolSizeCount = ARRAY_SIZE(aPoolSizes);
     info.pPoolSizes    = aPoolSizes;
     info.maxSets       = 1024;
+    info.flags         = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT |
+                 VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
     VK_ASSERT_OK(vkCreateDescriptorPool(device, &info, NULL, &pool));
     this->device = device;
   }
@@ -973,9 +989,10 @@ struct Shader_Reflection {
 
       ito(num_bindings) {
         if (set_bindings[i].descriptorCount > 1) {
-          binding_flags[i] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+          binding_flags[i] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
+                             VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
         } else {
-          binding_flags[i] = 0;
+          binding_flags[i] = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
         }
       }
       ASSERT_DEBUG(num_bindings < MAX_BINDINGS);
@@ -1074,20 +1091,44 @@ Shader_Reflection reflect_shader(Shader_Info const &info) {
   return out;
 }
 
+class VkDeviceContext;
+
+class VK_Binding_Table : public rd::IBinding_Table {
+  private:
+  VkDeviceContext *     dev_ctx    = NULL;
+  VkDescriptorSet       set        = VK_NULL_HANDLE;
+  VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
+  Resource_ID           set_res_id{};
+
+  public:
+  static VK_Binding_Table *create(VkDeviceContext *                    dev_ctx,
+                                  rd::Binding_Table_Create_Info const &info);
+  VkDescriptorSet          get_set();
+  VkDescriptorSetLayout    get_set_layout();
+  void bind_cbuffer(u32 binding, Resource_ID buf_id, size_t offset, size_t size) override;
+  void bind_sampler(u32 binding, Resource_ID sampler_id) override;
+  void bind_UAV_buffer(u32 binding, Resource_ID buf_id, size_t offset, size_t size) override;
+  void bind_texture(u32 binding, u32 index, Resource_ID image_id,
+                    rd::Image_Subresource const &range, rd::Format format) override;
+  void bind_UAV_texture(u32 binding, u32 index, Resource_ID image_id,
+                        rd::Image_Subresource const &range, rd::Format format) override;
+  void release() override;
+  void clear_bindings() override { TRAP; }
+};
+
 struct Graphics_Pipeline_Wrapper : public Slot {
-  VkPipelineLayout                      pipeline_layout;
-  VkPipeline                            pipeline;
-  VkShaderModule                        ps_module;
-  VkShaderModule                        vs_module;
-  InlineArray<VkDescriptorSetLayout, 8> set_layouts;
-  u32                                   push_constants_size;
+  VkPipelineLayout pipeline_layout;
+  VkPipeline       pipeline;
+  VkShaderModule   ps_module;
+  VkShaderModule   vs_module;
+  u32              push_constants_size;
 
   void release(VkDevice device) {
-    ito(set_layouts.size) {
-      if (set_layouts[i] != VK_NULL_HANDLE)
-        vkDestroyDescriptorSetLayout(device, set_layouts[i], NULL);
-    }
-    set_layouts.release();
+    // ito(set_layouts.size) {
+    // if (set_layouts[i] != VK_NULL_HANDLE)
+    // vkDestroyDescriptorSetLayout(device, set_layouts[i], NULL);
+    //}
+    // set_layouts.release();
     // bindings.release();
     vkDestroyPipelineLayout(device, pipeline_layout, NULL);
     vkDestroyPipeline(device, pipeline, NULL);
@@ -1096,23 +1137,28 @@ struct Graphics_Pipeline_Wrapper : public Slot {
     MEMZERO(*this);
   }
 
-  void init(VkDevice                 device,    //
-            Render_Pass &            pass,      //
-            Shader_Info &            vs_shader, //
-            Shader_Info &            ps_shader, //
+  void init(VkDevice             device,                                   //
+            rd::IBinding_Table **table, u32 num_tables, Render_Pass &pass, //
+            Shader_Info &            vs_shader,                            //
+            Shader_Info &            ps_shader,                            //
             Graphics_Pipeline_State &pipeline_info) {
     MEMZERO(*this);
     (void)pipeline_info;
-    Hash_Set<Pair<u32, u32>> bindings_set;
-    bindings_set.init();
-    defer(bindings_set.release());
+    // Hash_Set<Pair<u32, u32>> bindings_set;
+    // bindings_set.init();
+    // defer(bindings_set.release());
+    InlineArray<VkDescriptorSetLayout, 8> set_layouts;
     MEMZERO(set_layouts);
     push_constants_size = 0;
     VkPipelineShaderStageCreateInfo stages[2];
-    Shader_Reflection::Table<u32, Shader_Reflection::Table<u32, Shader_Descriptor>>
-        merged_set_table;
-    merged_set_table.init();
-    defer(merged_set_table.release());
+    // Shader_Reflection::Table<u32, Shader_Reflection::Table<u32, Shader_Descriptor>>
+    //    merged_set_table;
+    // merged_set_table.init();
+    // defer(merged_set_table.release());
+    ito(num_tables) {
+      VK_Binding_Table *vk_table = (VK_Binding_Table *)table[i];
+      set_layouts.push(vk_table->get_set_layout());
+    }
     {
       vs_module = vs_shader.compile(device);
       VkPipelineShaderStageCreateInfo stage;
@@ -1124,7 +1170,7 @@ struct Graphics_Pipeline_Wrapper : public Slot {
       stages[0]                       = stage;
       Shader_Reflection vs_reflection = reflect_shader(vs_shader);
       push_constants_size             = MAX(vs_reflection.push_constants_size, push_constants_size);
-      vs_reflection.merge_into(merged_set_table);
+      // vs_reflection.merge_into(merged_set_table);
       defer(vs_reflection.release(device));
     }
     {
@@ -1138,16 +1184,16 @@ struct Graphics_Pipeline_Wrapper : public Slot {
       stages[1]                       = stage;
       Shader_Reflection ps_reflection = reflect_shader(ps_shader);
       push_constants_size             = MAX(ps_reflection.push_constants_size, push_constants_size);
-      ps_reflection.merge_into(merged_set_table);
+      // ps_reflection.merge_into(merged_set_table);
       defer(ps_reflection.release(device));
     }
-    merged_set_table.iter_pairs(
+    /*merged_set_table.iter_pairs(
         [&](u32 set, Shader_Reflection::Table<u32, Shader_Descriptor> &bindings) {
           bindings.iter_pairs([&](u32 index, Shader_Descriptor &binding) {
             bindings_set.insert({set, index});
           });
-        });
-    Shader_Reflection::create_layouts(device, merged_set_table, set_layouts);
+        });*/
+    // Shader_Reflection::create_layouts(device, merged_set_table, set_layouts);
     {
       VkPipelineLayoutCreateInfo pipe_layout_info;
       MEMZERO(pipe_layout_info);
@@ -1275,38 +1321,38 @@ struct CommandBuffer : public Slot {
 };
 
 struct Compute_Pipeline_Wrapper : public Slot {
-  VkPipelineLayout                      pipeline_layout;
-  VkPipeline                            pipeline;
-  VkShaderModule                        cs_module;
-  InlineArray<VkDescriptorSetLayout, 8> set_layouts;
-  u32                                   push_constants_size;
-  ID                                    shader_id;
-  void                                  release(VkDevice device) {
-    ito(set_layouts.size) {
-      if (set_layouts[i] != VK_NULL_HANDLE)
-        vkDestroyDescriptorSetLayout(device, set_layouts[i], NULL);
-    }
-    set_layouts.release();
+  VkPipelineLayout pipeline_layout;
+  VkPipeline       pipeline;
+  VkShaderModule   cs_module;
+  u32              push_constants_size;
+  ID               shader_id;
+  void             release(VkDevice device) {
+    /* ito(set_layouts.size) {
+       if (set_layouts[i] != VK_NULL_HANDLE)
+         vkDestroyDescriptorSetLayout(device, set_layouts[i], NULL);
+     }*/
+    // set_layouts.release();
     vkDestroyPipelineLayout(device, pipeline_layout, NULL);
     vkDestroyPipeline(device, pipeline, NULL);
     vkDestroyShaderModule(device, cs_module, NULL);
     MEMZERO(*this);
   }
 
-  void init(VkDevice     device, //
-            Shader_Info &cs_shader) {
+  void init(VkDevice             device, //
+            rd::IBinding_Table **table, u32 num_tables, Shader_Info &cs_shader) {
     MEMZERO(*this);
+    InlineArray<VkDescriptorSetLayout, 8> set_layouts;
     MEMZERO(set_layouts);
     shader_id = cs_shader.id;
-    Hash_Set<Pair<u32, u32>> bindings_set;
-    bindings_set.init();
-    defer(bindings_set.release());
+    // Hash_Set<Pair<u32, u32>> bindings_set;
+    // bindings_set.init();
+    // defer(bindings_set.release());
     push_constants_size = 0;
     VkPipelineShaderStageCreateInfo stages[1];
-    Shader_Reflection::Table<u32, Shader_Reflection::Table<u32, Shader_Descriptor>>
-        merged_set_table;
-    merged_set_table.init();
-    defer(merged_set_table.release());
+    // Shader_Reflection::Table<u32, Shader_Reflection::Table<u32, Shader_Descriptor>>
+    // merged_set_table;
+    // merged_set_table.init();
+    // defer(merged_set_table.release());
     {
       cs_module = cs_shader.compile(device);
       VkPipelineShaderStageCreateInfo stage;
@@ -1318,16 +1364,20 @@ struct Compute_Pipeline_Wrapper : public Slot {
       stages[0]                       = stage;
       Shader_Reflection cs_reflection = reflect_shader(cs_shader);
       push_constants_size             = MAX(cs_reflection.push_constants_size, push_constants_size);
-      cs_reflection.merge_into(merged_set_table);
+      // cs_reflection.merge_into(merged_set_table);
       defer(cs_reflection.release(device));
     }
-    merged_set_table.iter_pairs(
+    /*merged_set_table.iter_pairs(
         [&](u32 set, Shader_Reflection::Table<u32, Shader_Descriptor> &bindings) {
           bindings.iter_pairs([&](u32 index, Shader_Descriptor &binding) {
             bindings_set.insert({set, index});
           });
-        });
-    Shader_Reflection::create_layouts(device, merged_set_table, set_layouts);
+        });*/
+    // Shader_Reflection::create_layouts(device, merged_set_table, set_layouts);
+    ito(num_tables) {
+      VK_Binding_Table *vk_table = (VK_Binding_Table *)table[i];
+      set_layouts.push(vk_table->get_set_layout());
+    }
     {
       VkPipelineLayoutCreateInfo pipe_layout_info;
       MEMZERO(pipe_layout_info);
@@ -2304,6 +2354,10 @@ struct VkDeviceContext {
     } else if (res_id.type == (u32)Resource_Type::SAMPLER) {
       samplers.remove(res_id.id, 3);
     } else if (res_id.type == (u32)Resource_Type::TIMESTAMP) {
+    } else if (res_id.type == (u32)Resource_Type::GRAPHICS_PSO) {
+      pipelines.remove(res_id.id, 3);
+    } else if (res_id.type == (u32)Resource_Type::COMPUTE_PSO) {
+      compute_pipelines.remove(res_id.id, 3);
     } else {
       TRAP;
     }
@@ -2902,170 +2956,51 @@ u64 hash_of(Resource_Path const &path) {
   return ::hash_of(path.set) ^ ::hash_of(path.binding) ^ ::hash_of(path.element);
 }
 
-class VK_Binding_Table : public rd::IBinding_Table {
-  private:
-  VkDeviceContext *dev_ctx = NULL;
-  VkDescriptorSet  set     = VK_NULL_HANDLE;
-  VkPipelineLayout layout  = VK_NULL_HANDLE;
-  Resource_ID      set_res_id{};
-
-  public:
-  void bind(VkCommandBuffer cmd, VkPipelineBindPoint bind_point) {
-    vkCmdBindDescriptorSets(cmd, bind_point, layout, 0, 1, &set, 0, NULL);
-  }
-  static VK_Binding_Table *create(VkDeviceContext *dev_ctx, Graphics_Pipeline_Wrapper *gw,
-                                  u32 set_id) {
-    VK_Binding_Table *out = new VK_Binding_Table;
-    out->dev_ctx          = dev_ctx;
-    out->set              = dev_ctx->allocate_set(gw->set_layouts[set_id]);
-    out->layout           = gw->pipeline_layout;
-    out->set_res_id       = {dev_ctx->sets.push(DescriptorSet(out->set)), (u32)Resource_Type::SET};
-    return out;
-  }
-  static VK_Binding_Table *create(VkDeviceContext *dev_ctx, Compute_Pipeline_Wrapper *cw,
-                                  u32 set_id) {
-    VK_Binding_Table *out = new VK_Binding_Table;
-    out->dev_ctx          = dev_ctx;
-    out->set              = dev_ctx->allocate_set(cw->set_layouts[set_id]);
-    out->layout           = cw->pipeline_layout;
-    out->set_res_id       = {dev_ctx->sets.push(DescriptorSet(out->set)), (u32)Resource_Type::SET};
-    return out;
-  }
-  VkDescriptorSet get_set() { return set; }
-  void bind_cbuffer(u32 binding, Resource_ID buf_id, size_t offset, size_t size) override {
-    Buffer                 buffer = dev_ctx->buffers.read(buf_id.id);
-    VkDescriptorBufferInfo binfo;
-    MEMZERO(binfo);
-    binfo.buffer = buffer.buffer;
-    binfo.offset = offset;
-    binfo.range  = size;
-    VkWriteDescriptorSet wset;
-    MEMZERO(wset);
-    wset.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    wset.descriptorCount = 1;
-    wset.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    wset.dstArrayElement = 0;
-    wset.dstBinding      = binding;
-    wset.dstSet          = set;
-    wset.pBufferInfo     = &binfo;
-    vkUpdateDescriptorSets(dev_ctx->device, 1, &wset, 0, NULL);
-  }
-  void bind_sampler(u32 binding, Resource_ID sampler_id) override {
-    VkDescriptorImageInfo binfo;
-    MEMZERO(binfo);
-    Sampler sampler   = dev_ctx->samplers.read(sampler_id.id);
-    binfo.imageLayout = VK_IMAGE_LAYOUT_MAX_ENUM;
-    binfo.imageView   = VK_NULL_HANDLE;
-    binfo.sampler     = sampler.sampler;
-    VkWriteDescriptorSet wset;
-    MEMZERO(wset);
-    wset.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    wset.descriptorCount = 1;
-    wset.descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLER;
-    wset.dstArrayElement = 0;
-    wset.dstBinding      = binding;
-    wset.dstSet          = set;
-    wset.pImageInfo      = &binfo;
-    vkUpdateDescriptorSets(dev_ctx->device, 1, &wset, 0, NULL);
-  }
-  void bind_UAV_buffer(u32 binding, Resource_ID buf_id, size_t offset, size_t size) override {
-    Buffer                 buffer = dev_ctx->buffers.read(buf_id.id);
-    VkDescriptorBufferInfo binfo;
-    MEMZERO(binfo);
-    binfo.buffer = buffer.buffer;
-    binfo.offset = offset;
-    binfo.range  = size;
-    VkWriteDescriptorSet wset;
-    MEMZERO(wset);
-    wset.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    wset.descriptorCount = 1;
-    wset.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    wset.dstArrayElement = 0;
-    wset.dstBinding      = binding;
-    wset.dstSet          = set;
-    wset.pBufferInfo     = &binfo;
-    vkUpdateDescriptorSets(dev_ctx->device, 1, &wset, 0, NULL);
-  }
-  void bind_texture(u32 binding, u32 index, Resource_ID image_id,
-                    rd::Image_Subresource const &range, rd::Format format) override {
-    VkDescriptorImageInfo binfo;
-    MEMZERO(binfo);
-    Image    img = dev_ctx->images.read(image_id.id);
-    VkFormat vkformat{};
-    if (format == rd::Format::NATIVE)
-      vkformat = img.info.format;
-    else
-      vkformat = to_vk(format);
-    ID view_id = dev_ctx
-                     ->create_image_view(img.id, range.level, range.num_levels, range.layer,
-                                         range.num_layers, vkformat)
-                     .id;
-    ImageView view    = dev_ctx->image_views.read(view_id);
-    binfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    binfo.imageView   = view.view;
-    binfo.sampler     = VK_NULL_HANDLE;
-    VkWriteDescriptorSet wset;
-    MEMZERO(wset);
-    wset.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    wset.descriptorCount = 1;
-    wset.descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-    wset.dstArrayElement = index;
-    wset.dstBinding      = binding;
-    wset.dstSet          = set;
-    wset.pImageInfo      = &binfo;
-    vkUpdateDescriptorSets(dev_ctx->device, 1, &wset, 0, NULL);
-  }
-  void bind_UAV_texture(u32 binding, u32 index, Resource_ID image_id,
-                        rd::Image_Subresource const &range, rd::Format format) override {
-    VkDescriptorImageInfo binfo;
-    MEMZERO(binfo);
-    Image    img = dev_ctx->images.read(image_id.id);
-    VkFormat vkformat{};
-    if (format == rd::Format::NATIVE)
-      vkformat = img.info.format;
-    else
-      vkformat = to_vk(format);
-    ID view_id = dev_ctx
-                     ->create_image_view(img.id, range.level, range.num_levels, range.layer,
-                                         range.num_layers, vkformat)
-                     .id;
-    ImageView view    = dev_ctx->image_views.read(view_id);
-    binfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    binfo.imageView   = view.view;
-    binfo.sampler     = VK_NULL_HANDLE;
-    VkWriteDescriptorSet wset;
-    MEMZERO(wset);
-    wset.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    wset.descriptorCount = 1;
-    wset.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    wset.dstArrayElement = index;
-    wset.dstBinding      = binding;
-    wset.dstSet          = set;
-    wset.pImageInfo      = &binfo;
-    vkUpdateDescriptorSets(dev_ctx->device, 1, &wset, 0, NULL);
-  }
-  void release() override {
-    // Deferred release
-    dev_ctx->release_resource(set_res_id);
-    delete this;
-  }
-  void clear_bindings() override { TRAP; }
-};
-
 class Vk_Ctx : public rd::ICtx {
   private:
-  rd::Pass_t       type{};
-  VkDeviceContext *dev_ctx;
-  ID               graphics_pso{};
-  ID               cs{};
-  Resource_ID      cmd_id{};
-  VkCommandBuffer  cmd{};
-  ID               cur_pass{};
+  rd::Pass_t           type{};
+  VkDeviceContext *    dev_ctx;
+  ID                   graphics_pso{};
+  ID                   cs{};
+  Resource_ID          cmd_id{};
+  VkCommandBuffer      cmd{};
+  ID                   cur_pass{};
+  static constexpr int MAX_SETS = 0x10;
+  u8                   push_constants_storage[128]{};
+  VK_Binding_Table *   binding_tables[MAX_SETS] = {};
 
   template <typename K, typename V> using Table = Hash_Table<K, V, Default_Allocator, 0x1000>;
   Table<Resource_ID, BufferLaoutTracker> buffer_layouts;
   Table<Resource_ID, ImageLayoutTracker> image_layouts;
   Pool<u8>                               tmp_pool;
+
+  void _bind_sets() {
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    if (type == rd::Pass_t::RENDER) {
+      Graphics_Pipeline_Wrapper gw = dev_ctx->pipelines.read(graphics_pso);
+      layout                       = gw.pipeline_layout;
+      if (gw.push_constants_size) {
+        vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_ALL_GRAPHICS, 0, gw.push_constants_size,
+                           push_constants_storage);
+      }
+    } else if (type == rd::Pass_t::COMPUTE) {
+      Compute_Pipeline_Wrapper gw = dev_ctx->compute_pipelines.read(cs);
+      layout                      = gw.pipeline_layout;
+      if (gw.push_constants_size) {
+        vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, gw.push_constants_size,
+                           push_constants_storage);
+      }
+    } else {
+      TRAP;
+    }
+    ito(MAX_SETS) {
+      if (binding_tables[i] == NULL) continue;
+      VkPipelineBindPoint bind_point = type == rd::Pass_t::RENDER ? VK_PIPELINE_BIND_POINT_GRAPHICS
+                                                                  : VK_PIPELINE_BIND_POINT_COMPUTE;
+      VkDescriptorSet set = binding_tables[i]->get_set();
+      vkCmdBindDescriptorSets(cmd, bind_point, layout, 0, 1, &set, 0, NULL);
+    }
+  }
 
   VkImageLayout _get_image_layout(Resource_ID img_id) {
     if (!image_layouts.contains(img_id)) {
@@ -3181,6 +3116,8 @@ class Vk_Ctx : public rd::ICtx {
     vkCmdCopyBufferToImage(cmd, buffer.buffer, image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
                            &info);
   }
+
+  public:
   void start_render_pass() override {
     Render_Pass pass = dev_ctx->render_passes.read(cur_pass);
     ito(pass.create_info.rts.size) {
@@ -3205,7 +3142,6 @@ class Vk_Ctx : public rd::ICtx {
   }
   void end_render_pass() override { vkCmdEndRenderPass(cmd); }
 
-  public:
   // u64  get_dt() { return last_ms; }
   void reset() {
     vkResetCommandBuffer(cmd, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
@@ -3293,8 +3229,7 @@ class Vk_Ctx : public rd::ICtx {
   }
   void bind_table(u32 set, rd::IBinding_Table *table) override {
     VK_Binding_Table *vk_table = (VK_Binding_Table *)table;
-    vk_table->bind(cmd, type == rd::Pass_t::RENDER ? VK_PIPELINE_BIND_POINT_GRAPHICS
-                                                   : VK_PIPELINE_BIND_POINT_COMPUTE);
+    binding_tables[set]        = vk_table;
   }
   void set_viewport(float x, float y, float width, float height, float mindepth,
                     float maxdepth) override {
@@ -3327,17 +3262,7 @@ class Vk_Ctx : public rd::ICtx {
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, pool, id.id.index());
   }
   void push_constants(void const *data, size_t offset, size_t size) override {
-    if (type == rd::Pass_t::RENDER) {
-      ASSERT_ALWAYS(graphics_pso.is_valid());
-      Graphics_Pipeline_Wrapper gw = dev_ctx->pipelines.read(graphics_pso);
-      vkCmdPushConstants(cmd, gw.pipeline_layout, VK_SHADER_STAGE_ALL_GRAPHICS, offset, size, data);
-    } else if (type == rd::Pass_t::COMPUTE) {
-      ASSERT_ALWAYS(cs.is_valid());
-      Compute_Pipeline_Wrapper gw = dev_ctx->compute_pipelines.read(cs);
-      vkCmdPushConstants(cmd, gw.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, offset, size, data);
-    } else {
-      TRAP;
-    }
+    memcpy(push_constants_storage + offset, data, size);
   }
   void copy_image_to_buffer(Resource_ID buf_id, size_t offset, Resource_ID img_id,
                             rd::Image_Copy const &dst_info) override {
@@ -3354,11 +3279,13 @@ class Vk_Ctx : public rd::ICtx {
   void draw_indexed(u32 index_count, u32 instance_count, u32 first_index, u32 first_instance,
                     i32 vertex_offset) override {
     ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
+    _bind_sets();
     vkCmdDrawIndexed(cmd, index_count, instance_count, first_index, vertex_offset, first_instance);
   }
 
   void draw(u32 vertex_count, u32 instance_count, u32 first_vertex, u32 first_instance) override {
     ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
+    _bind_sets();
     vkCmdDraw(cmd, vertex_count, instance_count, first_vertex, first_instance);
   }
   void multi_draw_indexed_indirect(Resource_ID arg_buf_id, u32 arg_buf_offset,
@@ -3366,11 +3293,13 @@ class Vk_Ctx : public rd::ICtx {
                                    u32 stride) override {
     Buffer arg_buf = dev_ctx->buffers.read(arg_buf_id.id);
     Buffer cnt_buf = dev_ctx->buffers.read(cnt_buf_id.id);
+    _bind_sets();
     vkCmdDrawIndexedIndirectCount(cmd, arg_buf.buffer, arg_buf_offset, cnt_buf.buffer,
                                   cnt_buf_offset, max_count, stride);
   }
   void dispatch(u32 dim_x, u32 dim_y, u32 dim_z) override {
     ASSERT_ALWAYS(type == rd::Pass_t::COMPUTE);
+    _bind_sets();
     vkCmdDispatch(cmd, dim_x, dim_y, dim_z);
   }
   virtual void image_barrier(Resource_ID image_id, u32 access_flags,
@@ -3465,7 +3394,8 @@ class VkFactory : public rd::IDevice {
     return dev_ctx->create_image(info.width, info.height, info.depth, info.layers, info.levels,
                                  to_vk(info.format), info.usage_bits, info.mem_bits);
   }
-  Resource_ID create_graphics_pso(Resource_ID                        render_pass,
+  Resource_ID create_graphics_pso(rd::IBinding_Table **table, u32 num_tables,
+                                  Resource_ID                        render_pass,
                                   rd::Graphics_Pipeline_State const &state) override {
     Graphics_Pipeline_State   graphics_state = dev_ctx->convert_graphics_state(state);
     Graphics_Pipeline_Wrapper gw;
@@ -3474,8 +3404,16 @@ class VkFactory : public rd::IDevice {
     Shader_Info ps   = dev_ctx->shaders.read(graphics_state.ps);
     Shader_Info vs   = dev_ctx->shaders.read(graphics_state.vs);
     Render_Pass pass = dev_ctx->render_passes.read(render_pass.id);
-    gw.init(dev_ctx->device, pass, vs, ps, graphics_state);
+    gw.init(dev_ctx->device, table, num_tables, pass, vs, ps, graphics_state);
     return {dev_ctx->pipelines.push(gw), (u32)Resource_Type::GRAPHICS_PSO};
+  }
+  Resource_ID create_compute_pso(rd::IBinding_Table **table, u32 num_tables,
+                                 Resource_ID cs) override {
+    Compute_Pipeline_Wrapper gw;
+    Shader_Info              cs_info = dev_ctx->shaders.read(cs.id);
+    gw.init(dev_ctx->device, table, num_tables, cs_info);
+    ID pipe_id = dev_ctx->compute_pipelines.push(gw);
+    return {pipe_id, (u32)Resource_Type::COMPUTE_PSO};
   }
   Resource_ID create_buffer(rd::Buffer_Create_Info info) override {
     std::lock_guard<std::mutex> _lock(mutex);
@@ -3491,14 +3429,6 @@ class VkFactory : public rd::IDevice {
   Resource_ID create_shader(rd::Stage_t type, string_ref body,
                             Pair<string_ref, string_ref> *defines, size_t num_defines) override {
     std::lock_guard<std::mutex> _lock(mutex);
-    if (type == rd::Stage_t::COMPUTE) {
-      Compute_Pipeline_Wrapper gw;
-      Resource_ID shader_id = dev_ctx->create_shader_raw(type, body, defines, num_defines);
-      Shader_Info cs_info   = dev_ctx->shaders.read(shader_id.id);
-      gw.init(dev_ctx->device, cs_info);
-      ID pipe_id = dev_ctx->compute_pipelines.push(gw);
-      return {pipe_id, (u32)Resource_Type::COMPUTE_PSO};
-    }
     return dev_ctx->create_shader_raw(type, body, defines, num_defines);
   }
   void *map_buffer(Resource_ID res_id) override {
@@ -3727,16 +3657,8 @@ class VkFactory : public rd::IDevice {
   Resource_ID create_timestamp() override {
     return {dev_ctx->allocate_timestamp_id(), (u32)Resource_Type::TIMESTAMP};
   }
-  rd::IBinding_Table *create_binding_table(Resource_ID pso_or_cs, u32 set) override {
-    if (pso_or_cs.type == (u32)Resource_Type::GRAPHICS_PSO) {
-      Graphics_Pipeline_Wrapper gw = dev_ctx->pipelines.read(pso_or_cs.id);
-      return VK_Binding_Table::create(dev_ctx, &gw, set);
-    } else if (pso_or_cs.type == (u32)Resource_Type::COMPUTE_PSO) {
-      Compute_Pipeline_Wrapper gw = dev_ctx->compute_pipelines.read(pso_or_cs.id);
-      return VK_Binding_Table::create(dev_ctx, &gw, set);
-    } else {
-      TRAP;
-    }
+  rd::IBinding_Table *create_binding_table(rd::Binding_Table_Create_Info const &info) override {
+    return VK_Binding_Table::create(dev_ctx, info);
   }
   void end_compute_pass(rd::ICtx *_ctx) override {
     std::lock_guard<std::mutex> _lock(mutex);
@@ -3777,6 +3699,182 @@ class VkFactory : public rd::IDevice {
       dev_ctx->end_frame(NULL);
   }
 };
+
+//////////////////////////////////
+/// VK_Binding_Table
+
+VK_Binding_Table *VK_Binding_Table::create(VkDeviceContext *                    dev_ctx,
+                                           rd::Binding_Table_Create_Info const &info) {
+  VkDescriptorBindingFlags     binding_flags[rd::Binding_Table_Create_Info::MAX_BINDINGS];
+  u32                          num_bindings = 0;
+  VkDescriptorSetLayoutBinding set_bindings[rd::Binding_Table_Create_Info::MAX_BINDINGS];
+  ito(info.bindings.size) {
+    auto                         dinfo = info.bindings[i];
+    VkDescriptorSetLayoutBinding binding_info;
+    MEMZERO(binding_info);
+    binding_info.binding            = dinfo.binding;
+    binding_info.descriptorCount    = dinfo.num_array_elems;
+    binding_info.descriptorType     = to_vk(dinfo.type);
+    binding_info.pImmutableSamplers = NULL;
+    binding_info.stageFlags         = VK_SHADER_STAGE_ALL;
+    set_bindings[num_bindings++]    = binding_info;
+  };
+  VkDescriptorSetLayoutBindingFlagsCreateInfo binding_infos;
+
+  ito(num_bindings) {
+    if (set_bindings[i].descriptorCount > 1) {
+      binding_flags[i] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+    } else {
+      binding_flags[i] = 0;
+    }
+  }
+  ASSERT_DEBUG(num_bindings < rd::Binding_Table_Create_Info::MAX_BINDINGS);
+  binding_infos.bindingCount  = num_bindings;
+  binding_infos.pBindingFlags = &binding_flags[0];
+  binding_infos.pNext         = NULL;
+  binding_infos.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+
+  VkDescriptorSetLayoutCreateInfo set_layout_create_info;
+  MEMZERO(set_layout_create_info);
+  set_layout_create_info.bindingCount = num_bindings;
+  set_layout_create_info.pBindings    = &set_bindings[0];
+  set_layout_create_info.flags = 0 | VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+  set_layout_create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+  set_layout_create_info.pNext = (void *)&binding_infos;
+  VkDescriptorSetLayout set_layout;
+  VK_ASSERT_OK(
+      vkCreateDescriptorSetLayout(dev_ctx->device, &set_layout_create_info, NULL, &set_layout));
+  VK_Binding_Table *out = new VK_Binding_Table;
+  out->dev_ctx          = dev_ctx;
+  out->set              = dev_ctx->allocate_set(set_layout);
+  out->set_layout       = set_layout;
+  out->set_res_id       = {dev_ctx->sets.push(DescriptorSet(out->set)), (u32)Resource_Type::SET};
+  return out;
+}
+VkDescriptorSet       VK_Binding_Table::get_set() { return set; }
+VkDescriptorSetLayout VK_Binding_Table::get_set_layout() { return set_layout; }
+void VK_Binding_Table::bind_cbuffer(u32 binding, Resource_ID buf_id, size_t offset, size_t size) {
+  Buffer                 buffer = dev_ctx->buffers.read(buf_id.id);
+  VkDescriptorBufferInfo binfo;
+  MEMZERO(binfo);
+  binfo.buffer = buffer.buffer;
+  binfo.offset = offset;
+  if (size == 0) size = VK_WHOLE_SIZE;
+  binfo.range = size;
+  VkWriteDescriptorSet wset;
+  MEMZERO(wset);
+  wset.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+  wset.descriptorCount = 1;
+  wset.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+  wset.dstArrayElement = 0;
+  wset.dstBinding      = binding;
+  wset.dstSet          = set;
+  wset.pBufferInfo     = &binfo;
+  vkUpdateDescriptorSets(dev_ctx->device, 1, &wset, 0, NULL);
+}
+void VK_Binding_Table::bind_sampler(u32 binding, Resource_ID sampler_id) {
+  VkDescriptorImageInfo binfo;
+  MEMZERO(binfo);
+  Sampler sampler   = dev_ctx->samplers.read(sampler_id.id);
+  binfo.imageLayout = VK_IMAGE_LAYOUT_MAX_ENUM;
+  binfo.imageView   = VK_NULL_HANDLE;
+  binfo.sampler     = sampler.sampler;
+  VkWriteDescriptorSet wset;
+  MEMZERO(wset);
+  wset.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+  wset.descriptorCount = 1;
+  wset.descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLER;
+  wset.dstArrayElement = 0;
+  wset.dstBinding      = binding;
+  wset.dstSet          = set;
+  wset.pImageInfo      = &binfo;
+  vkUpdateDescriptorSets(dev_ctx->device, 1, &wset, 0, NULL);
+}
+void VK_Binding_Table::bind_UAV_buffer(u32 binding, Resource_ID buf_id, size_t offset,
+                                       size_t size) {
+  Buffer                 buffer = dev_ctx->buffers.read(buf_id.id);
+  VkDescriptorBufferInfo binfo;
+  MEMZERO(binfo);
+  binfo.buffer = buffer.buffer;
+  binfo.offset = offset;
+  if (size == 0) size = VK_WHOLE_SIZE;
+  binfo.range = size;
+  VkWriteDescriptorSet wset;
+  MEMZERO(wset);
+  wset.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+  wset.descriptorCount = 1;
+  wset.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  wset.dstArrayElement = 0;
+  wset.dstBinding      = binding;
+  wset.dstSet          = set;
+  wset.pBufferInfo     = &binfo;
+  vkUpdateDescriptorSets(dev_ctx->device, 1, &wset, 0, NULL);
+}
+void VK_Binding_Table::bind_texture(u32 binding, u32 index, Resource_ID image_id,
+                                    rd::Image_Subresource const &range, rd::Format format) {
+  VkDescriptorImageInfo binfo;
+  MEMZERO(binfo);
+  Image    img = dev_ctx->images.read(image_id.id);
+  VkFormat vkformat{};
+  if (format == rd::Format::NATIVE)
+    vkformat = img.info.format;
+  else
+    vkformat = to_vk(format);
+  ID view_id = dev_ctx
+                   ->create_image_view(img.id, range.level, range.num_levels, range.layer,
+                                       range.num_layers, vkformat)
+                   .id;
+  ImageView view    = dev_ctx->image_views.read(view_id);
+  binfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  binfo.imageView   = view.view;
+  binfo.sampler     = VK_NULL_HANDLE;
+  VkWriteDescriptorSet wset;
+  MEMZERO(wset);
+  wset.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+  wset.descriptorCount = 1;
+  wset.descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+  wset.dstArrayElement = index;
+  wset.dstBinding      = binding;
+  wset.dstSet          = set;
+  wset.pImageInfo      = &binfo;
+  vkUpdateDescriptorSets(dev_ctx->device, 1, &wset, 0, NULL);
+}
+void VK_Binding_Table::bind_UAV_texture(u32 binding, u32 index, Resource_ID image_id,
+                                        rd::Image_Subresource const &range, rd::Format format) {
+  VkDescriptorImageInfo binfo;
+  MEMZERO(binfo);
+  Image    img = dev_ctx->images.read(image_id.id);
+  VkFormat vkformat{};
+  if (format == rd::Format::NATIVE)
+    vkformat = img.info.format;
+  else
+    vkformat = to_vk(format);
+  ID view_id = dev_ctx
+                   ->create_image_view(img.id, range.level, range.num_levels, range.layer,
+                                       range.num_layers, vkformat)
+                   .id;
+  ImageView view    = dev_ctx->image_views.read(view_id);
+  binfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+  binfo.imageView   = view.view;
+  binfo.sampler     = VK_NULL_HANDLE;
+  VkWriteDescriptorSet wset;
+  MEMZERO(wset);
+  wset.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+  wset.descriptorCount = 1;
+  wset.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+  wset.dstArrayElement = index;
+  wset.dstBinding      = binding;
+  wset.dstSet          = set;
+  wset.pImageInfo      = &binfo;
+  vkUpdateDescriptorSets(dev_ctx->device, 1, &wset, 0, NULL);
+}
+void VK_Binding_Table::release() {
+  vkDestroyDescriptorSetLayout(dev_ctx->device, set_layout, NULL);
+  // Deferred release
+  dev_ctx->release_resource(set_res_id);
+  delete this;
+}
+
 } // namespace
 namespace rd {
 IDevice *create_vulkan(void *window_handler) { return new VkFactory(window_handler); }
