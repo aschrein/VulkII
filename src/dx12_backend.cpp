@@ -5,6 +5,9 @@
 
 #include <SDL.h>
 #include <SDL_syswm.h>
+#include <atomic>
+#include <mutex>
+#include <thread>
 
 #include "rendering.hpp"
 
@@ -27,376 +30,409 @@ using namespace Microsoft::WRL;
   } while (0)
 
 namespace {
-struct Slot {
-  ID   id;
-  i32  frames_referenced;
-  ID   get_id() { return id; }
-  void set_id(ID _id) { id = _id; }
-  void disable() { id._id = 0; }
-  bool is_alive() { return id._id != 0; }
-  void set_index(u32 index) { id._id = index + 1; }
+
+namespace {
+static std::atomic<int> g_thread_counter;
+static int              get_thread_id() {
+  static thread_local int id = g_thread_counter++;
+  return id;
 };
+} // namespace
 
-enum class Resource_Type : u32 {
-  BUFFER,
-  COMMAND_BUFFER,
-  IMAGE,
-  SHADER,
-  SAMPLER,
-  PASS,
-  BUFFER_VIEW,
-  IMAGE_VIEW,
-  FENCE,
-  SEMAPHORE,
-  TIMESTAMP,
-  EVENT,
-  NONE
-};
+class DX12Device : public rd::IDevice {
+  static constexpr u32 NUM_BACK_BUFFERS = 3;
+  static constexpr u32 MAX_THREADS      = 0x100;
 
-struct Ref_Cnt : public Slot {
-  u32  ref_cnt = 0;
-  void rem_reference() {
-    ASSERT_DEBUG(ref_cnt > 0);
-    ref_cnt--;
-  }
-  bool is_referenced() { return ref_cnt != 0; }
-  void add_reference() { ref_cnt++; }
-};
-
-template <typename T, typename Parent_t> //
-struct Resource_Array {
-  Array<T>   items;
-  Array<u32> free_items;
-  struct Deferred_Release {
-    u32 timer;
-    u32 item_index;
-  };
-  Array<Deferred_Release> limbo_items;
-  void                    dump() {
-    fprintf(stdout, "Resource_Array %s:", Parent_t::NAME);
-    fprintf(stdout, "  items: %i", (u32)items.size);
-    fprintf(stdout, "  free : %i", (u32)free_items.size);
-    fprintf(stdout, "  limbo: %i\n", (u32)limbo_items.size);
-  }
-  void init() {
-    items.init();
-    free_items.init();
-    limbo_items.init();
-  }
-  void release() {
-    ito(items.size) {
-      T &item = items[i];
-      if (item.is_alive()) ((Parent_t *)this)->release_item(item);
-    }
-    items.release();
-    free_items.release();
-    limbo_items.release();
-  }
-  void free_slot(ID id) {
-    ASSERT_DEBUG(!id.is_null());
-    items[id.index()].disable();
-    free_items.push(id.index());
-  }
-  ID push(T t) {
-    if (free_items.size) {
-      auto id   = free_items.pop();
-      items[id] = t;
-      items[id].set_index(id);
-      return {id + 1};
-    }
-    items.push(t);
-    items.back().set_index(items.size - 1);
-    return {(u32)items.size};
-  }
-  T &operator[](ID id) {
-    ASSERT_DEBUG(!id.is_null() && items[id.index()].get_id().index() == id.index());
-    return items[id.index()];
-  }
-  void add_ref(ID id) {
-    ASSERT_DEBUG(!id.is_null() && items[id.index()].get_id().index() == id.index());
-    items[id.index()].frames_referenced++;
-  }
-  void remove(ID id, u32 timeout) {
-    ASSERT_DEBUG(!id.is_null());
-    items[id.index()].disable();
-    if (timeout == 0) {
-      ((Parent_t *)this)->release_item(items[id.index()]);
-      free_items.push(id.index());
-    } else {
-      limbo_items.push({timeout, id.index()});
-    }
-  }
-  template <typename Ff> void for_each(Ff fn) {
-    ito(items.size) {
-      T &item = items[i];
-      if (item.is_alive()) fn(item);
-    }
-  }
-  void tick() {
-    Array<Deferred_Release> new_limbo_items;
-    new_limbo_items.init();
-    ito(items.size) { items[i].frames_referenced--; }
-    ito(limbo_items.size) {
-      Deferred_Release &item = limbo_items[i];
-      ASSERT_DEBUG(item.timer != 0);
-      item.timer -= 1;
-      if (item.timer == 0) {
-        ((Parent_t *)this)->release_item(items[item.item_index]);
-        free_items.push(item.item_index);
-      } else {
-        new_limbo_items.push(item);
-      }
-    }
-    limbo_items.release();
-    limbo_items = new_limbo_items;
-  }
-};
-
-struct Graphics_Pipeline_State {
-  rd::RS_State rs_state;
-  rd::DS_State ds_state;
-  ID           ps, vs;
-  u32          num_rts;
-  rd::MS_State ms_state;
-
-  bool operator==(const Graphics_Pipeline_State &that) const {
-    return memcmp(this, &that, sizeof(*this)) == 0;
-  }
-  void reset() {
-    memset(this, 0, sizeof(*this)); // Important for memhash
-  }
-};
-
-u64 hash_of(Graphics_Pipeline_State const &state) {
-  return hash_of(string_ref{(char const *)&state, sizeof(state)});
-}
-
-struct Window {
-  static constexpr u32 MAX_SC_IMAGES = 0x10;
-  SDL_Window *         window;
-
-  i32 window_width  = 1280;
-  i32 window_height = 720;
-
-  RECT g_WindowRect;
-
-  ComPtr<ID3D12Device2>             device;
-  ComPtr<ID3D12CommandQueue>        cmd_queue;
-  ComPtr<IDXGISwapChain4>           sc;
-  ComPtr<ID3D12Resource>            sc_images[MAX_SC_IMAGES];
-  ComPtr<ID3D12GraphicsCommandList> cmd_list;
-  ComPtr<ID3D12CommandAllocator>    cmd_allocs[MAX_SC_IMAGES];
-  ComPtr<ID3D12DescriptorHeap>      desc_heap;
-  UINT                              desc_size;
-  UINT                              cur_image;
-
-  ID                                          cur_pass;
-  Hash_Table<Graphics_Pipeline_State, ID>     pipeline_cache;
-  Hash_Table<ID, ID>                          compute_pipeline_cache;
-  Hash_Table<u64, ID>                         shader_cache;
-  Hash_Table<rd::Render_Pass_Create_Info, ID> pass_cache;
-
-  void init_ds() {
-    shader_cache.init();
-    pipeline_cache.init();
-    compute_pipeline_cache.init();
-  }
-
-  void release() {
-    shader_cache.release();
-    pipeline_cache.release();
-    compute_pipeline_cache.release();
-
-    SDL_DestroyWindow(window);
-    SDL_Quit();
-  }
-
-  void release_resource(Resource_ID res_id) {
-    if (res_id.type == (u32)Resource_Type::PASS) {
-
-    } else if (res_id.type == (u32)Resource_Type::BUFFER) {
-
-    } else if (res_id.type == (u32)Resource_Type::BUFFER_VIEW) {
-
-    } else if (res_id.type == (u32)Resource_Type::IMAGE_VIEW) {
-
-    } else if (res_id.type == (u32)Resource_Type::IMAGE) {
-
-    } else if (res_id.type == (u32)Resource_Type::SHADER) {
-
-    } else if (res_id.type == (u32)Resource_Type::FENCE) {
-
-    } else if (res_id.type == (u32)Resource_Type::EVENT) {
-
-    } else if (res_id.type == (u32)Resource_Type::SEMAPHORE) {
-
-    } else if (res_id.type == (u32)Resource_Type::COMMAND_BUFFER) {
-
-    } else if (res_id.type == (u32)Resource_Type::SAMPLER) {
-
-    } else if (res_id.type == (u32)Resource_Type::TIMESTAMP) {
-    } else {
-      TRAP;
-    }
-  }
-
-  void release_swapchain() {}
-
-  void update_swapchain() {
-    SDL_SetWindowResizable(window, SDL_FALSE);
-    defer(SDL_SetWindowResizable(window, SDL_TRUE));
-
-    release_swapchain();
-    u32 format_count = 0;
-  }
-
-  void init() {
-    init_ds();
-    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS);
-    window = SDL_CreateWindow("VulkII", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 512, 512,
-                              SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
-    TMP_STORAGE_SCOPE;
-
-    SDL_SysWMinfo wmInfo;
-    SDL_VERSION(&wmInfo.version);
-    SDL_GetWindowWMInfo(window, &wmInfo);
-    HWND hwnd = wmInfo.info.win.window;
-
-#if 1
-    ComPtr<ID3D12Debug> debugInterface;
-    DX_ASSERT_OK(D3D12GetDebugInterface(IID_PPV_ARGS(&debugInterface)));
-    debugInterface->EnableDebugLayer();
-#endif
-    update_swapchain();
-  }
-
-  void update_surface_size() {}
-
-  void start_frame() {
-
-  restart:
-    update_surface_size();
-  }
-  void end_frame() {}
-};
-
-struct Resource_Path {
-  u32  set;
-  u32  binding;
-  u32  element;
-  bool operator==(Resource_Path const &that) const {
-    return                         //
-        set == that.set &&         //
-        binding == that.binding && //
-        element == that.element;
-  }
-};
-
-u64 hash_of(Resource_Path const &path) {
-  return ::hash_of(path.set) ^ ::hash_of(path.binding) ^ ::hash_of(path.element);
-}
-
-#if 0
-				class Dx12Factory : public rd::IDevice {
-  Window *           wnd;
-  Array<Resource_ID> release_queue;
+  ComPtr<ID3D12Device2>          device;
+  ComPtr<ID3D12CommandQueue>     cmd_queue;
+  ComPtr<IDXGISwapChain4>        sc;
+  ComPtr<ID3D12Resource>         sc_images[NUM_BACK_BUFFERS];
+  ComPtr<ID3D12CommandAllocator> cmd_allocs[NUM_BACK_BUFFERS];
+  ComPtr<ID3D12DescriptorHeap>   rtv_desc_heap;
+  ComPtr<ID3D12Fence>            fence;
+  HANDLE                         fence_event = 0;
+  ComPtr<ID3D12Resource>         main_rt[NUM_BACK_BUFFERS];
+  D3D12_CPU_DESCRIPTOR_HANDLE    main_rt_desc[NUM_BACK_BUFFERS];
+  HANDLE                         sc_wait_obj = 0;
+  u32                            cur_cmd_id  = 0;
+  // ComPtr<ID3D12DescriptorHeap> dsv_desc_heap;
+  ComPtr<ID3D12DescriptorHeap> sampler_desc_heap;
+  ComPtr<ID3D12DescriptorHeap> common_desc_heap;
+  std::mutex                   mutex;
 
   public:
-  ID   last_sem;
-  void init(Window *wnd) {
-    this->wnd = wnd;
-    last_sem  = {0};
-    release_queue.init();
+  ComPtr<ID3D12Device2>             get_device() { return device; }
+  ComPtr<ID3D12GraphicsCommandList> alloc_graphics_cmd() {
+    ComPtr<ID3D12GraphicsCommandList> out;
+    DX_ASSERT_OK(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                           cmd_allocs[cur_cmd_id].Get(), NULL, IID_PPV_ARGS(&out)));
+    return out;
   }
-  void release() {
-    release_queue.release();
-    delete this;
+  void bind_desc_heaps(ID3D12GraphicsCommandList *cmd) {
+    ID3D12DescriptorHeap *descs[] = {
+        common_desc_heap.Get(),
+        sampler_desc_heap.Get(),
+    };
+    cmd->SetDescriptorHeaps(2, descs);
   }
-  void on_frame_begin() { last_sem = {0}; }
-  void on_frame_end() {
-    if (last_sem.is_null() == false) {
-      wnd->release_resource({last_sem, (u32)Resource_Type::SEMAPHORE});
+  ComPtr<ID3D12DescriptorHeap> get_sampler_desc_heap() { return sampler_desc_heap; }
+  ComPtr<ID3D12DescriptorHeap> get_common_desc_heap() { return common_desc_heap; }
+  DX12Device(void *hdl) {
+    {
+      ComPtr<ID3D12Debug> debugInterface;
+      DX_ASSERT_OK(D3D12GetDebugInterface(IID_PPV_ARGS(&debugInterface)));
+      debugInterface->EnableDebugLayer();
     }
-    last_sem = {0};
-    ito(release_queue.size) wnd->release_resource(release_queue[i]);
-    release_queue.release();
-  }
-  bool        get_timestamp_state(Resource_ID t0) override { TRAP; }
-  double      get_timestamp_ms(Resource_ID t0, Resource_ID t1) override { TRAP; }
-  Resource_ID create_image(rd::Image_Create_Info info) override { TRAP; }
-  Resource_ID create_buffer(rd::Buffer_Create_Info info) override { TRAP; }
-  bool        get_event_state(Resource_ID fence_id) override { TRAP; }
-  Resource_ID create_shader_raw(rd::Stage_t type, string_ref body,
-                                Pair<string_ref, string_ref> *defines,
-                                size_t                        num_defines) override {
+    D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_12_0;
+    DX_ASSERT_OK(D3D12CreateDevice(NULL, featureLevel, IID_PPV_ARGS(&device)));
 
+    {
+      D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+      desc.Type                       = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+      desc.NumDescriptors             = NUM_BACK_BUFFERS;
+      desc.Flags                      = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+      desc.NodeMask                   = 1;
+      DX_ASSERT_OK(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&rtv_desc_heap)));
+
+      SIZE_T rtvDescriptorSize =
+          device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+      D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = rtv_desc_heap->GetCPUDescriptorHandleForHeapStart();
+      for (UINT i = 0; i < NUM_BACK_BUFFERS; i++) {
+        main_rt_desc[i] = rtvHandle;
+        rtvHandle.ptr += rtvDescriptorSize;
+      }
+    }
+    {
+      D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+      desc.Type                       = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+      desc.NumDescriptors             = 1 << 20;
+      desc.Flags                      = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+      DX_ASSERT_OK(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&common_desc_heap)));
+    }
+    {
+      D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+      desc.Type                       = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+      desc.NumDescriptors             = 1 << 20;
+      desc.Flags                      = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+      DX_ASSERT_OK(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&sampler_desc_heap)));
+    }
+    {
+      D3D12_COMMAND_QUEUE_DESC desc = {};
+      desc.Type                     = D3D12_COMMAND_LIST_TYPE_DIRECT;
+      desc.Flags                    = D3D12_COMMAND_QUEUE_FLAG_NONE;
+      desc.NodeMask                 = 1;
+      DX_ASSERT_OK(device->CreateCommandQueue(&desc, IID_PPV_ARGS(&cmd_queue)));
+    }
+
+    ito(NUM_BACK_BUFFERS) DX_ASSERT_OK(device->CreateCommandAllocator(
+        D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&cmd_allocs[i])));
+
+    DX_ASSERT_OK(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)));
+
+    fence_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+    ASSERT_ALWAYS(fence_event);
+    if (hdl) {
+      ComPtr<IDXGIFactory4>   dxgiFactory;
+      ComPtr<IDXGISwapChain1> swapChain1;
+      DX_ASSERT_OK(CreateDXGIFactory1(IID_PPV_ARGS(&dxgiFactory)));
+      DXGI_SWAP_CHAIN_DESC1 sd;
+      {
+        ZeroMemory(&sd, sizeof(sd));
+        sd.BufferCount        = NUM_BACK_BUFFERS;
+        sd.Width              = 0;
+        sd.Height             = 0;
+        sd.Format             = DXGI_FORMAT_R8G8B8A8_UNORM;
+        sd.Flags              = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+        sd.BufferUsage        = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        sd.SampleDesc.Count   = 1;
+        sd.SampleDesc.Quality = 0;
+        sd.SwapEffect         = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        sd.AlphaMode          = DXGI_ALPHA_MODE_UNSPECIFIED;
+        sd.Scaling            = DXGI_SCALING_STRETCH;
+        sd.Stereo             = FALSE;
+      }
+      DX_ASSERT_OK(dxgiFactory->CreateSwapChainForHwnd(cmd_queue.Get(), (HWND)hdl, &sd, NULL, NULL,
+                                                       &swapChain1));
+      DX_ASSERT_OK(swapChain1->QueryInterface(IID_PPV_ARGS(&sc)));
+
+      sc->SetMaximumFrameLatency(NUM_BACK_BUFFERS);
+      sc_wait_obj = sc->GetFrameLatencyWaitableObject();
+    }
+  }
+  Resource_ID create_image(rd::Image_Create_Info info) override {
+    std::lock_guard<std::mutex> _lock(mutex);
     TRAP;
   }
-  void *           map_buffer(Resource_ID res_id) override { TRAP; }
-  void             unmap_buffer(Resource_ID res_id) override { TRAP; }
-  Resource_ID      create_sampler(rd::Sampler_Create_Info const &info) override { TRAP; }
-  void             release_resource(Resource_ID id) override { TRAP; }
-  Resource_ID      get_swapchain_image() override { TRAP; }
-  rd::Image2D_Info get_swapchain_image_info() override { TRAP; }
-  rd::Image_Info   get_image_info(Resource_ID res_id) override { TRAP; }
-  rd::ICtx *    start_render_pass(rd::Render_Pass_Create_Info const &info) override { TRAP; }
-  void             end_render_pass(rd::ICtx *_ctx) override { TRAP; }
-  rd::ICtx *    start_compute_pass() override { TRAP; }
-  void             wait_idle() { TRAP; }
-  void             end_compute_pass(rd::ICtx *_ctx) override { TRAP; }
+  Resource_ID create_buffer(rd::Buffer_Create_Info info) override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    TRAP;
+  }
+  Resource_ID create_shader(rd::Stage_t type, string_ref text,
+                            Pair<string_ref, string_ref> *defines, size_t num_defines) override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    TRAP;
+  }
+  Resource_ID create_sampler(rd::Sampler_Create_Info const &info) override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    TRAP;
+  }
+  void release_resource(Resource_ID id) override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    TRAP;
+  }
+  Resource_ID create_event() override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    TRAP;
+  }
+  Resource_ID create_timestamp() override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    TRAP;
+  }
+  Resource_ID get_swapchain_image() override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    TRAP;
+  }
+  rd::Image2D_Info get_swapchain_image_info() override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    TRAP;
+  }
+  rd::Image_Info get_image_info(Resource_ID res_id) override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    TRAP;
+  }
+  void *map_buffer(Resource_ID id) override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    TRAP;
+  }
+  void unmap_buffer(Resource_ID id) override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    TRAP;
+  }
+  Resource_ID create_render_pass(rd::Render_Pass_Create_Info const &info) override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    TRAP;
+  }
+  Resource_ID create_compute_pso(rd::IBinding_Table *table, Resource_ID cs) override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    TRAP;
+  }
+  Resource_ID create_graphics_pso(rd::IBinding_Table *table, Resource_ID render_pass,
+                                  rd::Graphics_Pipeline_State const &) override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    TRAP;
+  }
+  rd::IBinding_Table *create_binding_table(rd::Binding_Table_Create_Info const *infos,
+                                           u32 num_tables, u32 push_constants_size) override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    TRAP;
+  }
+  rd::ICtx *start_render_pass(Resource_ID render_pass) override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    TRAP;
+  }
+  void end_render_pass(rd::ICtx *ctx) override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    TRAP;
+  }
+  rd::ICtx *start_compute_pass() override;
+  void      end_compute_pass(rd::ICtx *ctx) override;
+  bool      get_timestamp_state(Resource_ID) override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    TRAP;
+  }
+  double get_timestamp_ms(Resource_ID t0, Resource_ID t1) override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    TRAP;
+  }
+  void wait_idle() override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    TRAP;
+  }
+  bool get_event_state(Resource_ID id) override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    TRAP;
+  }
+  rd::Impl_t getImplType() override { TRAP; }
+  void       release() override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    TRAP;
+  }
+  void start_frame() override { std::lock_guard<std::mutex> _lock(mutex); }
+  void end_frame() override { std::lock_guard<std::mutex> _lock(mutex); }
 };
-class Dx12Pass_Mng : public rd::Pass_Mng {
-  public:
-  Window *             wnd      = NULL;
-  Dx12Factory *        f        = NULL;
-  rd::IEvent_Consumer *consumer = NULL;
-  Dx12Pass_Mng() {
-    wnd = new Window();
-    wnd->init();
-    f = new Dx12Factory();
-    f->init(wnd);
-    consumer = NULL;
-  }
-  void release() override {
-    consumer->on_release(f);
-    f->release();
-    wnd->release();
-    delete wnd;
-    delete this;
-  }
-  void loop() override {
-    consumer->init(this);
-    wnd->start_frame();
-    consumer->on_init(f);
-    wnd->end_frame();
-    while (true) {
-      SDL_Event event;
-      while (SDL_PollEvent(&event)) {
-        if (consumer != NULL) {
-          consumer->consume(&event);
-        }
-        if (event.type == SDL_QUIT) {
-          release();
-          exit(0);
-        }
-        switch (event.type) {
-        case SDL_WINDOWEVENT:
-          if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
-          }
-          break;
-        }
-      }
-      wnd->start_frame();
-      f->on_frame_begin();
-      consumer->on_frame(f);
-      f->on_frame_end();
-      wnd->end_frame();
-    }
-  }
-  void  set_event_consumer(rd::IEvent_Consumer *consumer) override { this->consumer = consumer; }
-  void *get_window_handle() { return (void *)wnd->window; }
-};
-rd::Pass_Mng *create_dx12_pass_mng() { return new Dx12Pass_Mng; }
-#endif // 0
 
+D3D12_DESCRIPTOR_RANGE_TYPE to_dx(rd::Binding_t type) {
+  switch (type) {
+  case rd::Binding_t::READ_ONLY_BUFFER: return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+  case rd::Binding_t::SAMPLER: return D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+  case rd::Binding_t::TEXTURE: return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+  case rd::Binding_t::UAV_BUFFER: return D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+  case rd::Binding_t::UAV_TEXTURE: return D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+  case rd::Binding_t::UNIFORM_BUFFER: return D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+  default: TRAP;
+  }
+}
+
+class DX12Binding_Table : public rd::IBinding_Table {
+  DX12Device *                dev_ctx = NULL;
+  ComPtr<ID3D12RootSignature> root_signature;
+
+  public:
+  static DX12Binding_Table *create(DX12Device *dev_ctx, rd::Binding_Table_Create_Info const *infos,
+                                   u32 num_tables, u32 push_constants_size) {
+    DX12Binding_Table *out                          = new DX12Binding_Table;
+    out->dev_ctx                                    = dev_ctx;
+    auto                                     device = dev_ctx->get_device();
+    InlineArray<D3D12_ROOT_PARAMETER, 0x100> params{};
+
+    u32 num_descs    = 0;
+    u32 num_samplers = 0;
+    ito(num_tables) {
+      auto const &                               info = infos[i];
+      InlineArray<D3D12_DESCRIPTOR_RANGE, 0x100> ranges{};
+      jto(info.bindings.size) {
+        auto                   b                     = info.bindings[j];
+        D3D12_DESCRIPTOR_RANGE desc_range            = {};
+        desc_range.RangeType                         = to_dx(b.type);
+        desc_range.NumDescriptors                    = b.num_array_elems;
+        desc_range.BaseShaderRegister                = b.binding;
+        desc_range.RegisterSpace                     = i;
+        desc_range.OffsetInDescriptorsFromTableStart = b.binding;
+        num_descs = MAX(num_descs, b.binding + b.num_array_elems);
+        ranges.push(desc_range);
+      }
+      D3D12_ROOT_PARAMETER param                = {};
+      param.ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      param.DescriptorTable.NumDescriptorRanges = ranges.size;
+      param.DescriptorTable.pDescriptorRanges   = &ranges[0];
+      param.ShaderVisibility                    = D3D12_SHADER_VISIBILITY_ALL;
+      params.push(param);
+    }
+    {
+      D3D12_ROOT_PARAMETER param{};
+
+      param.ParameterType            = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+      param.Constants.ShaderRegister = 0;
+      param.Constants.RegisterSpace  = 0;
+      param.Constants.Num32BitValues = push_constants_size / 4;
+      param.ShaderVisibility         = D3D12_SHADER_VISIBILITY_ALL;
+      params.push(param);
+    }
+    D3D12_ROOT_SIGNATURE_DESC desc = {};
+    desc.NumParameters             = params.size;
+    desc.pParameters               = &params[0];
+    desc.Flags                     = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+    ID3DBlob *blob                 = NULL;
+    DX_ASSERT_OK(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, NULL));
+    DX_ASSERT_OK(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
+                                             IID_PPV_ARGS(&out->root_signature)));
+    blob->Release();
+  }
+  void bind_cbuffer(u32 space, u32 binding, Resource_ID buf_id, size_t offset,
+                    size_t size) override {
+    TRAP;
+  }
+  void bind_sampler(u32 space, u32 binding, Resource_ID sampler_id) override { TRAP; }
+  void bind_UAV_buffer(u32 space, u32 binding, Resource_ID buf_id, size_t offset,
+                       size_t size) override {
+    TRAP;
+  }
+  void bind_texture(u32 space, u32 binding, u32 index, Resource_ID image_id,
+                    rd::Image_Subresource const &range, rd::Format format) override {
+    TRAP;
+  }
+  void bind_UAV_texture(u32 space, u32 binding, u32 index, Resource_ID image_id,
+                        rd::Image_Subresource const &range, rd::Format format) override {
+    TRAP;
+  }
+  void release() override { TRAP; }
+  void clear_bindings() override { TRAP; }
+};
+
+class DX12Context : public rd::ICtx {
+  ComPtr<ID3D12GraphicsCommandList> cmd;
+  rd::Pass_t                        type;
+  DX12Device *                      device = NULL;
+
+  public:
+  DX12Context(DX12Device *device, rd::Pass_t type) : type(type), device(device) {
+    cmd = device->alloc_graphics_cmd();
+  }
+  void finalize() {}
+  void bind_table(rd::IBinding_Table *table) override { //
+    // cmd->SetDescriptorHeaps
+     //cmd->SetGraphicsRootDescriptorTable
+    TRAP;
+  }
+  void push_constants(void const *data, size_t offset, size_t size) override { TRAP; }
+  // Graphics
+  void start_render_pass() override { TRAP; }
+  void end_render_pass() override { TRAP; }
+  void bind_graphics_pso(Resource_ID pso) override { TRAP; }
+  void draw_indexed(u32 indices, u32 instances, u32 first_index, u32 first_instance,
+                    i32 vertex_offset) override {
+    TRAP;
+  }
+  void bind_index_buffer(Resource_ID id, u32 offset, rd::Index_t format) override { TRAP; }
+  void bind_vertex_buffer(u32 index, Resource_ID buffer, size_t offset) override { TRAP; }
+  void draw(u32 vertices, u32 instances, u32 first_vertex, u32 first_instance) override { TRAP; }
+  void multi_draw_indexed_indirect(Resource_ID arg_buf_id, u32 arg_buf_offset,
+                                   Resource_ID cnt_buf_id, u32 cnt_buf_offset, u32 max_count,
+                                   u32 stride) override {
+    TRAP;
+  }
+
+  void set_viewport(float x, float y, float width, float height, float mindepth,
+                    float maxdepth) override {
+    TRAP;
+  }
+  void set_scissor(u32 x, u32 y, u32 width, u32 height) override { TRAP; }
+  void RS_set_line_width(float width) override { TRAP; }
+  void RS_set_depth_bias(float width) override { TRAP; }
+  // Compute
+  void bind_compute(Resource_ID id) override { TRAP; }
+  void dispatch(u32 dim_x, u32 dim_y, u32 dim_z) override { TRAP; }
+  // Memory movement
+  void fill_buffer(Resource_ID id, size_t offset, size_t size, u32 value) override { TRAP; }
+  void clear_image(Resource_ID id, rd::Image_Subresource const &range,
+                   rd::Clear_Value const &cv) override {
+    TRAP;
+  }
+  void update_buffer(Resource_ID buf_id, size_t offset, void const *data,
+                     size_t data_size) override {
+    TRAP;
+  }
+  void copy_buffer_to_image(Resource_ID buf_id, size_t buffer_offset, Resource_ID img_id,
+                            rd::Image_Copy const &dst_info) override {
+    TRAP;
+  }
+  void copy_image_to_buffer(Resource_ID buf_id, size_t buffer_offset, Resource_ID img_id,
+                            rd::Image_Copy const &dst_info) override {
+    TRAP;
+  }
+  void copy_buffer(Resource_ID src_buf_id, size_t src_offset, Resource_ID dst_buf_id,
+                   size_t dst_offset, u32 size) override {
+    TRAP;
+  }
+  // Synchronization
+  void image_barrier(Resource_ID image_id, u32 access_flags, rd::Image_Layout layout) override {
+    TRAP;
+  }
+  void buffer_barrier(Resource_ID buf_id, u32 access_flags) override { TRAP; }
+  void insert_event(Resource_ID id) override { TRAP; }
+  void insert_timestamp(Resource_ID timestamp_id) override { TRAP; }
+};
+
+rd::ICtx *DX12Device::start_compute_pass() {
+  std::lock_guard<std::mutex> _lock(mutex);
+  return new DX12Context(this, rd::Pass_t::COMPUTE);
+}
+void DX12Device::end_compute_pass(rd::ICtx *ctx) {
+  std::lock_guard<std::mutex> _lock(mutex);
+  ((DX12Context *)ctx)->finalize();
+}
 } // namespace
+
+namespace rd {
+rd::IDevice *create_dx12(void *window_handler) { return new DX12Device(window_handler); }
+} // namespace rd

@@ -5,14 +5,15 @@ int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
 
-  rd::IDevice *factory = rd::create_vulkan(NULL);
+  //rd::IDevice *factory = rd::create_vulkan(NULL);
+  rd::IDevice *factory = rd::create_dx12(NULL);
   factory->start_frame();
   defer({
     factory->end_frame();
     factory->release();
   });
   rd::ICtx *ctx = factory->start_compute_pass();
-#if 1
+#if 0
   {
     Image2D *image = load_image(stref_s("images/ECurtis.png"));
     defer(if (image) image->release());
@@ -95,7 +96,7 @@ void main(uint3 tid : SV_DispatchThreadID)
   Resource_ID cs2 =
       factory->create_compute_pso(&set0, 1,
                                   factory->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
-[[vk::binding(0, 0)]] RWByteAddressBuffer BufferOut : register(u0, space0);
+[[vk::binding(0, 0)]] RWByteAddressBuffer BufferOut     : register(u0, space0);
 [[vk::binding(1, 0)]] RWStructuredBuffer<uint> BufferIn : register(u1, space0);
 
 struct CullPushConstants
