@@ -120,24 +120,23 @@ enum class Image_Usage_Bits : uint32_t {
   USAGE_TRANSFER_SRC = 32,
 };
 
-enum class Memory_Bits : uint32_t {
-  HOST_VISIBLE = 1,
-  HOST_CACHED  = 2,
-  DEVICE_LOCAL = 4,
-  COHERENT     = 8,
+enum class Memory_Type : uint32_t {
+  CPU_WRITE_GPU_READ = 1,
+  CPU_READ_WRITE     = 2,
+  GPU_LOCAL          = 4,
 };
 
 struct Image_Create_Info {
-  Format format;
-  u32    usage_bits;
-  u32    mem_bits;
-  u32    width, height, depth, levels, layers;
+  Format      format;
+  u32         usage_bits;
+  Memory_Type memory_type;
+  u32         width, height, depth, levels, layers;
 };
 
 struct Buffer_Create_Info {
-  u32 usage_bits;
-  u32 mem_bits;
-  u32 size;
+  u32         usage_bits;
+  Memory_Type memory_type;
+  u32         size;
 };
 
 struct Binding {
@@ -277,28 +276,41 @@ struct MS_State {
 
 enum class Input_Rate { VERTEX, INSTANCE };
 
-struct Access_Bits {
-  enum {
-    UNIFORM_READ   = 0x00000008,
-    SHADER_READ    = 0x00000020,
-    SHADER_WRITE   = 0x00000040,
-    TRANSFER_READ  = 0x00000800,
-    TRANSFER_WRITE = 0x00001000,
-    HOST_READ      = 0x00002000,
-    HOST_WRITE     = 0x00004000,
-    MEMORY_READ    = 0x00008000,
-    MEMORY_WRITE   = 0x00010000,
-  };
+// struct Access_Bits {
+//  enum {
+//    UNIFORM_READ   = 0x00000008,
+//    SHADER_READ    = 0x00000020,
+//    SHADER_WRITE   = 0x00000040,
+//    TRANSFER_READ  = 0x00000800,
+//    TRANSFER_WRITE = 0x00001000,
+//    HOST_READ      = 0x00002000,
+//    HOST_WRITE     = 0x00004000,
+//    MEMORY_READ    = 0x00008000,
+//    MEMORY_WRITE   = 0x00010000,
+//  };
+//};
+
+enum class Buffer_Access {
+  GENERIC,
+  UNIFORM,
+  VERTEX_BUFFER,
+  INDEX_BUFFER,
+  UAV,
+  TRANSFER_DST,
+  TRANSFER_SRC,
+  HOST_READ,
+  HOST_WRITE,
+  HOST_READ_WRITE,
 };
 
-enum class Image_Layout {
+enum class Image_Access {
   GENERIC,
-  COLOR_TARGET_OPTIMAL,
-  DEPTH_TARGET_OPTIMAL,
-  UAV_OPTIMAL,
-  READ_ONLY_OPTIMAL,
-  TRANSFER_DST_OPTIMAL,
-  TRANSFER_SRC_OPTIMAL,
+  COLOR_TARGET,
+  DEPTH_TARGET,
+  UAV,
+  SAMPLED,
+  TRANSFER_DST,
+  TRANSFER_SRC,
 };
 
 struct Clear_Value {
@@ -404,13 +416,20 @@ struct Binding_Desc {
   u32       num_array_elems;
 };
 
-struct Binding_Table_Create_Info {
+struct Binding_Space_Create_Info {
   static constexpr u32                    MAX_BINDINGS = 0x40;
   InlineArray<Binding_Desc, MAX_BINDINGS> bindings;
   void                                    reset() { MEMZERO(*this); }
 };
 
-static_assert(std::is_pod<Binding_Table_Create_Info>::value, "");
+static_assert(std::is_pod<Binding_Space_Create_Info>::value, "");
+
+struct Binding_Table_Create_Info {
+  static constexpr u32                               MAX_SPACES = 0x10;
+  InlineArray<Binding_Space_Create_Info, MAX_SPACES> spaces;
+  u32                                                push_constants_size;
+  void                                               reset() { MEMZERO(*this); }
+};
 
 static inline u64 hash_of(RT_View const &pc) {
   return hash_of(string_ref{(char *)&pc, sizeof(pc)});
@@ -490,12 +509,13 @@ class IBinding_Table {
   virtual void bind_cbuffer(u32 space, u32 binding, Resource_ID buf_id, size_t offset,
                             size_t size)                                       = 0;
   virtual void bind_sampler(u32 space, u32 binding, Resource_ID sampler_id)    = 0;
-  virtual void bind_UAV_buffer(u32 space, u32 binding, Resource_ID buf_id, size_t offset,
-                               size_t size)                                    = 0;
+  virtual void bind_structured_UAV_buffer(u32 space, u32 binding, Resource_ID buf_id, size_t offset,
+                                          size_t size, size_t stride)          = 0;
   virtual void bind_texture(u32 space, u32 binding, u32 index, Resource_ID image_id,
                             Image_Subresource const &range, Format format)     = 0;
   virtual void bind_UAV_texture(u32 space, u32 binding, u32 index, Resource_ID image_id,
                                 Image_Subresource const &range, Format format) = 0;
+  virtual void push_constants(void const *data, size_t offset, size_t size)    = 0;
   virtual void release()                                                       = 0;
   virtual void clear_bindings()                                                = 0;
 };
@@ -512,39 +532,38 @@ class IDevice {
   virtual Resource_ID     create_buffer(Buffer_Create_Info info) = 0;
   virtual Resource_ID     create_shader(Stage_t type, string_ref text,
                                         Pair<string_ref, string_ref> *defines, size_t num_defines) = 0;
-  virtual Resource_ID     create_sampler(Sampler_Create_Info const &info)               = 0;
-  virtual void            release_resource(Resource_ID id)                              = 0;
-  virtual Resource_ID     create_event()                                                = 0;
-  virtual Resource_ID     create_timestamp()                                            = 0;
-  virtual Resource_ID     get_swapchain_image()                                         = 0;
-  virtual Image2D_Info    get_swapchain_image_info()                                    = 0;
-  virtual Image_Info      get_image_info(Resource_ID res_id)                            = 0;
-  virtual void *          map_buffer(Resource_ID id)                                    = 0;
-  virtual void            unmap_buffer(Resource_ID id)                                  = 0;
-  virtual Resource_ID     create_render_pass(Render_Pass_Create_Info const &info)       = 0;
-  virtual Resource_ID     create_compute_pso(IBinding_Table *table, Resource_ID cs)     = 0;
-  virtual Resource_ID     create_graphics_pso(IBinding_Table *table, Resource_ID render_pass,
-                                              Graphics_Pipeline_State const &)          = 0;
-  virtual IBinding_Table *create_binding_table(Binding_Table_Create_Info const *infos,
-                                               u32 num_tables, u32 push_constants_size) = 0;
-  virtual ICtx *          start_render_pass(Resource_ID render_pass)                    = 0;
-  virtual void            end_render_pass(ICtx *ctx)                                    = 0;
-  virtual ICtx *          start_compute_pass()                                          = 0;
-  virtual void            end_compute_pass(ICtx *ctx)                                   = 0;
-  virtual bool            get_timestamp_state(Resource_ID)                              = 0;
-  virtual double          get_timestamp_ms(Resource_ID t0, Resource_ID t1)              = 0;
-  virtual void            wait_idle()                                                   = 0;
-  virtual bool            get_event_state(Resource_ID id)                               = 0;
-  virtual Impl_t          getImplType()                                                 = 0;
-  virtual void            release()                                                     = 0;
-  virtual void            start_frame()                                                 = 0;
-  virtual void            end_frame()                                                   = 0;
+  virtual Resource_ID     create_sampler(Sampler_Create_Info const &info)           = 0;
+  virtual void            release_resource(Resource_ID id)                          = 0;
+  virtual Resource_ID     create_event()                                            = 0;
+  virtual Resource_ID     create_timestamp()                                        = 0;
+  virtual Resource_ID     get_swapchain_image()                                     = 0;
+  virtual Image2D_Info    get_swapchain_image_info()                                = 0;
+  virtual Image_Info      get_image_info(Resource_ID res_id)                        = 0;
+  virtual void *          map_buffer(Resource_ID id)                                = 0;
+  virtual void            unmap_buffer(Resource_ID id)                              = 0;
+  virtual Resource_ID     create_render_pass(Render_Pass_Create_Info const &info)   = 0;
+  virtual Resource_ID     create_compute_pso(Resource_ID signature, Resource_ID cs) = 0;
+  virtual Resource_ID     create_graphics_pso(Resource_ID signature, Resource_ID render_pass,
+                                              Graphics_Pipeline_State const &)      = 0;
+  virtual Resource_ID     create_signature(Binding_Table_Create_Info const &info)   = 0;
+  virtual IBinding_Table *create_binding_table(Resource_ID signature)               = 0;
+  virtual ICtx *          start_render_pass(Resource_ID render_pass)                = 0;
+  virtual void            end_render_pass(ICtx *ctx)                                = 0;
+  virtual ICtx *          start_compute_pass()                                      = 0;
+  virtual void            end_compute_pass(ICtx *ctx)                               = 0;
+  virtual bool            get_timestamp_state(Resource_ID)                          = 0;
+  virtual double          get_timestamp_ms(Resource_ID t0, Resource_ID t1)          = 0;
+  virtual void            wait_idle()                                               = 0;
+  virtual bool            get_event_state(Resource_ID id)                           = 0;
+  virtual Impl_t          getImplType()                                             = 0;
+  virtual void            release()                                                 = 0;
+  virtual void            start_frame()                                             = 0;
+  virtual void            end_frame()                                               = 0;
 };
 
 class ICtx {
   public:
-  virtual void bind_table(IBinding_Table *table)                            = 0;
-  virtual void push_constants(void const *data, size_t offset, size_t size) = 0;
+  virtual void bind_table(IBinding_Table *table) = 0;
   // Graphics
   virtual void start_render_pass()                                                     = 0;
   virtual void end_render_pass()                                                       = 0;
@@ -579,10 +598,10 @@ class ICtx {
   virtual void copy_buffer(Resource_ID src_buf_id, size_t src_offset, Resource_ID dst_buf_id,
                            size_t dst_offset, u32 size)                           = 0;
   // Synchronization
-  virtual void image_barrier(Resource_ID image_id, u32 access_flags, Image_Layout layout) = 0;
-  virtual void buffer_barrier(Resource_ID buf_id, u32 access_flags)                       = 0;
-  virtual void insert_event(Resource_ID id)                                               = 0;
-  virtual void insert_timestamp(Resource_ID timestamp_id)                                 = 0;
+  virtual void image_barrier(Resource_ID image_id, Image_Access access) = 0;
+  virtual void buffer_barrier(Resource_ID buf_id, Buffer_Access access) = 0;
+  virtual void insert_event(Resource_ID id)                             = 0;
+  virtual void insert_timestamp(Resource_ID timestamp_id)               = 0;
 };
 
 IDevice *create_vulkan(void *window_handler);

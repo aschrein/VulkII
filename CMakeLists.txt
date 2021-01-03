@@ -33,6 +33,7 @@ IF (WIN32)
     "$ENV{VULKAN_SDK}/lib/HLSL.lib"
     "d3d12.lib"
     "d3dcompiler.lib"
+    "dxcompiler.lib"
     "dxgi.lib"
     )
   set (INCLUDES "${SDL2_PATH}/include")
@@ -92,6 +93,10 @@ function(ADD_EXAMPLE example_name example_file)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${SDL2_PATH}/lib/x64/SDL2.dll"
             $<TARGET_FILE_DIR:${example_name}>)
+     add_custom_command(TARGET ${example_name} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/bin/dxil.dll"
+            $<TARGET_FILE_DIR:${example_name}>)
       set_property(TARGET ${example_name} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
     ELSE()
     ENDIF()
@@ -122,3 +127,15 @@ add_example(simple_compute examples/simple_compute.cpp)
 add_example(oit examples/oit.cpp)
 add_example(virtual_textures examples/virtual_textures.cpp)
 add_example(sdf examples/sdf.cpp)
+
+add_executable(tests tests.cpp)
+target_include_directories(tests
+      PRIVATE
+      3rdparty
+      3rdparty/imgui
+      include
+      ${INCLUDES}
+      "$ENV{VULKAN_SDK}/include"
+      ${CMAKE_SOURCE_DIR}
+      ${CMAKE_BINARY_DIR}
+    )

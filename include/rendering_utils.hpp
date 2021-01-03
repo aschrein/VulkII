@@ -21,64 +21,6 @@
 
 #endif
 
-#include "3rdparty/renderdoc_app.h"
-
-class RenderDoc_CTX {
-  private:
-  RENDERDOC_API_1_4_1 * renderdoc_api = NULL;
-  bool                  dll_not_found = false;
-  static RenderDoc_CTX &get() {
-    static RenderDoc_CTX ctx;
-    return ctx;
-  }
-  void init() {
-    if (dll_not_found) return;
-    if (renderdoc_api == NULL) {
-#ifdef WIN32
-      HMODULE mod = GetModuleHandle("renderdoc.dll");
-      if (mod) {
-        pRENDERDOC_GetAPI getApi = (pRENDERDOC_GetAPI)GetProcAddress(mod, "RENDERDOC_GetAPI");
-        if (getApi) {
-          if (getApi(eRENDERDOC_API_Version_1_4_1, (void **)&renderdoc_api) == 1) {
-
-          } else {
-            fprintf(stderr, "[RenderDoc] failed to retieve API functions!\n");
-          }
-        } else {
-          fprintf(stderr, "[RenderDoc] GetAPI not found!\n");
-        }
-      } else {
-        dll_not_found = true;
-        fprintf(stderr, "[RenderDoc] module not found!\n");
-      }
-#endif
-    }
-  }
-  void _start() {
-    if (renderdoc_api && renderdoc_api->IsFrameCapturing()) return;
-#ifdef WIN32
-    if (renderdoc_api == NULL) {
-      if (dll_not_found) return;
-      init();
-    }
-#endif
-    if (renderdoc_api) {
-      renderdoc_api->StartFrameCapture(NULL, NULL);
-    }
-  }
-
-  void _end() {
-    if (renderdoc_api) {
-      if (!renderdoc_api->IsFrameCapturing()) return;
-      renderdoc_api->EndFrameCapture(NULL, NULL);
-    }
-  }
-
-  public:
-  static void start() { get()._start(); }
-  static void end() { get()._end(); }
-};
-
 f32 max3(float3 const &a) { return MAX3(a.x, a.y, a.z); }
 #if 0
 				

@@ -1,7 +1,5 @@
-#define UTILS_TL_IMPL
-#include "utils.hpp"
-#define SCRIPT_IMPL
 #include "script.hpp"
+#include "utils.hpp"
 
 #include <functional>
 
@@ -128,6 +126,7 @@ struct Ref_Cnt : public Slot {
 };
 
 struct Mem_Chunk : public Ref_Cnt {
+  std::mutex            mapped;
   VkDeviceMemory        mem              = VK_NULL_HANDLE;
   VkMemoryPropertyFlags prop_flags       = 0;
   u32                   size             = 0;
@@ -140,6 +139,8 @@ struct Mem_Chunk : public Ref_Cnt {
     fprintf(stdout, "  cursor : %i\n", cursor);
     fprintf(stdout, "}\n");
   }
+  void lock() { mapped.lock(); }
+  void unlock() { mapped.unlock(); }
   void init(VkDevice device, u32 size, u32 heap_index, VkMemoryPropertyFlags prop_flags,
             u32 type_bits) {
     VkMemoryAllocateInfo info;
@@ -813,19 +814,17 @@ u32 to_vk_image_usage_bits(u32 usage_flags) {
   return usage;
 }
 
-u32 to_vk_memory_bits(u32 mem_bits) {
+u32 to_vk_memory_bits(rd::Memory_Type type) {
   u32 prop_flags = 0;
-  if (mem_bits & (i32)rd::Memory_Bits::HOST_VISIBLE) {
+  if (type == rd::Memory_Type::CPU_READ_WRITE) {
+    prop_flags |= VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+                  VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+  }
+  if (type == rd::Memory_Type::CPU_WRITE_GPU_READ) {
     prop_flags |= VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
   }
-  if (mem_bits & (i32)rd::Memory_Bits::COHERENT) {
-    prop_flags |= VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-  }
-  if (mem_bits & (i32)rd::Memory_Bits::DEVICE_LOCAL) {
+  if (type == rd::Memory_Type::GPU_LOCAL) {
     prop_flags |= VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-  }
-  if (mem_bits & (i32)rd::Memory_Bits::HOST_CACHED) {
-    prop_flags |= VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
   }
   return prop_flags;
 }
@@ -1923,7 +1922,7 @@ struct VkDeviceContext {
 
   Resource_ID create_buffer(rd::Buffer_Create_Info info) {
     std::lock_guard<std::mutex> _lock(mutex);
-    u32                         prop_flags = to_vk_memory_bits(info.mem_bits);
+    u32                         prop_flags = to_vk_memory_bits(info.memory_type);
     VkBuffer                    buf;
     VkBufferCreateInfo          cinfo;
     {
@@ -2007,21 +2006,24 @@ struct VkDeviceContext {
   }
 
   void *map_buffer(Resource_ID res_id) {
-    // std::lock_guard<std::mutex> _lock(mutex);
     ASSERT_DEBUG(res_id.type == (i32)Resource_Type::BUFFER);
-    Buffer    buf   = buffers.read(res_id.id);
-    Mem_Chunk chunk = mem_chunks.read(buf.mem_chunk_id);
-    void *    data  = NULL;
-    VK_ASSERT_OK(vkMapMemory(device, chunk.mem, buf.mem_offset, buf.create_info.size, 0, &data));
+    Buffer buf  = buffers.read(res_id.id);
+    void * data = NULL;
+    mem_chunks.acquire(buf.mem_chunk_id, [&](Mem_Chunk &mem_chunk) {
+      mem_chunk.lock();
+      VK_ASSERT_OK(
+          vkMapMemory(device, mem_chunk.mem, buf.mem_offset, buf.create_info.size, 0, &data));
+    });
     return data;
   }
 
   void unmap_buffer(Resource_ID res_id) {
-    // std::lock_guard<std::mutex> _lock(mutex);
     ASSERT_DEBUG(res_id.type == (i32)Resource_Type::BUFFER);
-    Buffer    buf   = buffers.read(res_id.id);
-    Mem_Chunk chunk = mem_chunks.read(buf.mem_chunk_id);
-    vkUnmapMemory(device, chunk.mem);
+    Buffer buf = buffers.read(res_id.id);
+    mem_chunks.acquire(buf.mem_chunk_id, [&](Mem_Chunk &mem_chunk) {
+      vkUnmapMemory(device, mem_chunk.mem);
+      mem_chunk.unlock();
+    });
   }
 
   VkShaderModule compile_spirv(size_t len, u32 *bytecode) {
@@ -2149,9 +2151,9 @@ struct VkDeviceContext {
   }
 
   Resource_ID create_image(u32 width, u32 height, u32 depth, u32 layers, u32 levels,
-                           VkFormat format, u32 usage_flags, u32 mem_flags) {
+                           VkFormat format, u32 usage_flags, rd::Memory_Type mem_type) {
     std::lock_guard<std::mutex> _lock(mutex);
-    u32                         prop_flags = to_vk_memory_bits(mem_flags);
+    u32                         prop_flags = to_vk_memory_bits(mem_type);
     VkImage                     image;
     VkImageCreateInfo           cinfo;
     {
@@ -3374,7 +3376,7 @@ class VkFactory : public rd::IDevice {
   Resource_ID create_image(rd::Image_Create_Info info) override {
     std::lock_guard<std::mutex> _lock(mutex);
     return dev_ctx->create_image(info.width, info.height, info.depth, info.layers, info.levels,
-                                 to_vk(info.format), info.usage_bits, info.mem_bits);
+                                 to_vk(info.format), info.usage_bits, info.memory_type);
   }
   Resource_ID create_graphics_pso(rd::IBinding_Table *table, Resource_ID render_pass,
                                   rd::Graphics_Pipeline_State const &state) override {

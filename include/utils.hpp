@@ -37,10 +37,20 @@ struct Timer {
       abort();                                                                                     \
     }                                                                                              \
   } while (0)
-#define ASSERT_DEBUG(x) ASSERT_ALWAYS(x)
+
 #define ASSERT_PANIC(x) ASSERT_ALWAYS(x)
 #define NOTNULL(x) ASSERT_ALWAYS((x) != NULL)
 #define ARRAY_SIZE(_ARR) ((int)(sizeof(_ARR) / sizeof(*_ARR)))
+
+#ifndef NDEBUG
+#  define DEBUG_BUILD
+#endif
+
+#ifdef DEBUG_BUILD
+#  define ASSERT_DEBUG(x) ASSERT_ALWAYS(x)
+#else
+#  define ASSERT_DEBUG(x)
+#endif
 
 using u64 = uint64_t;
 using u32 = uint32_t;
@@ -109,6 +119,68 @@ using f64 = double;
 #  if (defined(_MSC_VER) && !defined(snprintf))
 #    define snprintf _snprintf
 #  endif //(defined(_MSC_VER) && !defined(snprintf))
+
+#  ifdef UTILS_RENDERDOC
+
+#    include "3rdparty/renderdoc_app.h"
+
+class RenderDoc_CTX {
+  private:
+  RENDERDOC_API_1_4_1 * renderdoc_api = NULL;
+  bool                  dll_not_found = false;
+  static RenderDoc_CTX &get() {
+    static RenderDoc_CTX ctx;
+    return ctx;
+  }
+  void init() {
+    if (dll_not_found) return;
+    if (renderdoc_api == NULL) {
+#    ifdef WIN32
+      HMODULE mod = GetModuleHandle("renderdoc.dll");
+      if (mod) {
+        pRENDERDOC_GetAPI getApi = (pRENDERDOC_GetAPI)GetProcAddress(mod, "RENDERDOC_GetAPI");
+        if (getApi) {
+          if (getApi(eRENDERDOC_API_Version_1_4_1, (void **)&renderdoc_api) == 1) {
+
+          } else {
+            fprintf(stderr, "[RenderDoc] failed to retieve API functions!\n");
+          }
+        } else {
+          fprintf(stderr, "[RenderDoc] GetAPI not found!\n");
+        }
+      } else {
+        dll_not_found = true;
+        fprintf(stderr, "[RenderDoc] module not found!\n");
+      }
+#    endif
+    }
+  }
+  void _start() {
+    if (renderdoc_api && renderdoc_api->IsFrameCapturing()) return;
+#    ifdef WIN32
+    if (renderdoc_api == NULL) {
+      if (dll_not_found) return;
+      init();
+    }
+#    endif
+    if (renderdoc_api) {
+      renderdoc_api->StartFrameCapture(NULL, NULL);
+    }
+  }
+
+  void _end() {
+    if (renderdoc_api) {
+      if (!renderdoc_api->IsFrameCapturing()) return;
+      renderdoc_api->EndFrameCapture(NULL, NULL);
+    }
+  }
+
+  public:
+  static void start() { get()._start(); }
+  static void end() { get()._end(); }
+};
+
+#  endif
 
 static u32 enable_fpe() {
   u32 fe_value  = ~(    //
@@ -861,22 +933,22 @@ static inline void ATTR_USED write_image_2d_i8_ppm(const char *file_name, void *
   fclose(file);
 }
 
-struct Allocator {
-  virtual void *    alloc(size_t)                                     = 0;
-  virtual void *    realloc(void *, size_t old_size, size_t new_size) = 0;
-  virtual void      free(void *)                                      = 0;
-  static Allocator *get_default() {
-    struct _Allocator : public Allocator {
-      virtual void *alloc(size_t size) override { return tl_alloc(size); }
-      virtual void *realloc(void *ptr, size_t old_size, size_t new_size) override {
-        return tl_realloc(ptr, old_size, new_size);
-      }
-      virtual void free(void *ptr) override { tl_free(ptr); }
-    };
-    static _Allocator alloc;
-    return &alloc;
-  }
-};
+// struct Allocator {
+//  virtual void *    alloc(size_t)                                     = 0;
+//  virtual void *    realloc(void *, size_t old_size, size_t new_size) = 0;
+//  virtual void      free(void *)                                      = 0;
+//  static Allocator *get_default() {
+//    struct _Allocator : public Allocator {
+//      virtual void *alloc(size_t size) override { return tl_alloc(size); }
+//      virtual void *realloc(void *ptr, size_t old_size, size_t new_size) override {
+//        return tl_realloc(ptr, old_size, new_size);
+//      }
+//      virtual void free(void *ptr) override { tl_free(ptr); }
+//    };
+//    static _Allocator alloc;
+//    return &alloc;
+//  }
+//};
 
 struct Default_Allocator {
   static void *alloc(size_t size) { return tl_alloc(size); }
@@ -1058,6 +1130,21 @@ struct Array {
   T &back() {
     ASSERT_DEBUG(size != 0);
     return ptr[size - 1];
+  }
+
+  void insert(size_t index, T item) {
+    if (size == 0) {
+      ASSERT_DEBUG(index == 0);
+      push(item);
+      return;
+    }
+    ASSERT_DEBUG(index < size);
+    push({});
+    if (size == 1) return;
+    for (i32 i = size - 2; i >= 0; i--) {
+      ptr[i + 1] = ptr[i];
+    }
+    ptr[index] = item;
   }
 
   T pop() {
@@ -1380,6 +1467,273 @@ struct PCG {
     return (xorshifted >> rot) | (xorshifted << ((-rot) & 31));
   }
   f64 nextf() { return double(next()) / UINT32_MAX; }
+};
+
+template <typename K, typename Alloc_t = Default_Allocator> struct BinNode {
+  BinNode *left  = NULL;
+  BinNode *right = NULL;
+  K        key;
+  i32      depth = 1;
+  ~BinNode()     = delete;
+  explicit BinNode(K &&key) : key(std::move(key)) {}
+  static BinNode *create(K &&key) {
+    void *ptr = Alloc_t::alloc(sizeof(BinNode));
+    return new (ptr) BinNode(std::move(key));
+  }
+  template <typename F> static void dump_dotgraph(BinNode *root, string_ref filename, F f) {
+    if (root == NULL) return;
+    TMP_STORAGE_SCOPE;
+    FILE *dotgraph = fopen(stref_to_tmp_cstr(filename), "wb");
+    fprintf(dotgraph, "digraph {\n");
+    fprintf(dotgraph, "node [shape=record];\n");
+    BinNode **stack        = (BinNode **)tl_alloc_tmp(sizeof(BinNode *) * (1 << 10));
+    u32       stack_cursor = 0;
+    BinNode * cur          = NULL;
+    u32       null_id      = 0xffffffffu;
+    stack[stack_cursor++]  = root;
+    while (stack_cursor != 0) {
+      cur = stack[--stack_cursor];
+      ASSERT_ALWAYS(cur != NULL);
+      fprintf(dotgraph, "%p", (void *)cur);
+      f(dotgraph, "[label = \"%.*s\", shape = record];\n", cur);
+      if (cur->right)
+        fprintf(dotgraph, "%p -> %p [label = \"right\"];\n", (void *)cur,
+                (size_t)(void *)cur->right);
+      if (cur->left)
+        fprintf(dotgraph, "%p -> %p [label = \"left\"];\n", (void *)cur, (size_t)(void *)cur->left);
+      if (cur->right) stack[stack_cursor++] = cur->right;
+      if (cur->left) stack[stack_cursor++] = cur->left;
+    }
+    fprintf(dotgraph, "}\n");
+    fflush(dotgraph);
+    fclose(dotgraph);
+  }
+  // returns new root for the subtree
+  BinNode *put(K &&nk, bool replace = true) {
+    if (replace && key == nk) {
+      key = nk;
+      return this;
+    }
+    if (nk < key) {
+      if (left)
+        left = left->put(std::move(nk));
+      else {
+        left = create(std::move(nk));
+      }
+    } else {
+      if (right)
+        right = right->put(std::move(nk));
+      else {
+        right = create(std::move(nk));
+      }
+    }
+    return balance();
+  }
+  // returns new root for the subtree
+  BinNode *remove(K const &k) {
+    if (k == key) {
+      if (right == NULL && left == NULL) {
+        this->release();
+        return NULL;
+      }
+      BinNode *new_root = NULL;
+      if (get_diff() > 0)
+        new_root = rotate_left();
+      else
+        new_root = rotate_right();
+      return new_root->remove(k);
+    }
+    if (k < key) {
+      if (left) {
+        left = left->remove(k);
+      } else {
+        return this;
+      }
+    } else {
+      if (right) {
+        right = right->remove(k);
+      } else {
+        return this;
+      }
+    }
+    return balance();
+  }
+  template <typename T> void traverse_keys(T t) {
+    if (left) left->traverse_keys(t);
+    t(key);
+    if (right) right->traverse_keys(t);
+  }
+  template <typename T> void traverse(T t) {
+    if (left) left->traverse(t);
+    t(this);
+    if (right) right->traverse(t);
+  }
+  // returns new root for the subtree
+  BinNode *balance() {
+    update_depth();
+    i32 diff = get_diff();
+    if (std::abs(diff) > 1) {
+      if (diff > 0) {
+        if (right->get_diff() < 0) right = right->rotate_right();
+        return rotate_left();
+      } else {
+        if (left->get_diff() > 0) left = left->rotate_left();
+        return rotate_right();
+      }
+    }
+    return this;
+  }
+  i32 get_diff() {
+    i32 ld = left ? left->depth : 0;
+    i32 rd = right ? right->depth : 0;
+    return rd - ld;
+  }
+  // returns new root for the subtree
+  BinNode *rotate_left() {
+    ASSERT_DEBUG(right);
+    BinNode *new_root = this->right;
+    this->right       = new_root->left;
+    new_root->left    = this;
+    update_depth();
+    new_root->update_depth();
+    return new_root;
+  }
+  // returns new root for the subtree
+  BinNode *rotate_right() {
+    ASSERT_DEBUG(left);
+    BinNode *new_root = this->left;
+    this->left        = left->right;
+    new_root->right   = this;
+    update_depth();
+    new_root->update_depth();
+    return new_root;
+  }
+  void update_depth() {
+    depth = 1;
+    if (right) {
+      depth = MAX(depth, right->depth + 1);
+    }
+    if (left) {
+      depth = MAX(depth, left->depth + 1);
+    }
+    ASSERT_DEBUG(depth > 0);
+  }
+  BinNode *find(K const &k) {
+    if (key == k) return this;
+    if (k > key)
+      return right ? right->find(k) : NULL;
+    else
+      return left ? left->find(k) : NULL;
+  }
+  BinNode *lower_bound(K const &k) {
+    if (key == k) return this;
+    if (k > key) {
+      if (right) {
+        BinNode *lb = right->lower_bound(k);
+        return lb ? lb : this;
+      } else
+        return this;
+    } else if (left) {
+      return left->lower_bound(k);
+    } else
+      return NULL;
+  }
+  BinNode *upper_bound(K const &k) {
+    if (key == k) return this;
+    if (k < key) {
+      if (left) {
+        BinNode *ub = left->upper_bound(k);
+        return ub ? ub : this;
+      } else
+        return this;
+    } else if (right) {
+      return right->upper_bound(k);
+    } else
+      return NULL;
+  }
+  void release() {
+    if (left) left->release();
+    if (right) right->release();
+    Alloc_t::free(this);
+  }
+};
+
+class Util_Allocator {
+  private:
+  struct Alloc_Key {
+    u32  offset;
+    u32  size;
+    bool operator==(Alloc_Key const &that) const { return offset == that.offset; }
+    bool operator>(Alloc_Key const &that) const { return offset > that.offset; }
+    bool operator<(Alloc_Key const &that) const { return offset < that.offset; }
+  };
+  using BinNode_t      = BinNode<Alloc_Key>;
+  BinNode_t *free_root = NULL;
+
+  // Removed crap shite
+  Util_Allocator(Util_Allocator const &) = delete;
+  Util_Allocator(Util_Allocator &&)      = delete;
+  Util_Allocator &operator=(Util_Allocator const &) = delete;
+  Util_Allocator &operator=(Util_Allocator &&) = delete;
+
+  public:
+  ~Util_Allocator() {
+    if (free_root) free_root->release();
+  }
+  Util_Allocator(u32 size) { free_root = BinNode_t::create({0, size}); }
+  i32 alloc(u32 size) {
+    if (size == 0) {
+      return -1;
+    }
+    i32 offset = -1;
+    free_root->traverse([&](BinNode_t *node) {
+      if (offset >= 0) return;
+      if (node->key.size >= size) {
+        offset       = node->key.offset;
+        u32 new_size = node->key.size - size;
+        free_root    = free_root->remove({node->key});
+        if (new_size) {
+          if (free_root == NULL) {
+            free_root = BinNode_t::create({offset + size, new_size});
+          } else
+            free_root = free_root->put({offset + size, new_size});
+        }
+      }
+    });
+    return offset;
+  }
+  u32 get_free_space() {
+    if (free_root == NULL) return 0;
+    u32 size = 0;
+    free_root->traverse_keys([&](Alloc_Key const &key) { size += key.size; });
+    return size;
+  }
+  void free(u32 offset, u32 size) {
+    if (free_root == NULL) {
+      free_root = BinNode_t::create({offset, size});
+      return;
+    }
+    BinNode_t *ub = free_root->upper_bound({offset, 0});
+#ifdef DEBUG_BUILD
+    BinNode_t *lb = free_root->lower_bound({offset, 0});
+    if (lb) {
+      ASSERT_DEBUG(lb->key.offset + lb->key.size <= offset);
+    }
+#endif
+    if (ub) {
+      ASSERT_DEBUG(ub->key.offset > offset);
+      if (ub->key.offset == offset + size) {
+        u32 new_size = ub->key.size + size;
+        free_root    = free_root->remove(ub->key);
+        if (free_root == NULL) {
+          free_root = BinNode_t::create({offset, new_size});
+        } else
+          free_root = free_root->put({offset, new_size});
+        return;
+      }
+    }
+    free_root = free_root->put({offset, size});
+  }
 };
 
 #endif
