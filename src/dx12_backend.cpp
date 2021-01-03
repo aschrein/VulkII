@@ -30,16 +30,6 @@ using namespace Microsoft::WRL;
     }                                                                                              \
   } while (0)
 
-LPCWSTR towstr_tmp(string_ref str) {
-  std::wstring wide     = std::wstring(str.ptr, str.ptr + str.len);
-  size_t       wide_len = sizeof(wchar_t) * wide.size();
-  WCHAR const *src      = wide.c_str();
-  WCHAR *      tmp      = (WCHAR *)tl_alloc_tmp(wide_len + sizeof(wchar_t));
-  memcpy(tmp, wide.c_str(), wide_len);
-  tmp[wide.size()] = L'\0';
-  return tmp;
-}
-
 namespace {
 D3D12_RESOURCE_STATES to_dx(rd::Buffer_Access access) {
   switch (access) {
@@ -195,6 +185,7 @@ class DX12Device : public rd::IDevice {
   Resource_Array<DX12Binding_Signature *> signature_table;
   Resource_Array<IDxcBlob *>              shader_table;
   Resource_Array<ID3D12PipelineState *>   pso_table;
+  Resource_Array<HANDLE>                  events_table;
 
   AutoArray<Pair<Resource_ID, i32>> deferred_release;
 
@@ -231,7 +222,7 @@ class DX12Device : public rd::IDevice {
     DX_ASSERT_OK(D3D12CreateDevice(NULL, featureLevel, IID_PPV_ARGS(&device)));
     sampler_desc_heap = new GPU_Desc_Heap(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 2048);
     common_desc_heap =
-        new GPU_Desc_Heap(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1 << 20);
+        new GPU_Desc_Heap(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1 << 19);
 
     {
       D3D12_DESCRIPTOR_HEAP_DESC desc = {};
@@ -317,8 +308,10 @@ class DX12Device : public rd::IDevice {
     desc.Width              = info.size;
     if (info.usage_bits & (u32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER)
       desc.Width = ((desc.Width + 0xffU) & ~0xffu);
-    DX_ASSERT_OK(device->CreateCommittedResource(
-        &prop, flags, &desc, D3D12_RESOURCE_STATE_COMMON, NULL, IID_PPV_ARGS(&buf)));
+    auto state = D3D12_RESOURCE_STATE_COMMON;
+    if (info.memory_type == rd::Memory_Type::CPU_READ_WRITE) state = D3D12_RESOURCE_STATE_COPY_DEST;
+    DX_ASSERT_OK(
+        device->CreateCommittedResource(&prop, flags, &desc, state, NULL, IID_PPV_ARGS(&buf)));
     return {resource_table.push(buf), (u32)Resource_Type::BUFFER};
   }
   Resource_ID create_shader(rd::Stage_t type, string_ref text,
@@ -333,13 +326,13 @@ class DX12Device : public rd::IDevice {
     }();
     ComPtr<IDxcBlobEncoding> blob;
     DX_ASSERT_OK(library->CreateBlobWithEncodingFromPinned(text.ptr, (uint32_t)text.len, 0, &blob));
-    LPCWSTR profile = L"ps_6_0";
+    LPCWSTR profile = NULL;
     if (type == rd::Stage_t::VERTEX)
-      profile = L"vs_6_0";
+      profile = L"vs_6_2";
     else if (type == rd::Stage_t::PIXEL)
-      profile = L"ps_6_0";
+      profile = L"ps_6_2";
     else if (type == rd::Stage_t::COMPUTE)
-      profile = L"cs_6_0";
+      profile = L"cs_6_2";
     else {
       TRAP;
     }
@@ -395,7 +388,19 @@ class DX12Device : public rd::IDevice {
     //}
   }
   Resource_ID create_event() override {
-    std::lock_guard<std::mutex> _lock(mutex);
+    /* ComPtr<ID3D12Fence> fence;
+     {
+       std::lock_guard<std::mutex> _lock(mutex);
+       DX_ASSERT_OK(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)));
+     }
+     HANDLE event = CreateEventEx(nullptr, false, false, EVENT_ALL_ACCESS);
+     defer(CloseHandle(event));
+     DX_ASSERT_OK(fence->SetEventOnCompletion(1, event));
+     {
+       std::lock_guard<std::mutex> _lock(mutex);
+       cmd_queue->Signal(fence.Get(), 1);
+     }
+     WaitForSingleObject(event, INFINITE);*/
     TRAP;
   }
   Resource_ID create_timestamp() override {
@@ -426,7 +431,7 @@ class DX12Device : public rd::IDevice {
     D3D12_HEAP_FLAGS      flags{};
     DX_ASSERT_OK(res->GetHeapProperties(&prop, &flags));
     if (prop.Type == D3D12_HEAP_TYPE_READBACK) {
-      rr.End = desc.Width * 4;
+      rr.End = desc.Width;
     }
     void *data = NULL;
     DX_ASSERT_OK(res->Map(0, &rr, &data));
@@ -440,7 +445,7 @@ class DX12Device : public rd::IDevice {
     rr.End                   = 0;
     D3D12_RESOURCE_DESC desc = res->GetDesc();
     ASSERT_DEBUG(desc.Format = DXGI_FORMAT_R32_TYPELESS);
-    rr.End = desc.Width * 4;
+    rr.End = desc.Width;
     res->Unmap(0, &rr);
   }
   Resource_ID create_render_pass(rd::Render_Pass_Create_Info const &info) override {
@@ -489,7 +494,6 @@ class DX12Device : public rd::IDevice {
     TRAP;
   }
   void wait_idle() override {
-
     ComPtr<ID3D12Fence> fence;
     {
       std::lock_guard<std::mutex> _lock(mutex);
@@ -723,8 +727,8 @@ class DX12Binding_Table : public rd::IBinding_Table {
                     ((u64)space_offset + (u64)binding_offset)});
   }
   void bind_sampler(u32 space, u32 binding, Resource_ID sampler_id) override { TRAP; }
-  void bind_structured_UAV_buffer(u32 space, u32 binding, Resource_ID buf_id, size_t offset,
-                                  size_t size, size_t stride) override {
+  void bind_UAV_buffer(u32 space, u32 binding, Resource_ID buf_id, size_t offset,
+                       size_t size) override {
     ID3D12Resource *res = dev_ctx->get_resource(buf_id.id);
 #ifdef DEBUG_BUILD
     {
@@ -737,11 +741,11 @@ class DX12Binding_Table : public rd::IBinding_Table {
     D3D12_UNORDERED_ACCESS_VIEW_DESC desc{};
     desc.ViewDimension               = D3D12_UAV_DIMENSION_BUFFER;
     desc.Buffer.CounterOffsetInBytes = 0;
-    desc.Buffer.FirstElement         = offset / stride;
-    desc.Buffer.Flags                = D3D12_BUFFER_UAV_FLAG_NONE; // D3D12_BUFFER_UAV_FLAG_RAW;
-    desc.Buffer.NumElements          = size / stride;
-    desc.Buffer.StructureByteStride  = stride;
-    desc.Format                      = DXGI_FORMAT_UNKNOWN;
+    desc.Buffer.FirstElement         = offset / 4;
+    desc.Buffer.Flags                = D3D12_BUFFER_UAV_FLAG_RAW;
+    desc.Buffer.NumElements          = size / 4;
+    desc.Buffer.StructureByteStride  = 0;
+    desc.Format                      = DXGI_FORMAT_R32_TYPELESS;
     u32 space_offset                 = signature->common_parameter_heap_offsets[space];
     u32 binding_offset =
         signature->space_descs[space].ranges[binding].OffsetInDescriptorsFromTableStart;
@@ -851,7 +855,9 @@ class DX12Context : public rd::ICtx {
   }
   void copy_buffer(Resource_ID src_buf_id, size_t src_offset, Resource_ID dst_buf_id,
                    size_t dst_offset, u32 size) override {
-    TRAP;
+    ID3D12Resource *src = dev_ctx->get_resource(src_buf_id.id);
+    ID3D12Resource *dst = dev_ctx->get_resource(dst_buf_id.id);
+    cmd->CopyBufferRegion(dst, dst_offset, src, src_offset, size);
   }
   // Synchronization
   void image_barrier(Resource_ID image_id, rd::Image_Access access) override { TRAP; }

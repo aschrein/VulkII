@@ -46,53 +46,53 @@ static inline bool parse_decimal_int(char const *str, size_t len, int32_t *resul
 }
 
 template <typename T> static inline bool parse_float(char const *str, i32 len, T *result) {
-  T        final = 0.0;
+  T   final = (T)0.0;
   i32 i     = 0;
-  T        sign  = 1.0;
+  T   sign  = (T)1.0;
   if (str[0] == '-') {
-    sign = -1.0;
+    sign = (T)-1.0;
     i    = 1;
   }
   for (; i < len; ++i) {
     if (str[i] == '.') break;
     switch (str[i]) {
     case '\0': goto finish;
-    case '0': final = final * 10.0; break;
-    case '1': final = final * 10.0 + 1.0; break;
-    case '2': final = final * 10.0 + 2.0; break;
-    case '3': final = final * 10.0 + 3.0; break;
-    case '4': final = final * 10.0 + 4.0; break;
-    case '5': final = final * 10.0 + 5.0; break;
-    case '6': final = final * 10.0 + 6.0; break;
-    case '7': final = final * 10.0 + 7.0; break;
-    case '8': final = final * 10.0 + 8.0; break;
-    case '9': final = final * 10.0 + 9.0; break;
+    case '0': final = final * (T)10.0; break;
+    case '1': final = final * (T)10.0 + (T)1.0; break;
+    case '2': final = final * (T)10.0 + (T)2.0; break;
+    case '3': final = final * (T)10.0 + (T)3.0; break;
+    case '4': final = final * (T)10.0 + (T)4.0; break;
+    case '5': final = final * (T)10.0 + (T)5.0; break;
+    case '6': final = final * (T)10.0 + (T)6.0; break;
+    case '7': final = final * (T)10.0 + (T)7.0; break;
+    case '8': final = final * (T)10.0 + (T)8.0; break;
+    case '9': final = final * (T)10.0 + (T)9.0; break;
     default: return false;
     }
   }
   if (str[i] == '.') {
     i++;
-    T pow = 1.0e-1f;
+    T pow = (T)1.0e-1;
     for (; i < len; ++i) {
       switch (str[i]) {
       case '\0': goto finish;
       case '0': break;
-      case '1': final += 1.0 * pow; break;
-      case '2': final += 2.0 * pow; break;
-      case '3': final += 3.0 * pow; break;
-      case '4': final += 4.0 * pow; break;
-      case '5': final += 5.0 * pow; break;
-      case '6': final += 6.0 * pow; break;
-      case '7': final += 7.0 * pow; break;
-      case '8': final += 8.0 * pow; break;
-      case '9': final += 9.0 * pow; break;
+      case '1': final += (T)1.0 * pow; break;
+      case '2': final += (T)2.0 * pow; break;
+      case '3': final += (T)3.0 * pow; break;
+      case '4': final += (T)4.0 * pow; break;
+      case '5': final += (T)5.0 * pow; break;
+      case '6': final += (T)6.0 * pow; break;
+      case '7': final += (T)7.0 * pow; break;
+      case '8': final += (T)8.0 * pow; break;
+      case '9': final += (T)9.0 * pow; break;
       case 'f': goto finish;
       case 'F': goto finish;
       case 'e': goto parse_exponent;
       case 'E': goto parse_exponent;
       default: return false;
       }
-      pow *= 1.0e-1;
+      pow *= (T)1.0e-1;
     }
 
   parse_exponent:
@@ -119,19 +119,20 @@ static double parse_float(char const *str) {
 }
 
 static int __test_float_parsing = [] {
+  double EPS = 1.0e-6;
   ASSERT_ALWAYS(parse_float("0.0") == 0.0);
   ASSERT_ALWAYS(parse_float("0000000000.0000000000") == 0.0);
   ASSERT_ALWAYS(parse_float("0.0000000000") == 0.0);
   ASSERT_ALWAYS(parse_float("-0.0000000000") == 0.0);
-  ASSERT_ALWAYS(int(parse_float("1.12") * 100.0) == 112);
-  ASSERT_ALWAYS(int(parse_float("123.123") * 1000.0) == 123123);
-  ASSERT_ALWAYS(int(parse_float("-1.12e-1") * 1000.0) == -112);
-  ASSERT_ALWAYS(int(parse_float("-5")) == -5);
-  ASSERT_ALWAYS(int(parse_float("-2")) == -2);
-  ASSERT_ALWAYS(int(parse_float("1.12e+1") * 10.0) == 112);
-  ASSERT_ALWAYS(int(parse_float("1.12e+2") * 1.0) == 112);
-  ASSERT_ALWAYS(int(parse_float("1.12e+2f") * 1.0) == 112);
-  ASSERT_ALWAYS(int(parse_float("1.12e+2F") * 1.0) == 112);
+  ASSERT_ALWAYS(int(parse_float("1.12") * 100.0  * (1.0 + EPS)) == 112);
+  ASSERT_ALWAYS(int(parse_float("125.125") * 1000.0  * (1.0 + EPS)) == 125125);
+  ASSERT_ALWAYS(int(parse_float("-1.12e-1") * 1000.0  * (1.0 + EPS)) == -112);
+  ASSERT_ALWAYS(int(parse_float("-5")  * (1.0 + EPS)) == -5);
+  ASSERT_ALWAYS(int(parse_float("-2")  * (1.0 + EPS)) == -2);
+  ASSERT_ALWAYS(int(parse_float("1.12e+1") * 10.0  * (1.0 + EPS)) == 112);
+  ASSERT_ALWAYS(int(parse_float("1.12e+2") * 1.0  * (1.0 + EPS)) == 112);
+  ASSERT_ALWAYS(int(parse_float("1.12e+2f") * 1.0  * (1.0 + EPS)) == 112);
+  ASSERT_ALWAYS(int(parse_float("1.12e+2F") * 1.0  * (1.0 + EPS)) == 112);
 
   return 0;
 }();
@@ -815,7 +816,9 @@ static Expr *tmp_alloc_expr() {
   memset(out, 0, sizeof(Expr));
   return out;
 }
-static bool isLiteral(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; }
+static bool isLiteral(char c) {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
 static bool isPrintable(char c) { return c >= 0x20 && c <= 0x7F; }
 static bool isNumeral(char c) { return c >= '0' && c <= '9'; }
 static void skipSpaces(char const *&cursor) {

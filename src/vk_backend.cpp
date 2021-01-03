@@ -6,23 +6,9 @@
 #define SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS
 
 #include <3rdparty/dxc/dxcapi.h>
-#include <codecvt>
-#include <locale>
 #include <mutex>
 #include <string>
 #include <thread>
-
-LPCWSTR towstr_tmp(string_ref str) {
-  //  std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
-  //  std::wstring wide = converter.from_bytes(str.ptr, str.ptr + str.len);
-  std::wstring wide     = std::wstring(str.ptr, str.ptr + str.len);
-  size_t       wide_len = sizeof(wchar_t) * wide.size();
-  WCHAR const *src      = wide.c_str();
-  WCHAR *      tmp      = (WCHAR *)tl_alloc_tmp(wide_len + sizeof(wchar_t));
-  memcpy(tmp, wide.c_str(), wide_len);
-  tmp[wide.size()] = L'\0';
-  return tmp;
-}
 
 #ifdef __linux__
 #  define VK_USE_PLATFORM_XCB_KHR
@@ -51,27 +37,27 @@ LPCWSTR towstr_tmp(string_ref str) {
     }                                                                                              \
   } while (0)
 
-VKAPI_ATTR VkBool32 VKAPI_CALL dbgFunc(VkDebugReportFlagsEXT flags,
-                                       VkDebugReportObjectTypeEXT /*objType*/,
-                                       uint64_t /*srcObject*/, size_t /*location*/, int32_t msgCode,
-                                       const char *pLayerPrefix, const char *pMsg,
-                                       void * /*pUserData*/) {
-
-  switch (flags) {
-  case VK_DEBUG_REPORT_INFORMATION_BIT_EXT: fprintf(stdout, "INFORMATION: "); break;
-  case VK_DEBUG_REPORT_WARNING_BIT_EXT: fprintf(stdout, "WARNING: "); break;
-  case VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT: fprintf(stdout, "PERFORMANCE WARNING: "); break;
-  case VK_DEBUG_REPORT_ERROR_BIT_EXT: fprintf(stdout, "ERROR: "); break;
-  case VK_DEBUG_REPORT_DEBUG_BIT_EXT: fprintf(stdout, "DEBUG: "); break;
-  default: fprintf(stdout, "unknown flag %i", (int)flags); break;
-  }
-
-  fprintf(stdout, pLayerPrefix);
-  fprintf(stdout, " ");
-  fprintf(stdout, pMsg);
-
-  return false;
-}
+// VKAPI_ATTR VkBool32 VKAPI_CALL dbgFunc(VkDebugReportFlagsEXT flags,
+//                                       VkDebugReportObjectTypeEXT /*objType*/,
+//                                       uint64_t /*srcObject*/, size_t /*location*/, int32_t
+//                                       msgCode, const char *pLayerPrefix, const char *pMsg, void *
+//                                       /*pUserData*/) {
+//
+//  switch (flags) {
+//  case VK_DEBUG_REPORT_INFORMATION_BIT_EXT: fprintf(stdout, "INFORMATION: "); break;
+//  case VK_DEBUG_REPORT_WARNING_BIT_EXT: fprintf(stdout, "WARNING: "); break;
+//  case VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT: fprintf(stdout, "PERFORMANCE WARNING: ");
+//  break; case VK_DEBUG_REPORT_ERROR_BIT_EXT: fprintf(stdout, "ERROR: "); break; case
+//  VK_DEBUG_REPORT_DEBUG_BIT_EXT: fprintf(stdout, "DEBUG: "); break; default: fprintf(stdout,
+//  "unknown flag %i", (int)flags); break;
+//  }
+//
+//  fprintf(stdout, pLayerPrefix);
+//  fprintf(stdout, " ");
+//  fprintf(stdout, pMsg);
+//
+//  return false;
+//}
 
 namespace {
 Pool<char> string_storage = Pool<char>::create(1 << 20);
@@ -112,6 +98,7 @@ enum class Resource_Type : u32 {
   SET,
   GRAPHICS_PSO,
   COMPUTE_PSO,
+  SIGNATURE,
   NONE
 };
 
@@ -126,21 +113,22 @@ struct Ref_Cnt : public Slot {
 };
 
 struct Mem_Chunk : public Ref_Cnt {
-  std::mutex            mapped;
+  std::mutex *          mapped_mutex     = NULL;
   VkDeviceMemory        mem              = VK_NULL_HANDLE;
   VkMemoryPropertyFlags prop_flags       = 0;
   u32                   size             = 0;
   u32                   cursor           = 0; // points to the next free 4kb byte block
   u32                   memory_type_bits = 0;
-  void                  dump() {
+
+  void dump() {
     fprintf(stdout, "Mem_Chunk {\n");
     fprintf(stdout, "  ref_cnt: %i\n", ref_cnt);
     fprintf(stdout, "  size   : %i\n", size);
     fprintf(stdout, "  cursor : %i\n", cursor);
     fprintf(stdout, "}\n");
   }
-  void lock() { mapped.lock(); }
-  void unlock() { mapped.unlock(); }
+  void lock() { mapped_mutex->lock(); }
+  void unlock() { mapped_mutex->unlock(); }
   void init(VkDevice device, u32 size, u32 heap_index, VkMemoryPropertyFlags prop_flags,
             u32 type_bits) {
     VkMemoryAllocateInfo info;
@@ -153,10 +141,12 @@ struct Mem_Chunk : public Ref_Cnt {
     this->prop_flags       = prop_flags;
     this->memory_type_bits = type_bits;
     this->cursor           = 0;
+    mapped_mutex           = new std::mutex;
   }
   void release(VkDevice device) {
+    delete mapped_mutex;
     vkFreeMemory(device, mem, NULL);
-    memset(this, 0, sizeof(*this));
+    MEMZERO(*this);
   }
   bool is_empty() const { return mem == VK_NULL_HANDLE; }
   bool has_space(u32 alignment, u32 req_size) {
@@ -274,20 +264,79 @@ struct Image_Info {
   VkSharingMode         sharingMode;
 };
 
-VkAccessFlags to_vk_access_flags(u32 flags) {
-  u32 out = 0;
-  // clang-format off
-  if (flags & rd::Access_Bits::UNIFORM_READ                     ) out |= VK_ACCESS_UNIFORM_READ_BIT                   ;
-  if (flags & rd::Access_Bits::SHADER_READ                      ) out |= VK_ACCESS_SHADER_READ_BIT                    ;
-  if (flags & rd::Access_Bits::SHADER_WRITE                     ) out |= VK_ACCESS_SHADER_WRITE_BIT                   ;
-  if (flags & rd::Access_Bits::TRANSFER_READ                    ) out |= VK_ACCESS_TRANSFER_READ_BIT                  ;
-  if (flags & rd::Access_Bits::TRANSFER_WRITE                   ) out |= VK_ACCESS_TRANSFER_WRITE_BIT                 ;
-  if (flags & rd::Access_Bits::HOST_READ                        ) out |= VK_ACCESS_HOST_READ_BIT                      ;
-  if (flags & rd::Access_Bits::HOST_WRITE                       ) out |= VK_ACCESS_HOST_WRITE_BIT                     ;
-  if (flags & rd::Access_Bits::MEMORY_READ                      ) out |= VK_ACCESS_MEMORY_READ_BIT                    ;
-  if (flags & rd::Access_Bits::MEMORY_WRITE                     ) out |= VK_ACCESS_MEMORY_WRITE_BIT                   ;
-  // clang-format on
-  return out;
+// VkAccessFlags to_vk_access_flags(u32 flags) {
+//  u32 out = 0;
+//  // clang-format off
+//  if (flags & rd::Access_Bits::UNIFORM_READ                     ) out |=
+//  VK_ACCESS_UNIFORM_READ_BIT                   ; if (flags & rd::Access_Bits::SHADER_READ ) out |=
+//  VK_ACCESS_SHADER_READ_BIT                    ; if (flags & rd::Access_Bits::SHADER_WRITE ) out
+//  |= VK_ACCESS_SHADER_WRITE_BIT                   ; if (flags & rd::Access_Bits::TRANSFER_READ )
+//  out |= VK_ACCESS_TRANSFER_READ_BIT                  ; if (flags &
+//  rd::Access_Bits::TRANSFER_WRITE                   ) out |= VK_ACCESS_TRANSFER_WRITE_BIT ; if
+//  (flags & rd::Access_Bits::HOST_READ                        ) out |= VK_ACCESS_HOST_READ_BIT ; if
+//  (flags & rd::Access_Bits::HOST_WRITE                       ) out |= VK_ACCESS_HOST_WRITE_BIT ;
+//  if (flags & rd::Access_Bits::MEMORY_READ                      ) out |= VK_ACCESS_MEMORY_READ_BIT
+//  ; if (flags & rd::Access_Bits::MEMORY_WRITE                     ) out |=
+//  VK_ACCESS_MEMORY_WRITE_BIT                   ;
+//  // clang-format on
+//  return out;
+//}
+
+VkAccessFlags to_vk(rd::Buffer_Access access) {
+  switch (access) {
+  case rd::Buffer_Access::GENERIC: return 0;
+  case rd::Buffer_Access::HOST_READ: return VK_ACCESS_HOST_READ_BIT;
+  case rd::Buffer_Access::HOST_READ_WRITE:
+    return VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT;
+  case rd::Buffer_Access::INDEX_BUFFER: return VK_ACCESS_INDEX_READ_BIT;
+  case rd::Buffer_Access::TRANSFER_DST: return VK_ACCESS_MEMORY_WRITE_BIT;
+  case rd::Buffer_Access::TRANSFER_SRC: return VK_ACCESS_MEMORY_READ_BIT;
+  case rd::Buffer_Access::UAV: return VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+  case rd::Buffer_Access::UNIFORM: return VK_ACCESS_UNIFORM_READ_BIT;
+  case rd::Buffer_Access::VERTEX_BUFFER: return VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+  default: TRAP;
+  }
+}
+
+void to_vk(rd::Image_Access access, VkAccessFlags &bits, VkImageLayout &layout) {
+  switch (access) {
+  case rd::Image_Access::COLOR_TARGET: {
+    bits   = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    return;
+  }
+  case rd::Image_Access::DEPTH_TARGET: {
+    bits   = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    return;
+  }
+  case rd::Image_Access::GENERIC: {
+    bits   = 0;
+    layout = VK_IMAGE_LAYOUT_GENERAL;
+    return;
+  }
+  case rd::Image_Access::SAMPLED: {
+    bits   = VK_ACCESS_SHADER_READ_BIT;
+    layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    return;
+  }
+  case rd::Image_Access::TRANSFER_DST: {
+    bits   = VK_ACCESS_MEMORY_WRITE_BIT;
+    layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    return;
+  }
+  case rd::Image_Access::TRANSFER_SRC: {
+    bits   = VK_ACCESS_MEMORY_READ_BIT;
+    layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    return;
+  }
+  case rd::Image_Access::UAV: {
+    bits   = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    layout = VK_IMAGE_LAYOUT_GENERAL;
+    return;
+  }
+  default: TRAP;
+  }
 }
 
 VkDescriptorType to_vk(rd::Binding_t type) {
@@ -304,16 +353,16 @@ VkDescriptorType to_vk(rd::Binding_t type) {
   // clang-format on
 }
 
-VkImageLayout to_vk(rd::Image_Layout layout) {
+VkImageLayout to_vk(rd::Image_Access layout) {
   // clang-format off
   switch (layout) {
-  case rd::Image_Layout::GENERIC                       : return VK_IMAGE_LAYOUT_GENERAL;
-  case rd::Image_Layout::COLOR_TARGET_OPTIMAL          : return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-  case rd::Image_Layout::DEPTH_TARGET_OPTIMAL          : return VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-  case rd::Image_Layout::UAV_OPTIMAL                   : return VK_IMAGE_LAYOUT_GENERAL;
-  case rd::Image_Layout::READ_ONLY_OPTIMAL             : return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-  case rd::Image_Layout::TRANSFER_DST_OPTIMAL          : return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-  case rd::Image_Layout::TRANSFER_SRC_OPTIMAL          : return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+  case rd::Image_Access::GENERIC                       : return VK_IMAGE_LAYOUT_GENERAL;
+  case rd::Image_Access::COLOR_TARGET                  : return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  case rd::Image_Access::DEPTH_TARGET                  : return VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+  case rd::Image_Access::UAV                           : return VK_IMAGE_LAYOUT_GENERAL;
+  case rd::Image_Access::SAMPLED                       : return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  case rd::Image_Access::TRANSFER_DST                  : return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+  case rd::Image_Access::TRANSFER_SRC                  : return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
   default: UNIMPLEMENTED;
   }
   // clang-format on
@@ -1004,9 +1053,7 @@ struct Shader_Reflection {
       MEMZERO(set_layout_create_info);
       set_layout_create_info.bindingCount = num_bindings;
       set_layout_create_info.pBindings    = &set_bindings[0];
-      set_layout_create_info.flags        = 0
-          //  | VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT
-          ;
+      set_layout_create_info.flags = 0 | VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
       set_layout_create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
       set_layout_create_info.pNext = (void *)&binding_infos;
       VkDescriptorSetLayout set_layout;
@@ -1092,23 +1139,33 @@ Shader_Reflection reflect_shader(Shader_Info const &info) {
 
 class VkDeviceContext;
 
+struct VK_Binding_Signature {
+  VkPipelineLayout                         pipeline_layout = VK_NULL_HANDLE;
+  InlineArray<VkDescriptorSetLayout, 0x10> set_layouts{};
+  u32                                      push_constants_size = 0;
+  static VK_Binding_Signature *            create(VkDeviceContext *                    dev_ctx,
+                                                  rd::Binding_Table_Create_Info const &info);
+  void                                     release(VkDeviceContext *dev_ctx);
+};
+
+struct VK_Binding_Signature_Slot : public Slot {
+  VK_Binding_Signature *signature = NULL;
+  VK_Binding_Signature_Slot()     = default;
+  VK_Binding_Signature_Slot(VK_Binding_Signature *signature) : signature(signature) {}
+};
+
 class VK_Binding_Table : public rd::IBinding_Table {
   private:
-  VkDeviceContext *                        dev_ctx = NULL;
-  InlineArray<VkDescriptorSet, 0x10>       sets{};
-  InlineArray<VkDescriptorSetLayout, 0x10> set_layouts{};
-  VkPipelineLayout                         pipeline_layout     = VK_NULL_HANDLE;
-  u32                                      push_constants_size = 0;
+  VkDeviceContext *                  dev_ctx   = NULL;
+  VK_Binding_Signature *             signature = NULL;
+  InlineArray<VkDescriptorSet, 0x10> sets{};
+  u8                                 push_constants_storage[128]{};
 
   public:
-  u32                      get_push_constants_size() { return push_constants_size; }
   u32                      get_num_sets() { return sets.size; }
   VkDescriptorSet          get_set(u32 i) { return sets[i]; }
-  VkDescriptorSetLayout    get_set_layout(u32 i) { return set_layouts[i]; }
-  VkPipelineLayout         get_pipeline_layout() { return pipeline_layout; }
-  static VK_Binding_Table *create(VkDeviceContext *                    dev_ctx,
-                                  rd::Binding_Table_Create_Info const *infos, u32 num_tables,
-                                  u32 push_constants_size);
+  VK_Binding_Signature *   get_signature() { return signature; }
+  static VK_Binding_Table *create(VkDeviceContext *dev_ctx, VK_Binding_Signature *signature);
   VkDescriptorSet          get_set();
   VkDescriptorSetLayout    get_set_layout();
   void                     bind_cbuffer(u32 space, u32 binding, Resource_ID buf_id, size_t offset,
@@ -1121,7 +1178,20 @@ class VK_Binding_Table : public rd::IBinding_Table {
   void bind_UAV_texture(u32 space, u32 binding, u32 index, Resource_ID image_id,
                         rd::Image_Subresource const &range, rd::Format format) override;
   void release() override;
+  void push_constants(void const *data, size_t offset, size_t size) override {
+    memcpy(push_constants_storage + offset, data, size);
+  }
   void clear_bindings() override { TRAP; }
+  void bind(VkCommandBuffer cmd, VkPipelineBindPoint bind_point) {
+    if (signature->push_constants_size) {
+      vkCmdPushConstants(cmd, signature->pipeline_layout, VK_SHADER_STAGE_ALL, 0,
+                         signature->push_constants_size, push_constants_storage);
+    }
+    ito(signature->set_layouts.size) {
+      VkDescriptorSet set = sets[i];
+      vkCmdBindDescriptorSets(cmd, bind_point, signature->pipeline_layout, 0, 1, &set, 0, NULL);
+    }
+  }
 };
 
 struct Graphics_Pipeline_Wrapper : public Slot {
@@ -1145,10 +1215,10 @@ struct Graphics_Pipeline_Wrapper : public Slot {
     MEMZERO(*this);
   }
 
-  void init(VkDevice          device,                   //
-            VK_Binding_Table *table, Render_Pass &pass, //
-            Shader_Info &            vs_shader,         //
-            Shader_Info &            ps_shader,         //
+  void init(VkDevice              device,                   //
+            VK_Binding_Signature *table, Render_Pass &pass, //
+            Shader_Info &            vs_shader,             //
+            Shader_Info &            ps_shader,             //
             Graphics_Pipeline_State &pipeline_info) {
     MEMZERO(*this);
     (void)pipeline_info;
@@ -1209,7 +1279,7 @@ struct Graphics_Pipeline_Wrapper : public Slot {
       VkGraphicsPipelineCreateInfo info;
       MEMZERO(info);
       info.sType  = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-      info.layout = table->get_pipeline_layout();
+      info.layout = table->pipeline_layout;
 
       VkPipelineColorBlendStateCreateInfo blend_create_info;
       MEMZERO(blend_create_info);
@@ -1332,8 +1402,8 @@ struct Compute_Pipeline_Wrapper : public Slot {
     MEMZERO(*this);
   }
 
-  void init(VkDevice          device, //
-            VK_Binding_Table *table, Shader_Info &cs_shader) {
+  void init(VkDevice              device, //
+            VK_Binding_Signature *table, Shader_Info &cs_shader) {
     MEMZERO(*this);
     // InlineArray<VkDescriptorSetLayout, 8> set_layouts;
     // MEMZERO(set_layouts);
@@ -1394,7 +1464,7 @@ struct Compute_Pipeline_Wrapper : public Slot {
       VkComputePipelineCreateInfo info;
       MEMZERO(info);
       info.sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-      info.layout = table->get_pipeline_layout();
+      info.layout = table->pipeline_layout;
       info.stage  = stages[0];
       VK_ASSERT_OK(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &info, NULL, &pipeline));
     }
@@ -1610,7 +1680,7 @@ struct VkDeviceContext {
       ito(items.size) { // look for a free memory chunk slot
         Mem_Chunk &chunk = items[i];
         if (chunk.is_empty()) {
-          chunk = new_chunk;
+          chunk = std::move(new_chunk);
           return ID{i + 1};
         }
       }
@@ -1636,6 +1706,18 @@ struct VkDeviceContext {
       }
     }
   } mem_chunks;
+  struct Signature_Array : Resource_Array<VK_Binding_Signature_Slot, Signature_Array> {
+    static constexpr char const NAME[]  = "Signature_Array";
+    VkDeviceContext *           dev_ctx = NULL;
+    void                        release_item(VK_Binding_Signature_Slot &item) {
+      item.signature->release(dev_ctx);
+      item.signature = NULL;
+    }
+    void init(VkDeviceContext *dev_ctx) {
+      this->dev_ctx = dev_ctx;
+      Resource_Array::init();
+    }
+  } signatures;
   struct Buffer_Array : Resource_Array<Buffer, Buffer_Array> {
     static constexpr char const NAME[]  = "Buffer_Array";
     VkDeviceContext *           dev_ctx = NULL;
@@ -1824,6 +1906,7 @@ struct VkDeviceContext {
     pipeline_cache.init();
     compute_pipeline_cache.init();
     mem_chunks.init(this);
+    signatures.init(this);
     buffers.init(this);
     samplers.init(this);
     images.init(this);
@@ -1859,6 +1942,7 @@ struct VkDeviceContext {
     semaphores.release();
     // ito(mem_chunks.size) mem_chunks[i].release(device);
     mem_chunks.release();
+    signatures.release();
     ito(sc_image_count) jto(MAX_THREADS) if (cmd_pools[i][j] != VK_NULL_HANDLE)
         vkDestroyCommandPool(device, cmd_pools[i][j], NULL);
     vkDeviceWaitIdle(device);
@@ -2354,6 +2438,8 @@ struct VkDeviceContext {
     } else if (res_id.type == (u32)Resource_Type::TIMESTAMP) {
     } else if (res_id.type == (u32)Resource_Type::GRAPHICS_PSO) {
       pipelines.remove(res_id.id, 3);
+    } else if (res_id.type == (u32)Resource_Type::SIGNATURE) {
+      signatures.remove(res_id.id, 3);
     } else if (res_id.type == (u32)Resource_Type::COMPUTE_PSO) {
       compute_pipelines.remove(res_id.id, 3);
     } else {
@@ -2615,6 +2701,7 @@ struct VkDeviceContext {
     vkGetPhysicalDeviceFeatures2(physdevice, &pd_features2);
     ASSERT_DEBUG(pd_index_features.shaderSampledImageArrayNonUniformIndexing);
     ASSERT_DEBUG(pd_index_features.descriptorBindingPartiallyBound);
+    ASSERT_DEBUG(pd_index_features.descriptorBindingUniformBufferUpdateAfterBind);
     ASSERT_DEBUG(pd_index_features.runtimeDescriptorArray);
 
     VkPhysicalDeviceFeatures pd_features;
@@ -2809,6 +2896,7 @@ struct VkDeviceContext {
     image_views.tick();
     render_passes.tick();
     pipelines.tick();
+    signatures.tick();
     compute_pipelines.tick();
     fences.tick();
     events.tick();
@@ -2963,28 +3051,12 @@ class Vk_Ctx : public rd::ICtx {
   Resource_ID       cmd_id{};
   VkCommandBuffer   cmd{};
   ID                cur_pass{};
-  u8                push_constants_storage[128]{};
   VK_Binding_Table *binding_table = NULL;
 
   template <typename K, typename V> using Table = Hash_Table<K, V, Default_Allocator, 0x1000>;
   Table<Resource_ID, BufferLaoutTracker> buffer_layouts;
   Table<Resource_ID, ImageLayoutTracker> image_layouts;
   Pool<u8>                               tmp_pool;
-
-  void _bind_sets() {
-    if (binding_table == NULL) return;
-    if (binding_table->get_push_constants_size()) {
-      vkCmdPushConstants(cmd, binding_table->get_pipeline_layout(), VK_SHADER_STAGE_ALL, 0,
-                         binding_table->get_push_constants_size(), push_constants_storage);
-    }
-    ito(binding_table->get_num_sets()) {
-      VkPipelineBindPoint bind_point = type == rd::Pass_t::RENDER ? VK_PIPELINE_BIND_POINT_GRAPHICS
-                                                                  : VK_PIPELINE_BIND_POINT_COMPUTE;
-      VkDescriptorSet set = binding_table->get_set(i);
-      vkCmdBindDescriptorSets(cmd, bind_point, binding_table->get_pipeline_layout(), 0, 1, &set, 0,
-                              NULL);
-    }
-  }
 
   VkImageLayout _get_image_layout(Resource_ID img_id) {
     if (!image_layouts.contains(img_id)) {
@@ -3099,6 +3171,13 @@ class Vk_Ctx : public rd::ICtx {
     info.bufferImageHeight = image.info.extent.height;
     vkCmdCopyBufferToImage(cmd, buffer.buffer, image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
                            &info);
+  }
+
+  void _bind_sets() {
+    if (binding_table) {
+      binding_table->bind(cmd, type == rd::Pass_t::RENDER ? VK_PIPELINE_BIND_POINT_GRAPHICS
+                                                          : VK_PIPELINE_BIND_POINT_COMPUTE);
+    }
   }
 
   public:
@@ -3245,9 +3324,6 @@ class Vk_Ctx : public rd::ICtx {
     vkResetQueryPool(dev_ctx->device, pool, id.id.index(), 1);
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, pool, id.id.index());
   }
-  void push_constants(void const *data, size_t offset, size_t size) override {
-    memcpy(push_constants_storage + offset, data, size);
-  }
   void copy_image_to_buffer(Resource_ID buf_id, size_t offset, Resource_ID img_id,
                             rd::Image_Copy const &dst_info) override {
     _copy_image_buffer(buf_id, offset, img_id, dst_info);
@@ -3286,14 +3362,16 @@ class Vk_Ctx : public rd::ICtx {
     _bind_sets();
     vkCmdDispatch(cmd, dim_x, dim_y, dim_z);
   }
-  virtual void image_barrier(Resource_ID image_id, u32 access_flags,
-                             rd::Image_Layout layout) override {
+  virtual void image_barrier(Resource_ID image_id, rd::Image_Access access) override {
     ASSERT_ALWAYS(type == rd::Pass_t::COMPUTE);
-    _image_barrier(cmd, image_id, to_vk_access_flags(access_flags), to_vk(layout));
+    VkAccessFlags bits{};
+    VkImageLayout layout{};
+    to_vk(access, bits, layout);
+    _image_barrier(cmd, image_id, bits, layout);
   }
-  virtual void buffer_barrier(Resource_ID buf_id, u32 access_flags) override {
+  virtual void buffer_barrier(Resource_ID buf_id, rd::Buffer_Access access) override {
     ASSERT_ALWAYS(type == rd::Pass_t::COMPUTE);
-    _buffer_barrier(cmd, buf_id, to_vk_access_flags(access_flags));
+    _buffer_barrier(cmd, buf_id, to_vk(access));
   }
   void fill_buffer(Resource_ID id, size_t offset, size_t size, u32 value) override {
     Buffer buf = dev_ctx->buffers.read(id.id);
@@ -3378,8 +3456,9 @@ class VkFactory : public rd::IDevice {
     return dev_ctx->create_image(info.width, info.height, info.depth, info.layers, info.levels,
                                  to_vk(info.format), info.usage_bits, info.memory_type);
   }
-  Resource_ID create_graphics_pso(rd::IBinding_Table *table, Resource_ID render_pass,
+  Resource_ID create_graphics_pso(Resource_ID signature, Resource_ID render_pass,
                                   rd::Graphics_Pipeline_State const &state) override {
+    VK_Binding_Signature *    sig            = dev_ctx->signatures.read(signature.id).signature;
     Graphics_Pipeline_State   graphics_state = dev_ctx->convert_graphics_state(state);
     Graphics_Pipeline_Wrapper gw;
     ASSERT_DEBUG(!graphics_state.ps.is_null());
@@ -3387,13 +3466,14 @@ class VkFactory : public rd::IDevice {
     Shader_Info ps   = dev_ctx->shaders.read(graphics_state.ps);
     Shader_Info vs   = dev_ctx->shaders.read(graphics_state.vs);
     Render_Pass pass = dev_ctx->render_passes.read(render_pass.id);
-    gw.init(dev_ctx->device, (VK_Binding_Table *)table, pass, vs, ps, graphics_state);
+    gw.init(dev_ctx->device, sig, pass, vs, ps, graphics_state);
     return {dev_ctx->pipelines.push(gw), (u32)Resource_Type::GRAPHICS_PSO};
   }
-  Resource_ID create_compute_pso(rd::IBinding_Table *table, Resource_ID cs) override {
+  Resource_ID create_compute_pso(Resource_ID signature, Resource_ID cs) override {
     Compute_Pipeline_Wrapper gw;
+    VK_Binding_Signature *   sig     = dev_ctx->signatures.read(signature.id).signature;
     Shader_Info              cs_info = dev_ctx->shaders.read(cs.id);
-    gw.init(dev_ctx->device, (VK_Binding_Table *)table, cs_info);
+    gw.init(dev_ctx->device, sig, cs_info);
     ID pipe_id = dev_ctx->compute_pipelines.push(gw);
     return {pipe_id, (u32)Resource_Type::COMPUTE_PSO};
   }
@@ -3639,9 +3719,13 @@ class VkFactory : public rd::IDevice {
   Resource_ID create_timestamp() override {
     return {dev_ctx->allocate_timestamp_id(), (u32)Resource_Type::TIMESTAMP};
   }
-  rd::IBinding_Table *create_binding_table(rd::Binding_Table_Create_Info const *infos,
-                                           u32 num_tables, u32 push_constants_size) override {
-    return VK_Binding_Table::create(dev_ctx, infos, num_tables, push_constants_size);
+  Resource_ID create_signature(rd::Binding_Table_Create_Info const &infos) override {
+    return {dev_ctx->signatures.push({VK_Binding_Signature::create(dev_ctx, infos)}),
+            (u32)Resource_Type::SIGNATURE};
+  }
+  rd::IBinding_Table *create_binding_table(Resource_ID signature) override {
+    VK_Binding_Signature *sig = dev_ctx->signatures.read(signature.id).signature;
+    return VK_Binding_Table::create(dev_ctx, sig);
   }
   void end_compute_pass(rd::ICtx *_ctx) override {
     std::lock_guard<std::mutex> _lock(mutex);
@@ -3686,16 +3770,16 @@ class VkFactory : public rd::IDevice {
 //////////////////////////////////
 /// VK_Binding_Table
 
-VK_Binding_Table *VK_Binding_Table::create(VkDeviceContext *                    dev_ctx,
-                                           rd::Binding_Table_Create_Info const *infos,
-                                           u32 num_tables, u32 push_constants_size) {
-  VK_Binding_Table *out    = new VK_Binding_Table;
-  out->push_constants_size = push_constants_size;
-  jto(num_tables) {
-    VkDescriptorBindingFlags     binding_flags[rd::Binding_Table_Create_Info::MAX_BINDINGS];
+VK_Binding_Signature *
+VK_Binding_Signature::create(VkDeviceContext *                    dev_ctx,
+                             rd::Binding_Table_Create_Info const &table_info) {
+  VK_Binding_Signature *out = new VK_Binding_Signature;
+  out->push_constants_size  = table_info.push_constants_size;
+  jto(table_info.spaces.size) {
+    VkDescriptorBindingFlags     binding_flags[rd::Binding_Space_Create_Info::MAX_BINDINGS];
     u32                          num_bindings = 0;
-    VkDescriptorSetLayoutBinding set_bindings[rd::Binding_Table_Create_Info::MAX_BINDINGS];
-    auto const &                 info = infos[j];
+    VkDescriptorSetLayoutBinding set_bindings[rd::Binding_Space_Create_Info::MAX_BINDINGS];
+    auto const &                 info = table_info.spaces[j];
     ito(info.bindings.size) {
       auto                         dinfo = info.bindings[i];
       VkDescriptorSetLayoutBinding binding_info;
@@ -3711,12 +3795,15 @@ VK_Binding_Table *VK_Binding_Table::create(VkDeviceContext *                    
 
     ito(num_bindings) {
       if (set_bindings[i].descriptorCount > 1) {
-        binding_flags[i] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+        binding_flags[i] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
+                           VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
+                           VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT;
       } else {
-        binding_flags[i] = 0;
+        binding_flags[i] = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
+                           VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT;
       }
     }
-    ASSERT_DEBUG(num_bindings < rd::Binding_Table_Create_Info::MAX_BINDINGS);
+    ASSERT_DEBUG(num_bindings < rd::Binding_Space_Create_Info::MAX_BINDINGS);
     binding_infos.bindingCount  = num_bindings;
     binding_infos.pBindingFlags = &binding_flags[0];
     binding_infos.pNext         = NULL;
@@ -3733,7 +3820,6 @@ VK_Binding_Table *VK_Binding_Table::create(VkDeviceContext *                    
     VK_ASSERT_OK(
         vkCreateDescriptorSetLayout(dev_ctx->device, &set_layout_create_info, NULL, &set_layout));
     out->set_layouts.push(set_layout);
-    out->sets.push(dev_ctx->allocate_set(set_layout));
   }
 
   {
@@ -3745,7 +3831,7 @@ VK_Binding_Table *VK_Binding_Table::create(VkDeviceContext *                    
     VkPushConstantRange push_range;
     push_range.offset     = 0;
     push_range.stageFlags = VK_SHADER_STAGE_ALL;
-    push_range.size       = push_constants_size;
+    push_range.size       = table_info.push_constants_size;
     ;
     if (push_range.size > 0) {
       pipe_layout_info.pPushConstantRanges    = &push_range;
@@ -3754,8 +3840,16 @@ VK_Binding_Table *VK_Binding_Table::create(VkDeviceContext *                    
     VK_ASSERT_OK(
         vkCreatePipelineLayout(dev_ctx->device, &pipe_layout_info, NULL, &out->pipeline_layout));
   }
+  return out;
+}
+
+VK_Binding_Table *VK_Binding_Table::create(VkDeviceContext *     dev_ctx,
+                                           VK_Binding_Signature *signature) {
+  VK_Binding_Table *out = new VK_Binding_Table;
+  out->signature        = signature;
+  ito(signature->set_layouts.size) out->sets.push(dev_ctx->allocate_set(signature->set_layouts[i]));
+
   out->dev_ctx = dev_ctx;
-  // out->set_res_id = {dev_ctx->sets.push(DescriptorSet(out->set)), (u32)Resource_Type::SET};
   return out;
 }
 void VK_Binding_Table::bind_cbuffer(u32 space, u32 binding, Resource_ID buf_id, size_t offset,
@@ -3875,13 +3969,14 @@ void VK_Binding_Table::bind_UAV_texture(u32 space, u32 binding, u32 index, Resou
   vkUpdateDescriptorSets(dev_ctx->device, 1, &wset, 0, NULL);
 }
 void VK_Binding_Table::release() {
+  ito(sets.size) dev_ctx->desc_pool.free(sets[i]);
+  delete this;
+}
+void VK_Binding_Signature::release(VkDeviceContext *dev_ctx) {
   ito(set_layouts.size) vkDestroyDescriptorSetLayout(dev_ctx->device, set_layouts[i], NULL);
-  ito(sets.size) dev_ctx->desc_pool.free(
-      sets[i]); // vkFreeDescriptorSets(dev_ctx->device, dev_ctx->desc_pool.pool, 1, &sets[i]);
   vkDestroyPipelineLayout(dev_ctx->device, pipeline_layout, NULL);
   delete this;
 }
-
 } // namespace
 namespace rd {
 IDevice *create_vulkan(void *window_handler) { return new VkFactory(window_handler); }

@@ -2,7 +2,9 @@
 #ifndef UTILS_H
 #define UTILS_H
 
+#include <codecvt>
 #include <cstdlib>
+#include <locale>
 #include <malloc.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -813,6 +815,16 @@ static inline void make_dir_recursive(string_ref path) {
   mkdir(stref_to_tmp_cstr(path), 0777);
 }
 #endif
+
+static inline WCHAR *towstr_tmp(string_ref str) {
+  std::wstring wide     = std::wstring(str.ptr, str.ptr + str.len);
+  size_t       wide_len = sizeof(wchar_t) * wide.size();
+  WCHAR const *src      = wide.c_str();
+  WCHAR *      tmp      = (WCHAR *)tl_alloc_tmp(wide_len + sizeof(wchar_t));
+  memcpy(tmp, wide.c_str(), wide_len);
+  tmp[wide.size()] = L'\0';
+  return tmp;
+}
 
 static inline void dump_file(char const *path, void const *data, size_t size) {
   FILE *file = fopen(path, "wb");

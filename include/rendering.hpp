@@ -509,8 +509,8 @@ class IBinding_Table {
   virtual void bind_cbuffer(u32 space, u32 binding, Resource_ID buf_id, size_t offset,
                             size_t size)                                       = 0;
   virtual void bind_sampler(u32 space, u32 binding, Resource_ID sampler_id)    = 0;
-  virtual void bind_structured_UAV_buffer(u32 space, u32 binding, Resource_ID buf_id, size_t offset,
-                                          size_t size, size_t stride)          = 0;
+  virtual void bind_UAV_buffer(u32 space, u32 binding, Resource_ID buf_id, size_t offset,
+                                          size_t size)          = 0;
   virtual void bind_texture(u32 space, u32 binding, u32 index, Resource_ID image_id,
                             Image_Subresource const &range, Format format)     = 0;
   virtual void bind_UAV_texture(u32 space, u32 binding, u32 index, Resource_ID image_id,
