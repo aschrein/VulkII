@@ -4,11 +4,11 @@
 #include "utils.hpp"
 #include <cmath>
 
-static inline bool parse_decimal_int(char const *str, size_t len, int32_t *result) {
-  int32_t  final = 0;
-  int32_t  pow   = 1;
-  int32_t  sign  = 1;
-  uint32_t i     = 0;
+static inline bool parse_decimal_int(char const *str, i32 len, int32_t *result) {
+  i32 final = 0;
+  i32 pow   = 1;
+  i32 sign  = 1;
+  i32 i     = 0;
   // parsing in reverse order
   for (; i < len; ++i) {
     switch (str[len - 1 - i]) {
@@ -114,7 +114,7 @@ finish:
 
 static double parse_float(char const *str) {
   double out;
-  ASSERT_ALWAYS(parse_float(str, strlen(str), &out));
+  ASSERT_ALWAYS(parse_float(str, (i32)strlen(str), &out));
   return out;
 }
 
@@ -124,15 +124,15 @@ static int __test_float_parsing = [] {
   ASSERT_ALWAYS(parse_float("0000000000.0000000000") == 0.0);
   ASSERT_ALWAYS(parse_float("0.0000000000") == 0.0);
   ASSERT_ALWAYS(parse_float("-0.0000000000") == 0.0);
-  ASSERT_ALWAYS(int(parse_float("1.12") * 100.0  * (1.0 + EPS)) == 112);
-  ASSERT_ALWAYS(int(parse_float("125.125") * 1000.0  * (1.0 + EPS)) == 125125);
-  ASSERT_ALWAYS(int(parse_float("-1.12e-1") * 1000.0  * (1.0 + EPS)) == -112);
-  ASSERT_ALWAYS(int(parse_float("-5")  * (1.0 + EPS)) == -5);
-  ASSERT_ALWAYS(int(parse_float("-2")  * (1.0 + EPS)) == -2);
-  ASSERT_ALWAYS(int(parse_float("1.12e+1") * 10.0  * (1.0 + EPS)) == 112);
-  ASSERT_ALWAYS(int(parse_float("1.12e+2") * 1.0  * (1.0 + EPS)) == 112);
-  ASSERT_ALWAYS(int(parse_float("1.12e+2f") * 1.0  * (1.0 + EPS)) == 112);
-  ASSERT_ALWAYS(int(parse_float("1.12e+2F") * 1.0  * (1.0 + EPS)) == 112);
+  ASSERT_ALWAYS(int(parse_float("1.12") * 100.0 * (1.0 + EPS)) == 112);
+  ASSERT_ALWAYS(int(parse_float("125.125") * 1000.0 * (1.0 + EPS)) == 125125);
+  ASSERT_ALWAYS(int(parse_float("-1.12e-1") * 1000.0 * (1.0 + EPS)) == -112);
+  ASSERT_ALWAYS(int(parse_float("-5") * (1.0 + EPS)) == -5);
+  ASSERT_ALWAYS(int(parse_float("-2") * (1.0 + EPS)) == -2);
+  ASSERT_ALWAYS(int(parse_float("1.12e+1") * 10.0 * (1.0 + EPS)) == 112);
+  ASSERT_ALWAYS(int(parse_float("1.12e+2") * 1.0 * (1.0 + EPS)) == 112);
+  ASSERT_ALWAYS(int(parse_float("1.12e+2f") * 1.0 * (1.0 + EPS)) == 112);
+  ASSERT_ALWAYS(int(parse_float("1.12e+2F") * 1.0 * (1.0 + EPS)) == 112);
 
   return 0;
 }();
@@ -177,12 +177,12 @@ struct List {
   }
   i32 parse_int() {
     i32 res;
-    ASSERT_ALWAYS(parse_decimal_int(symbol.ptr, symbol.len, &res));
+    ASSERT_ALWAYS(parse_decimal_int(symbol.ptr, (i32)symbol.len, &res));
     return res;
   }
   f32 parse_float() {
     f32 res;
-    ASSERT_ALWAYS(::parse_float(symbol.ptr, symbol.len, &res));
+    ASSERT_ALWAYS(::parse_float(symbol.ptr, (i32)symbol.len, &res));
     return res;
   }
   bool nonempty() { return symbol.ptr != 0 && symbol.len != 0; }
@@ -287,7 +287,7 @@ struct List {
       SAW_SEMICOLON,
     };
     u32   i  = 0;
-    u64   id = 1;
+    u32   id = 1;
     State state_table[0x100];
     memset(state_table, 0, sizeof(state_table));
     for (u8 j = 0x20; j <= 0x7f; j++) state_table[j] = State::SAW_PRINTABLE;
@@ -999,7 +999,7 @@ static Expr *parse_expression(char const *&cursor) {
         lhs->token = cur_token;
       } else {
         double num;
-        bool   suc = parse_float(cur_token.ptr, cur_token.len, &num);
+        bool   suc = parse_float(cur_token.ptr, (i32)cur_token.len, &num);
         if (!suc) return NULL;
         lhs              = tmp_alloc_expr();
         lhs->type        = Type::VALUE;
@@ -1141,8 +1141,8 @@ struct Default_Evaluator final : public IEvaluator {
     } else if (l->nonempty()) {
       i32  imm32;
       f32  immf32;
-      bool is_imm32  = !l->quoted && parse_decimal_int(l->symbol.ptr, l->symbol.len, &imm32);
-      bool is_immf32 = !l->quoted && parse_float(l->symbol.ptr, l->symbol.len, &immf32);
+      bool is_imm32  = !l->quoted && parse_decimal_int(l->symbol.ptr, (i32)l->symbol.len, &imm32);
+      bool is_immf32 = !l->quoted && parse_float(l->symbol.ptr, (i32)l->symbol.len, &immf32);
       if (is_imm32) {
         Value *new_val = ALLOC_VAL();
         new_val->i     = imm32;

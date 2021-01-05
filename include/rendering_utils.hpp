@@ -19,36 +19,33 @@
 #include <imgui.h>
 #include <imgui/examples/imgui_impl_sdl.h>
 
-#endif
-
 f32 max3(float3 const &a) { return MAX3(a.x, a.y, a.z); }
 #if 0
-				
-static void setup_default_state(rd::Imm_Ctx *ctx, u32 num_rts = 1) {
+static void setup_default_state(rd::Graphics_Pipeline_State &state, u32 num_rts = 1) {
   rd::Blend_State bs;
   MEMZERO(bs);
   bs.enabled          = false;
   bs.color_write_mask = (u32)rd::Color_Component_Bit::R_BIT | (u32)rd::Color_Component_Bit::G_BIT |
                         (u32)rd::Color_Component_Bit::B_BIT | (u32)rd::Color_Component_Bit::A_BIT;
-  ito(num_rts) ctx->OM_set_blend_state(i, bs);
-  ctx->IA_set_topology(rd::Primitive::TRIANGLE_LIST);
+  ito(num_rts) state.OM_set_blend_state(i, bs);
+  state.IA_set_topology(rd::Primitive::TRIANGLE_LIST);
   rd::RS_State rs_state;
   MEMZERO(rs_state);
   rs_state.polygon_mode = rd::Polygon_Mode::FILL;
   rs_state.front_face   = rd::Front_Face::CW;
   rs_state.cull_mode    = rd::Cull_Mode::NONE;
-  ctx->RS_set_state(rs_state);
+  state.RS_set_state(rs_state);
   rd::DS_State ds_state;
   MEMZERO(ds_state);
   ds_state.cmp_op             = rd::Cmp::EQ;
   ds_state.enable_depth_test  = false;
   ds_state.enable_depth_write = false;
-  ctx->DS_set_state(ds_state);
+  state.DS_set_state(ds_state);
   rd::MS_State ms_state;
   MEMZERO(ms_state);
   ms_state.sample_mask = 0xffffffffu;
   ms_state.num_samples = 1;
-  ctx->MS_set_state(ms_state);
+  state.MS_set_state(ms_state);
 }
 
 struct ImGui_ID {
@@ -82,13 +79,17 @@ class IGUIApp {
   unsigned char *font_pixels = NULL;
   int            font_width = 0, font_height = 0;
 
-  i32           last_m_x          = 0;
-  i32           last_m_y          = 0;
-  ImDrawData *  draw_data         = NULL;
-  Timer         timer             = {};
-  bool          imgui_initialized = false;
-  rd::IFactory *factory           = NULL;
-  SDL_Window *  window            = NULL;
+  i32          last_m_x          = 0;
+  i32          last_m_y          = 0;
+  ImDrawData * draw_data         = NULL;
+  Timer        timer             = {};
+  bool         imgui_initialized = false;
+  rd::IDevice *factory           = NULL;
+  SDL_Window * window            = NULL;
+
+  Resource_ID render_pass{};
+  Resource_ID gfx_pso{};
+  Resource_ID gfx_signature{};
 
   virtual void on_gui() {}
   virtual void on_init() {}
@@ -148,13 +149,13 @@ class IGUIApp {
     });
 
     void *handle = NULL;
-#ifdef WIN32
+#  ifdef WIN32
     SDL_SysWMinfo wmInfo;
     SDL_VERSION(&wmInfo.version);
     SDL_GetWindowWMInfo(window, &wmInfo);
     HWND hwnd = wmInfo.info.win.window;
     handle    = (void *)hwnd;
-#else
+#  else
     SDL_SysWMinfo wmInfo;
     SDL_VERSION(&wmInfo.version);
     SDL_GetWindowWMInfo(window, &wmInfo);
@@ -162,7 +163,7 @@ class IGUIApp {
     xcb_connection_t *connection = XGetXCBConnection(wmInfo.info.x11.display);
     Ptr2              ptrs{(void *)hwnd, (void *)connection};
     handle = (void *)&ptrs;
-#endif
+#  endif
     if (impl_t == rd::Impl_t::VULKAN) {
       factory = rd::create_vulkan(handle);
     } else if (impl_t == rd::Impl_t::DX12) {
@@ -190,13 +191,13 @@ class IGUIApp {
 
     rd::Image_Create_Info info;
     MEMZERO(info);
-    info.format   = rd::Format::RGBA8_UNORM;
-    info.width    = font_width;
-    info.height   = font_height;
-    info.depth    = 1;
-    info.layers   = 1;
-    info.levels   = 1;
-    info.mem_bits = (u32)rd::Memory_Bits::DEVICE_LOCAL;
+    info.format      = rd::Format::RGBA8_UNORM;
+    info.width       = font_width;
+    info.height      = font_height;
+    info.depth       = 1;
+    info.layers      = 1;
+    info.levels      = 1;
+    info.memory_type = rd::Memory_Type::GPU_LOCAL;
     info.usage_bits =
         (u32)rd::Image_Usage_Bits::USAGE_SAMPLED | (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST;
     font_texture    = factory->create_image(info);
@@ -204,10 +205,10 @@ class IGUIApp {
 
     rd::Buffer_Create_Info buf_info;
     MEMZERO(buf_info);
-    buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
-    buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
-    buf_info.size       = font_width * font_height * 4;
-    staging_buffer      = factory->create_buffer(buf_info);
+    buf_info.memory_type = rd::Memory_Type::CPU_WRITE_GPU_READ;
+    buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
+    buf_info.size        = font_width * font_height * 4;
+    staging_buffer       = factory->create_buffer(buf_info);
 
     on_init();
     factory->end_frame();
@@ -243,23 +244,31 @@ class IGUIApp {
   void frame() {
     on_frame();
     rd::Image2D_Info scinfo = factory->get_swapchain_image_info();
-    width                   = scinfo.width;
-    height                  = scinfo.height;
-    timer.update();
-    rd::Clear_Color cl;
-    MEMZERO(cl);
-    cl.clear = true;
+    if (width != scinfo.width || height != scinfo.height) {
+      width  = scinfo.width;
+      height = scinfo.height;
+      timer.update();
+      rd::Clear_Color cl;
+      MEMZERO(cl);
+      cl.clear = true;
 
-    rd::Render_Pass_Create_Info info;
-    MEMZERO(info);
-    rd::RT_View rt0;
-    MEMZERO(rt0);
-    rt0.image             = factory->get_swapchain_image();
-    rt0.format            = rd::Format::NATIVE;
-    rt0.clear_color.clear = true;
-    info.rts.push(rt0);
-    rd::Imm_Ctx *ctx = factory->start_render_pass(info);
-
+      rd::Render_Pass_Create_Info info;
+      MEMZERO(info);
+      rd::RT_View rt0;
+      MEMZERO(rt0);
+      rt0.image             = factory->get_swapchain_image();
+      rt0.format            = rd::Format::NATIVE;
+      rt0.clear_color.clear = true;
+      info.rts.push(rt0);
+      if (render_pass.is_valid()) factory->release_resource(render_pass);
+      render_pass = factory->create_render_pass(info);
+    }
+    rd::ICtx *ctx = factory->start_render_pass(render_pass);
+    struct PushConstants {
+      float2 uScale;
+      float2 uTranslate;
+      u32    control_flags;
+    };
     static string_ref            shader    = stref_s(R"(
 struct PushConstants
 {
@@ -320,8 +329,8 @@ float4 main(in PSInput input) : SV_TARGET0 {
         {stref_s("VERTEX"), {}},
         {stref_s("PIXEL"), {}},
     };
-    if (vs.is_null()) vs = factory->create_shader_raw(rd::Stage_t::VERTEX, shader, &defines[0], 1);
-    if (ps.is_null()) ps = factory->create_shader_raw(rd::Stage_t::PIXEL, shader, &defines[1], 1);
+    if (vs.is_null()) vs = factory->create_shader(rd::Stage_t::VERTEX, shader, &defines[0], 1);
+    if (ps.is_null()) ps = factory->create_shader(rd::Stage_t::PIXEL, shader, &defines[1], 1);
 
     if (sampler.is_null()) {
       rd::Sampler_Create_Info info;
@@ -371,18 +380,18 @@ float4 main(in PSInput input) : SV_TARGET0 {
     {
       rd::Buffer_Create_Info buf_info;
       MEMZERO(buf_info);
-      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
-      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
-      buf_info.size       = (draw_data->TotalVtxCount + 1) * sizeof(ImDrawVert);
-      vertex_buffer       = factory->create_buffer(buf_info);
+      buf_info.memory_type = rd::Memory_Type::CPU_WRITE_GPU_READ;
+      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
+      buf_info.size        = (draw_data->TotalVtxCount + 1) * sizeof(ImDrawVert);
+      vertex_buffer        = factory->create_buffer(buf_info);
     }
     {
       rd::Buffer_Create_Info buf_info;
       MEMZERO(buf_info);
-      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
-      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER;
-      buf_info.size       = (draw_data->TotalIdxCount + 1) * sizeof(ImDrawIdx);
-      index_buffer        = factory->create_buffer(buf_info);
+      buf_info.memory_type = rd::Memory_Type::CPU_WRITE_GPU_READ;
+      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER;
+      buf_info.size        = (draw_data->TotalIdxCount + 1) * sizeof(ImDrawIdx);
+      index_buffer         = factory->create_buffer(buf_info);
     }
     {
       {
@@ -416,58 +425,74 @@ float4 main(in PSInput input) : SV_TARGET0 {
       ctx->copy_buffer_to_image(staging_buffer, 0, font_texture, rd::Image_Copy::top_level());
       font_pixels = NULL;
     }
-    setup_default_state(ctx);
-    rd::Blend_State bs;
-    MEMZERO(bs);
-    bs.enabled          = true;
-    bs.alpha_blend_op   = rd::Blend_OP::ADD;
-    bs.color_blend_op   = rd::Blend_OP::ADD;
-    bs.dst_alpha        = rd::Blend_Factor::ONE_MINUS_SRC_ALPHA;
-    bs.src_alpha        = rd::Blend_Factor::SRC_ALPHA;
-    bs.dst_color        = rd::Blend_Factor::ONE_MINUS_SRC_ALPHA;
-    bs.src_color        = rd::Blend_Factor::SRC_ALPHA;
-    bs.color_write_mask = (u32)rd::Color_Component_Bit::R_BIT |
-                          (u32)rd::Color_Component_Bit::G_BIT |
-                          (u32)rd::Color_Component_Bit::B_BIT | (u32)rd::Color_Component_Bit::A_BIT;
-    ctx->OM_set_blend_state(0, bs);
-    ctx->VS_set_shader(vs);
-    ctx->PS_set_shader(ps);
+
+    if (gfx_pso.is_null()) {
+      rd::Graphics_Pipeline_State gfx_state{};
+      setup_default_state(gfx_state);
+      rd::Blend_State bs;
+      MEMZERO(bs);
+      bs.enabled        = true;
+      bs.alpha_blend_op = rd::Blend_OP::ADD;
+      bs.color_blend_op = rd::Blend_OP::ADD;
+      bs.dst_alpha      = rd::Blend_Factor::ONE_MINUS_SRC_ALPHA;
+      bs.src_alpha      = rd::Blend_Factor::SRC_ALPHA;
+      bs.dst_color      = rd::Blend_Factor::ONE_MINUS_SRC_ALPHA;
+      bs.src_color      = rd::Blend_Factor::SRC_ALPHA;
+      bs.color_write_mask =
+          (u32)rd::Color_Component_Bit::R_BIT | (u32)rd::Color_Component_Bit::G_BIT |
+          (u32)rd::Color_Component_Bit::B_BIT | (u32)rd::Color_Component_Bit::A_BIT;
+      gfx_state.OM_set_blend_state(0, bs);
+      gfx_state.VS_set_shader(vs);
+      gfx_state.PS_set_shader(ps);
+      {
+        rd::Attribute_Info info;
+        MEMZERO(info);
+        info.binding  = 0;
+        info.format   = rd::Format::RG32_FLOAT;
+        info.location = 0;
+        info.offset   = 0;
+        info.type     = rd::Attriute_t::POSITION;
+        gfx_state.IA_set_attribute(info);
+      }
+      {
+        rd::Attribute_Info info;
+        MEMZERO(info);
+        info.binding  = 0;
+        info.format   = rd::Format::RG32_FLOAT;
+        info.location = 1;
+        info.offset   = 8;
+        info.type     = rd::Attriute_t::TEXCOORD0;
+        gfx_state.IA_set_attribute(info);
+      }
+      {
+        rd::Attribute_Info info;
+        MEMZERO(info);
+        info.binding  = 0;
+        info.format   = rd::Format::RGBA8_UNORM;
+        info.location = 2;
+        info.offset   = 16;
+        info.type     = rd::Attriute_t::TEXCOORD1;
+        gfx_state.IA_set_attribute(info);
+      }
+      gfx_signature = [this] {
+        rd::Binding_Space_Create_Info set_info{};
+        set_info.bindings.push({0, rd::Binding_t::TEXTURE, 1});
+        set_info.bindings.push({1, rd::Binding_t::SAMPLER, 1});
+        rd::Binding_Table_Create_Info table_info{};
+        table_info.spaces.push(set_info);
+        table_info.push_constants_size = sizeof(PushConstants);
+        return factory->create_signature(table_info);
+      }();
+      gfx_pso = factory->create_graphics_pso(gfx_signature, render_pass, gfx_state);
+    }
+
     ctx->set_viewport(0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f);
     ctx->bind_sampler(0, 1, sampler);
     ImVec2 clip_off          = draw_data->DisplayPos;
     ImVec2 clip_scale        = draw_data->FramebufferScale;
     int    global_vtx_offset = 0;
     int    global_idx_offset = 0;
-    {
-      rd::Attribute_Info info;
-      MEMZERO(info);
-      info.binding  = 0;
-      info.format   = rd::Format::RG32_FLOAT;
-      info.location = 0;
-      info.offset   = 0;
-      info.type     = rd::Attriute_t::POSITION;
-      ctx->IA_set_attribute(info);
-    }
-    {
-      rd::Attribute_Info info;
-      MEMZERO(info);
-      info.binding  = 0;
-      info.format   = rd::Format::RG32_FLOAT;
-      info.location = 1;
-      info.offset   = 8;
-      info.type     = rd::Attriute_t::TEXCOORD0;
-      ctx->IA_set_attribute(info);
-    }
-    {
-      rd::Attribute_Info info;
-      MEMZERO(info);
-      info.binding  = 0;
-      info.format   = rd::Format::RGBA8_UNORM;
-      info.location = 2;
-      info.offset   = 16;
-      info.type     = rd::Attriute_t::TEXCOORD1;
-      ctx->IA_set_attribute(info);
-    }
+
     {
       float scale[2];
       scale[0] = 2.0f / draw_data->DisplaySize.x;
@@ -656,53 +681,101 @@ struct TimeStamp_Pool {
 #endif // 0
 #if 1
 struct Mip_Builder {
+  enum Filter { FILTER_BOX };
   static Resource_ID create_image(rd::IDevice *factory, Image2D const *image,
-                                  u32 usage = (u32)rd::Image_Usage_Bits::USAGE_SAMPLED) {
-    Resource_ID           output_image;
-    rd::Image_Create_Info info;
-    usage |= (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST;
-    MEMZERO(info);
-    info.format     = image->format;
-    info.width      = image->width;
-    info.height     = image->height;
-    info.depth      = 1;
-    info.layers     = 1;
-    info.levels     = image->get_num_mip_levels();
-    info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
-    info.usage_bits = usage;
-    output_image    = factory->create_image(info);
-    Resource_ID cs;
-    Resource_ID staging_buffer;
+                                  u32    _usage = (u32)rd::Image_Usage_Bits::USAGE_SAMPLED,
+                                  Filter filter = FILTER_BOX) {
+    Resource_ID output_image = [=] {
+      rd::Image_Create_Info info{};
+      u32                   usage = _usage | (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST;
+      info.format                 = image->format;
+      info.width                  = image->width;
+      info.height                 = image->height;
+      info.depth                  = 1;
+      info.layers                 = 1;
+      info.levels                 = image->get_num_mip_levels();
+      info.usage_bits             = usage;
+      return factory->create_image(info);
+    }();
+    Resource_ID staging_buffer = [image, factory] {
+      rd::Buffer_Create_Info buf_info{};
+      buf_info.memory_type = rd::Memory_Type::CPU_WRITE_GPU_READ;
+      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC |
+                            (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
+      buf_info.size = image->get_size_in_bytes();
+      return factory->create_buffer(buf_info);
+    }();
+    defer(factory->release_resource(staging_buffer));
+    InlineArray<u32, 0x10>  mip_offsets{};
+    InlineArray<u32, 0x10>  mip_pitch{};
+    InlineArray<int2, 0x10> mip_sizes{};
+    u32 w          = image->width;
+    u32 h          = image->height;
+    u32 mip_offset = 0;
+    while (w || h) {
+      mip_offsets.push(mip_offset);
+      w = MAX(1, w);
+      h = MAX(1, h);
+      mip_sizes.push({w, h});
+      u32 pitch =
+          rd::IDevice::align_up(w * image->get_bpp(), rd::IDevice::TEXTURE_DATA_PITCH_ALIGNMENT);
 
-    rd::Buffer_Create_Info buf_info;
-    MEMZERO(buf_info);
-    buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
-    buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC |
-                          (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST |
-                          (u32)rd::Buffer_Usage_Bits::USAGE_UAV;
-    buf_info.size  = image->get_size_in_bytes() * 2;
-    staging_buffer = factory->create_buffer(buf_info);
-
+      mip_offset += pitch * h;
+      mip_offset = rd::IDevice::align_up(mip_offset, rd::IDevice::BUFFER_COPY_ALIGNMENT);
+      mip_pitch.push(pitch);
+      w = w >> 1;
+      h = h >> 1;
+    }
+    u32         gpu_buffer_size = mip_offset;
+    Resource_ID gpu_buffer      = [=] {
+      rd::Buffer_Create_Info buf_info{};
+      buf_info.memory_type = rd::Memory_Type::GPU_LOCAL;
+      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC |
+                            (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST |
+                            (u32)rd::Buffer_Usage_Bits::USAGE_UAV;
+      // Base image plus 2d mip chain is less than 2x image size
+      buf_info.size = gpu_buffer_size;
+      return factory->create_buffer(buf_info);
+    }();
+    defer(factory->release_resource(gpu_buffer));
+    struct PushConstants {
+      u32 src_row_pitch;
+      u32 src_offset;
+      u32 src_width;
+      u32 src_height;
+      u32 dst_row_pitch;
+      u32 dst_offset;
+      u32 dst_width;
+      u32 dst_height;
+      u32 format;
+      u32 op;
+    };
     TMP_STORAGE_SCOPE;
-    rd::Binding_Table_Create_Info set_info{};
-    set_info.bindings.push({0, rd::Binding_t::UAV_BUFFER, 1});
-    set_info.bindings.push({1, rd::Binding_t::UAV_BUFFER, 1});
-    rd::IBinding_Table *set0 = factory->create_binding_table(set_info);
-    defer(set0->release());
-    cs = factory->create_compute_pso(&set0, 1,
-                                     factory->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
+    Resource_ID signature = [factory] {
+      rd::Binding_Space_Create_Info set_info{};
+      set_info.bindings.push({rd::Binding_t::UAV_BUFFER, 1});
+      set_info.bindings.push({rd::Binding_t::UAV_BUFFER, 1});
+      rd::Binding_Table_Create_Info table_info{};
+      table_info.spaces.push(set_info);
+      table_info.push_constants_size = sizeof(PushConstants);
+      return factory->create_signature(table_info);
+    }();
+    defer(factory->release_resource(signature));
+    Resource_ID shader = factory->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
 struct PushConstants
 {
+  u32 src_row_pitch;
   u32 src_offset;
   u32 src_width;
   u32 src_height;
+  u32 dst_row_pitch;
   u32 dst_offset;
   u32 dst_width;
   u32 dst_height;
   u32 format;
   u32 op; 
 };
-[[vk::push_constant]] ConstantBuffer<PushConstants> pc : register(b0, space0);
+[[vk::push_constant]] ConstantBuffer<PushConstants> pc : DX12_PUSH_CONSTANTS_REGISTER;
 
 #define RGBA8_SRGBA    0
 #define RGBA8_UNORM    1
@@ -715,8 +788,7 @@ struct PushConstants
 #define OP_MIN 2
 #define OP_SUM 3
 
-[[vk::binding(0, 0)]] RWStructuredBuffer<float> data_f32 : register(u0, space0);
-[[vk::binding(1, 0)]] RWStructuredBuffer<uint>  data_u32 : register(u1, space0);
+[[vk::binding(0, 0)]] RWByteAddressBuffer data : register(u0, space0);
 
 float4 load(int2 coord) {
   if (coord.x >= pc.src_width) coord.x = int(pc.src_width) - 1;
@@ -724,7 +796,7 @@ float4 load(int2 coord) {
   if (coord.x < 0) coord.x = 0;
   if (coord.y < 0) coord.y = 0;
   if (pc.format == RGBA8_SRGBA) {
-    uint pixel = data_u32[coord.x + coord.y * pc.src_width + pc.src_offset];
+    uint pixel = data.Load<u32>(4 * coord.x + coord.y * pc.src_row_pitch + pc.src_offset);
     float4 o =
         float4(
               float((pixel >> 0u ) & 0xffu) / 255.0,
@@ -733,7 +805,7 @@ float4 load(int2 coord) {
               float((pixel >> 24u) & 0xffu) / 255.0);
     return pow(o, float4_splat(2.2));
   } else if (pc.format == RGBA8_UNORM) {
-    uint pixel = data_u32[coord.x + coord.y * pc.src_width + pc.src_offset];
+    uint pixel = data.Load<u32>(4 * coord.x + coord.y * pc.src_row_pitch + pc.src_offset);
     float4 o =
         float4(
               float((pixel >> 0u ) & 0xffu) / 255.0,
@@ -742,18 +814,18 @@ float4 load(int2 coord) {
               float((pixel >> 24u) & 0xffu) / 255.0);
     return o;
   } else if (pc.format == RGB32_FLOAT) {
-    float v_0 = data_f32[(coord.x + coord.y * pc.src_width + pc.src_offset) * 3 + 0];
-    float v_1 = data_f32[(coord.x + coord.y * pc.src_width + pc.src_offset) * 3 + 1];
-    float v_2 = data_f32[(coord.x + coord.y * pc.src_width + pc.src_offset) * 3 + 2];
+    float v_0 = data.Load<f32>(4 * ((coord.x) * 3 + 0) + coord.y * pc.src_row_pitch + pc.src_offset);
+    float v_1 = data.Load<f32>(4 * ((coord.x) * 3 + 1) + coord.y * pc.src_row_pitch + pc.src_offset);
+    float v_2 = data.Load<f32>(4 * ((coord.x) * 3 + 2) + coord.y * pc.src_row_pitch + pc.src_offset);
     return float4(v_0, v_1, v_2, 1.0f);
   } else if (pc.format == RGBA32_FLOAT) {
-    float v_0 = data_f32[(coord.x + coord.y * pc.src_width + pc.src_offset) * 4 + 0];
-    float v_1 = data_f32[(coord.x + coord.y * pc.src_width + pc.src_offset) * 4 + 1];
-    float v_2 = data_f32[(coord.x + coord.y * pc.src_width + pc.src_offset) * 4 + 2];
-    float v_3 = data_f32[(coord.x + coord.y * pc.src_width + pc.src_offset) * 4 + 3];
+    float v_0 = data.Load<f32>(4 * ((coord.x) * 4 + 0) + coord.y * pc.src_row_pitch + pc.src_offset);
+    float v_1 = data.Load<f32>(4 * ((coord.x) * 4 + 1) + coord.y * pc.src_row_pitch + pc.src_offset);
+    float v_2 = data.Load<f32>(4 * ((coord.x) * 4 + 2) + coord.y * pc.src_row_pitch + pc.src_offset);
+    float v_3 = data.Load<f32>(4 * ((coord.x) * 4 + 3) + coord.y * pc.src_row_pitch + pc.src_offset);
     return float4(v_0, v_1, v_2, v_3);
   } else if (pc.format == R32_FLOAT) {
-    float v_0 = data_f32[(coord.x + coord.y * pc.src_width + pc.src_offset)];
+    float v_0 = data.Load<f32>(4 * (coord.x) + coord.y * pc.src_width + pc.src_offset);
     return float4(v_0, 0.0f, 0.0f, 0.0f);
   }
   return float4(1.0, 0.0, 0.0, 1.0);
@@ -766,30 +838,30 @@ void store(int2 coord, float4 val) {
     uint g = uint(clamp(val.y * 255.0f, 0.0f, 255.0f));
     uint b = uint(clamp(val.z * 255.0f, 0.0f, 255.0f));
     uint a = uint(clamp(val.w * 255.0f, 0.0f, 255.0f));
-    data_u32[coord.x + coord.y * pc.dst_width + pc.dst_offset] = ((r&0xffu)  |
+    data.Store<u32>(4 * (coord.x ) + coord.y * pc.dst_row_pitch + pc.dst_offset, ((r&0xffu)  |
                                                    ((g&0xffu)  << 8u)  |
                                                    ((b&0xffu)  << 16u) |
-                                                   ((a&0xffu)  << 24u));
+                                                   ((a&0xffu)  << 24u)));
   } else if (pc.format == RGBA8_UNORM) {
     uint r = uint(clamp(val.x * 255.0f, 0.0f, 255.0f));
     uint g = uint(clamp(val.y * 255.0f, 0.0f, 255.0f));
     uint b = uint(clamp(val.z * 255.0f, 0.0f, 255.0f));
     uint a = uint(clamp(val.w * 255.0f, 0.0f, 255.0f));
-    data_u32[coord.x + coord.y * pc.dst_width + pc.dst_offset] = ((r & 0xffu)  |
+    data.Store<u32>(4 * (coord.x + coord.y * pc.dst_row_pitch) + pc.dst_offset, ((r & 0xffu)  |
                                                    ((g & 0xffu)  << 8u)  |
                                                    ((b & 0xffu)  << 16u) |
-                                                   ((a & 0xffu)  << 24u));
+                                                   ((a & 0xffu)  << 24u)));
   } else if (pc.format == RGB32_FLOAT) {
-    data_f32[(coord.x + coord.y * pc.dst_width + pc.dst_offset) * 3] = val.x;
-    data_f32[(coord.x + coord.y * pc.dst_width + pc.dst_offset) * 3 + 1] = val.y;
-    data_f32[(coord.x + coord.y * pc.dst_width + pc.dst_offset) * 3 + 2] = val.z;
+    data.Store<f32>(4 * ((coord.x) * 3)     + coord.y * pc.dst_row_pitch + pc.dst_offset, val.x);
+    data.Store<f32>(4 * ((coord.x) * 3 + 1) + coord.y * pc.dst_row_pitch + pc.dst_offset, val.y);
+    data.Store<f32>(4 * ((coord.x) * 3 + 2) + coord.y * pc.dst_row_pitch + pc.dst_offset, val.z);
   } else if (pc.format == RGBA32_FLOAT) {
-    data_f32[(coord.x + coord.y * pc.dst_width + pc.dst_offset) * 4] = val.x;
-    data_f32[(coord.x + coord.y * pc.dst_width + pc.dst_offset) * 4 + 1] = val.y;
-    data_f32[(coord.x + coord.y * pc.dst_width + pc.dst_offset) * 4 + 2] = val.z;
-    data_f32[(coord.x + coord.y * pc.dst_width + pc.dst_offset) * 4 + 3] = val.w;
+    data.Store<f32>(4 * ((coord.x) * 4)     + coord.y * pc.dst_row_pitch + pc.dst_offset, val.x);
+    data.Store<f32>(4 * ((coord.x) * 4 + 1) + coord.y * pc.dst_row_pitch + pc.dst_offset, val.y);
+    data.Store<f32>(4 * ((coord.x) * 4 + 2) + coord.y * pc.dst_row_pitch + pc.dst_offset, val.z);
+    data.Store<f32>(4 * ((coord.x) * 4 + 3) + coord.y * pc.dst_row_pitch + pc.dst_offset, val.w);
   } else if (pc.format == R32_FLOAT) {
-    data_f32[(coord.x + coord.y * pc.dst_width + pc.dst_offset)] = val.x;
+    data.Store<f32>(4 * (coord.x) + coord.y * pc.dst_row_pitch + pc.dst_offset, val.x);
   }
 }
 
@@ -818,25 +890,18 @@ void main(uint3 tid : SV_DispatchThreadID) {
 }
 
 )"),
-                                                            NULL, 0));
-
+                                                NULL, 0);
+    defer(factory->release_resource(shader));
+    Resource_ID cs = factory->create_compute_pso(signature, shader);
+    defer(factory->release_resource(cs));
     void *ptr = factory->map_buffer(staging_buffer);
     memcpy(ptr, image->data, image->get_size_in_bytes());
     factory->unmap_buffer(staging_buffer);
-    struct Push_Constants {
-      u32 src_offset;
-      u32 src_width;
-      u32 src_height;
-      u32 dst_offset;
-      u32 dst_width;
-      u32 dst_height;
-      u32 format;
-      u32 op;
-    } pc;
+    PushConstants pc;
     MEMZERO(pc);
-    pc.op = 0;
+    pc.op = filter;
     switch (image->format) {
-    // clang-format off
+      // clang-format off
       case rd::Format::RGBA8_SRGBA:  {  pc.format = 0; } break;
       case rd::Format::RGBA8_UNORM:  {  pc.format = 1; } break;
       case rd::Format::RGB32_FLOAT:  {  pc.format = 2; } break;
@@ -846,58 +911,51 @@ void main(uint3 tid : SV_DispatchThreadID) {
     default: TRAP;
     }
     rd::ICtx *ctx = factory->start_compute_pass();
-    set0->bind_UAV_buffer(0, staging_buffer, 0, 0);
-    set0->bind_UAV_buffer(1, staging_buffer, 0, 0);
-    ctx->bind_table(0, set0);
+    ctx->copy_buffer(staging_buffer, 0, gpu_buffer, 0, image->get_size_in_bytes());
+    rd::IBinding_Table *table = factory->create_binding_table(signature);
+    defer(table->release());
+    table->bind_UAV_buffer(0, 0, gpu_buffer, 0, 0);
+    table->bind_UAV_buffer(0, 1, gpu_buffer, 0, 0);
+    ctx->bind_table(table);
     ctx->bind_compute(cs);
 
-    InlineArray<u32, 0x10>  mip_offsets;
-    InlineArray<int2, 0x10> mip_sizes;
-    mip_offsets.init();
-    mip_sizes.init();
-    u32 w          = image->width;
-    u32 h          = image->height;
-    u32 mip_offset = 0;
-    while (w || h) {
-      mip_offsets.push(mip_offset);
-      w = MAX(1, w);
-      h = MAX(1, h);
-      mip_sizes.push({w, h});
-      mip_offset += w * h * image->get_bpp();
-      w = w >> 1;
-      h = h >> 1;
+    if (filter == FILTER_BOX) {
+      for (u32 i = 0; i < mip_offsets.size - 1; i++) {
+        pc.src_row_pitch = mip_pitch[i];
+        pc.src_offset    = mip_offsets[i];
+        pc.src_width     = mip_sizes[i].x;
+        pc.src_height    = mip_sizes[i].y;
+        pc.dst_row_pitch = mip_pitch[i + 1];
+        pc.dst_offset    = mip_offsets[i + 1];
+        pc.dst_width     = mip_sizes[i + 1].x;
+        pc.dst_height    = mip_sizes[i + 1].y;
+        table->push_constants(&pc, 0, sizeof(pc));
+        ctx->buffer_barrier(gpu_buffer, rd::Buffer_Access::UAV);
+        ctx->dispatch((mip_sizes[i + 1].x + 15) / 16, (mip_sizes[i + 1].y + 15) / 16, 1);
+      }
+    } else {
+      TRAP;
     }
-
-    for (u32 i = 0; i < mip_offsets.size - 1; i++) {
-      pc.src_offset = mip_offsets[i] / 4;
-      pc.src_width  = mip_sizes[i].x;
-      pc.src_height = mip_sizes[i].y;
-      pc.dst_offset = mip_offsets[i + 1] / 4;
-      pc.dst_width  = mip_sizes[i + 1].x;
-      pc.dst_height = mip_sizes[i + 1].y;
-      ctx->push_constants(&pc, 0, sizeof(pc));
-      ctx->buffer_barrier(staging_buffer,
-                          (u32)rd::Access_Bits::SHADER_READ | (u32)rd::Access_Bits::SHADER_WRITE);
-      ctx->dispatch((mip_sizes[i + 1].x + 15) / 16, (mip_sizes[i + 1].y + 15) / 16, 1);
-    }
+    ctx->buffer_barrier(gpu_buffer, rd::Buffer_Access::TRANSFER_SRC);
+    ctx->image_barrier(output_image, rd::Image_Access::TRANSFER_DST);
     ito(mip_offsets.size) {
       rd::Image_Copy dst_info;
       MEMZERO(dst_info);
-      dst_info.level      = i;
-      dst_info.num_layers = 1;
-      dst_info.size_x     = mip_sizes[i].x;
-      dst_info.size_y     = mip_sizes[i].y;
-      dst_info.size_z     = 1;
-      ctx->image_barrier(output_image, (u32)rd::Access_Bits::MEMORY_WRITE,
-                         rd::Image_Layout::TRANSFER_DST_OPTIMAL);
-      ctx->copy_buffer_to_image(staging_buffer, mip_offsets[i], output_image, dst_info);
+      dst_info.buffer_row_pitch = mip_pitch[i];
+      dst_info.level            = i;
+      dst_info.size_x           = mip_sizes[i].x;
+      dst_info.size_y           = mip_sizes[i].y;
+      dst_info.size_z           = 1;
+      ASSERT_DEBUG(mip_offsets[i] + mip_sizes[i].x * mip_sizes[i].y * image->get_bpp() <=
+                   gpu_buffer_size);
+      ASSERT_DEBUG((mip_offsets[i] & (rd::IDevice::BUFFER_COPY_ALIGNMENT - 1)) == 0);
+      ctx->copy_buffer_to_image(gpu_buffer, mip_offsets[i], output_image, dst_info);
     }
     factory->end_compute_pass(ctx);
-    factory->release_resource(cs);
-    factory->release_resource(staging_buffer);
     return output_image;
   }
 };
+#endif
 #if 0
 struct Raw_Mesh_3p16i_Wrapper {
   Resource_ID vertex_buffer;

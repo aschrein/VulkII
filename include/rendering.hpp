@@ -58,10 +58,10 @@ enum class Format : u32 {
   RGBA8_SNORM,
   RGBA8_SRGBA,
   RGBA8_UINT,
-  RGB8_UNORM,
-  RGB8_SNORM,
-  RGB8_SRGBA,
-  RGB8_UINT,
+  // RGB8_UNORM,
+  // RGB8_SNORM,
+  // RGB8_SRGBA,
+  // RGB8_UINT,
   RGBA32_FLOAT,
   RGB32_FLOAT,
   RG32_FLOAT,
@@ -85,10 +85,10 @@ static inline char const *format_to_cstr(Format format) {
       case Format::RGBA8_SNORM : return "RGBA8_SNORM";
       case Format::RGBA8_SRGBA : return "RGBA8_SRGBA";
       case Format::RGBA8_UINT  : return "RGBA8_UINT";
-      case Format::RGB8_UNORM  : return "RGB8_UNORM";
-      case Format::RGB8_SNORM  : return "RGB8_SNORM";
-      case Format::RGB8_SRGBA  : return "RGB8_SRGBA";
-      case Format::RGB8_UINT   : return "RGB8_UINT";
+      //case Format::RGB8_UNORM  : return "RGB8_UNORM";
+      //case Format::RGB8_SNORM  : return "RGB8_SNORM";
+      //case Format::RGB8_SRGBA  : return "RGB8_SRGBA";
+      //case Format::RGB8_UINT   : return "RGB8_UINT";
       case Format::RGBA32_FLOAT: return "RGBA32_FLOAT";
       case Format::RGB32_FLOAT : return "RGB32_FLOAT";
       case Format::RG32_FLOAT  : return "RG32_FLOAT";
@@ -127,10 +127,9 @@ enum class Memory_Type : uint32_t {
 };
 
 struct Image_Create_Info {
-  Format      format;
-  u32         usage_bits;
-  Memory_Type memory_type;
-  u32         width, height, depth, levels, layers;
+  Format format;
+  u32    usage_bits;
+  u32    width, height, depth, levels, layers;
 };
 
 struct Buffer_Create_Info {
@@ -276,20 +275,6 @@ struct MS_State {
 
 enum class Input_Rate { VERTEX, INSTANCE };
 
-// struct Access_Bits {
-//  enum {
-//    UNIFORM_READ   = 0x00000008,
-//    SHADER_READ    = 0x00000020,
-//    SHADER_WRITE   = 0x00000040,
-//    TRANSFER_READ  = 0x00000800,
-//    TRANSFER_WRITE = 0x00001000,
-//    HOST_READ      = 0x00002000,
-//    HOST_WRITE     = 0x00004000,
-//    MEMORY_READ    = 0x00008000,
-//    MEMORY_WRITE   = 0x00010000,
-//  };
-//};
-
 enum class Buffer_Access {
   GENERIC,
   UNIFORM,
@@ -328,10 +313,10 @@ struct Clear_Value {
 };
 
 struct Image_Subresource {
-  u32                      layer;
-  u32                      num_layers;
-  u32                      level;
-  u32                      num_levels;
+  i32                      layer;
+  i32                      num_layers;
+  i32                      level;
+  i32                      num_levels;
   static Image_Subresource top_level() {
     Image_Subresource out;
     out.layer      = 0;
@@ -340,11 +325,19 @@ struct Image_Subresource {
     out.num_levels = 1;
     return out;
   }
+  static Image_Subresource all_levels() {
+    Image_Subresource out;
+    out.layer      = 0;
+    out.num_layers = -1;
+    out.level      = 0;
+    out.num_levels = -1;
+    return out;
+  }
 };
 ASSERT_ISPOD(Image_Subresource);
 struct Image_Copy {
+  u32               buffer_row_pitch;
   u32               layer;
-  u32               num_layers;
   u32               level;
   u32               offset_x;
   u32               offset_y;
@@ -355,9 +348,8 @@ struct Image_Copy {
   static Image_Copy top_level() {
     Image_Copy out;
     MEMZERO(out);
-    out.layer      = 0;
-    out.num_layers = 1;
-    out.level      = 0;
+    out.layer = 0;
+    out.level = 0;
     return out;
   }
 };
@@ -411,7 +403,6 @@ enum class Binding_t : u32 { //
 };
 
 struct Binding_Desc {
-  u32       binding;
   Binding_t type;
   u32       num_array_elems;
 };
@@ -470,7 +461,7 @@ struct Graphics_Pipeline_State {
   MS_State       ms_state;
 
   void IA_set_topology(Primitive topology) { this->topology = topology; }
-  void IA_set_vertex_binding(u32 index, size_t stride, Input_Rate rate) {
+  void IA_set_vertex_binding(u32 index, u32 stride, Input_Rate rate) {
     num_vs_bindings           = MAX(num_vs_bindings, index + 1);
     bindings[index].binding   = index;
     bindings[index].inputRate = rate;
@@ -510,7 +501,7 @@ class IBinding_Table {
                             size_t size)                                       = 0;
   virtual void bind_sampler(u32 space, u32 binding, Resource_ID sampler_id)    = 0;
   virtual void bind_UAV_buffer(u32 space, u32 binding, Resource_ID buf_id, size_t offset,
-                                          size_t size)          = 0;
+                               size_t size)                                    = 0;
   virtual void bind_texture(u32 space, u32 binding, u32 index, Resource_ID image_id,
                             Image_Subresource const &range, Format format)     = 0;
   virtual void bind_UAV_texture(u32 space, u32 binding, u32 index, Resource_ID image_id,
@@ -522,9 +513,11 @@ class IBinding_Table {
 
 class IDevice {
   public:
-  static constexpr u32 BUFFER_ALIGNMENT = 0x100;
-  static size_t        align_up(size_t size) {
-    return (size + BUFFER_ALIGNMENT - 1) & ~(BUFFER_ALIGNMENT - 1);
+  static constexpr u32 BUFFER_ALIGNMENT             = 0x100;
+  static constexpr u32 BUFFER_COPY_ALIGNMENT        = 512;
+  static constexpr u32 TEXTURE_DATA_PITCH_ALIGNMENT = 256;
+  static size_t        align_up(size_t size, size_t alignment = BUFFER_ALIGNMENT) {
+    return (size + alignment - 1) & ~(alignment - 1);
   }
   static size_t align_down(size_t size) { return (size) & ~(BUFFER_ALIGNMENT - 1); }
 

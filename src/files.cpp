@@ -53,8 +53,8 @@ Raw_Mesh_Opaque optimize_mesh(Raw_Mesh_Opaque const &opaque_mesh) {
     out.attributes[i].offset = offset;
     offset += out.attributes[i].size;
   }
-  out.num_indices  = indices.size;
-  out.num_vertices = vertex_count;
+  out.num_indices  = (u32)indices.size;
+  out.num_vertices = (u32)vertex_count;
   out.min          = opaque_mesh.min;
   out.max          = opaque_mesh.max;
   out.deinterleave();
@@ -173,14 +173,14 @@ Raw_Meshlets_Opaque build_meshlets(Raw_Mesh_Opaque &opaque_mesh) {
   }
 
   u32 total_mem = 0;
-  ito(opaque_mesh.attributes.size) { total_mem += tmp_attributes[i].size; }
+  ito(opaque_mesh.attributes.size) { total_mem += (u32)tmp_attributes[i].size; }
   result.attribute_data.reserve(total_mem);
   result.attributes.resize(opaque_mesh.attributes.size);
   ito(opaque_mesh.attributes.size) {
     memcpy(result.attribute_data.ptr + result.attribute_data.size, tmp_attributes[i].ptr,
            tmp_attributes[i].size);
     result.attributes[i]        = opaque_mesh.attributes[i];
-    result.attributes[i].offset = result.attribute_data.size;
+    result.attributes[i].offset = (u32)result.attribute_data.size;
     result.attributes[i].stride = opaque_mesh.attributes[i].size;
     result.attribute_data.size += tmp_attributes[i].size;
   }
@@ -192,14 +192,16 @@ Raw_Meshlets_Opaque build_meshlets(Raw_Mesh_Opaque &opaque_mesh) {
 }
 
 void save_image(string_ref filename, Image2D const *image) {
-  if (image->format == rd::Format::RGBA8_UNORM || image->format == rd::Format::RGB8_UNORM ||
-      image->format == rd::Format::RGB8_SRGBA || image->format == rd::Format::RGBA8_SRGBA) {
+  if (image->format == rd::Format::RGBA8_UNORM
+      //|| image->format == rd::Format::RGB8_UNORM
+      //||image->format == rd::Format::RGB8_SRGBA
+      || image->format == rd::Format::RGBA8_SRGBA) {
     Array<u8> data;
     data.init();
     defer(data.release());
     data.resize(image->width * image->height * 4);
     switch (image->format) {
-    case rd::Format::RGB8_UNORM:
+    /*case rd::Format::RGB8_UNORM:
     case rd::Format::RGB8_SRGBA: {
       ito(image->height) {
         jto(image->width) {
@@ -214,7 +216,7 @@ void save_image(string_ref filename, Image2D const *image) {
           dst[3]  = a;
         }
       }
-    } break;
+    } break;*/
     case rd::Format::RGBA8_UNORM:
     case rd::Format::RGBA8_SRGBA: {
       memcpy(data.ptr, image->data, data.size);
@@ -225,7 +227,8 @@ void save_image(string_ref filename, Image2D const *image) {
     stbi_write_png(stref_to_tmp_cstr(filename), image->width, image->height, STBI_rgb_alpha,
                    &data[0], image->width * 4);
   } else if (image->format == rd::Format::RGBA32_FLOAT) {
-    Array<float> data;
+    TRAP; // This path doesn't work for some reason. Use write_image_rgba32_float_pfm.
+    /*Array<float> data;
     data.init();
     defer(data.release());
     data.resize(image->width * image->height * 4);
@@ -246,10 +249,12 @@ void save_image(string_ref filename, Image2D const *image) {
       memcpy(data.ptr, image->data, data.size * 4);
     } break;
     default: ASSERT_PANIC(false && "Unsupported format");
-    }
+    }*/
     TMP_STORAGE_SCOPE;
     stbi_write_tga(stref_to_tmp_cstr(filename), image->width, image->height, STBI_rgb_alpha,
-                   &data[0]);
+                   image->data);
+  } else {
+    TRAP;
   }
 }
 
@@ -413,7 +418,7 @@ Node *load_gltf_pbr(ISceneFactory *factory, string_ref filename) {
         cgltf_attribute *attribute = &primitive->attributes[attribute_index];
         // align_attribute_data();
         if (opaque_mesh.num_vertices == 0)
-          opaque_mesh.num_vertices = attribute->data->count;
+          opaque_mesh.num_vertices = (u32)attribute->data->count;
         else {
           ASSERT_ALWAYS(attribute->data->count == opaque_mesh.num_vertices);
         }
@@ -428,7 +433,7 @@ Node *load_gltf_pbr(ISceneFactory *factory, string_ref filename) {
           Attribute a;
           MEMZERO(a);
           a.format = rd::Format::RGB32_FLOAT;
-          a.offset = opaque_mesh.attribute_data.size;
+          a.offset = (u32)opaque_mesh.attribute_data.size;
           a.stride = 12;
           a.size   = 12;
           a.type   = rd::Attriute_t::POSITION;
@@ -457,7 +462,7 @@ Node *load_gltf_pbr(ISceneFactory *factory, string_ref filename) {
           Attribute a;
           MEMZERO(a);
           a.format = rd::Format::RGB32_FLOAT;
-          a.offset = opaque_mesh.attribute_data.size;
+          a.offset = (u32)opaque_mesh.attribute_data.size;
           a.stride = 12;
           a.size   = 12;
           a.type   = rd::Attriute_t::NORMAL;
@@ -476,7 +481,7 @@ Node *load_gltf_pbr(ISceneFactory *factory, string_ref filename) {
           Attribute a;
           MEMZERO(a);
           a.format = rd::Format::RGBA32_FLOAT;
-          a.offset = opaque_mesh.attribute_data.size;
+          a.offset = (u32)opaque_mesh.attribute_data.size;
           a.stride = 16;
           a.size   = 16;
           a.type   = rd::Attriute_t::TANGENT;
@@ -496,7 +501,7 @@ Node *load_gltf_pbr(ISceneFactory *factory, string_ref filename) {
           Attribute a;
           MEMZERO(a);
           a.format = rd::Format::RG32_FLOAT;
-          a.offset = opaque_mesh.attribute_data.size;
+          a.offset = (u32)opaque_mesh.attribute_data.size;
           a.stride = 8;
           a.size   = 8;
           if (attribute->index == 0)
@@ -563,21 +568,21 @@ Node *load_gltf_pbr(ISceneFactory *factory, string_ref filename) {
   };
   Node *root = load_node(&data->nodes[0]);
   root->update();
-  //vec3 max = root->getAABB().max;
-  //vec3 min = root->getAABB().min;
+  // vec3 max = root->getAABB().max;
+  // vec3 min = root->getAABB().min;
 
-  //vec3 max_dims = max - min;
+  // vec3 max_dims = max - min;
 
   //// Size normalization hack
-  //float vk      = 2.0f;
-  //float max_dim = MAX3(max_dims.x, max_dims.y, max_dims.z);
-  //vk            = 1.0f / max_dim;
-  //vec3 avg      = (max + min) / 2.0f;
+  // float vk      = 2.0f;
+  // float max_dim = MAX3(max_dims.x, max_dims.y, max_dims.z);
+  // vk            = 1.0f / max_dim;
+  // vec3 avg      = (max + min) / 2.0f;
 
   ////
 
-  //root->offset   = -avg * vk;
-  //root->rotation = glm::rotate(quat(), PI / 2.0f, float3(0.0f, 0.0f, 1.0f));
-  //root->scale    = float3(vk, vk, vk);
+  // root->offset   = -avg * vk;
+  // root->rotation = glm::rotate(quat(), PI / 2.0f, float3(0.0f, 0.0f, 1.0f));
+  // root->scale    = float3(vk, vk, vk);
   return root;
 }

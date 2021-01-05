@@ -861,14 +861,17 @@ static inline string_ref read_file_tmp_stref(char const *filename) {
   return string_ref{data, (size_t)fsize};
 }
 
+// Saves RGBA32_FLOAT. The extension must be .pfm. 'Xn View' (https://www.xnview.com/) can parse
+// such files.
 static inline void ATTR_USED write_image_rgba32_float_pfm(const char *file_name, void *data,
-                                                          uint32_t width, uint32_t height) {
+                                                          uint32_t width, uint32_t height,
+                                                          bool flip_y = false) {
   FILE *file = fopen(file_name, "wb");
   ASSERT_ALWAYS(file);
   fprintf(file, "PF\n%d %d\n%lf\n", width, height, -1.0f);
   ito(height) {
     jto(width) {
-      float *src = &((float *)data)[width * i * 4 + j * 4];
+      float *src = &((float *)data)[width * (flip_y ? (height - 1 - i) : i) * 4 + j * 4];
       fwrite((void *)(src + 0), 1, 4, file);
       fwrite((void *)(src + 1), 1, 4, file);
       fwrite((void *)(src + 2), 1, 4, file);

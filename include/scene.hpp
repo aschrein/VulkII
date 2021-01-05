@@ -48,13 +48,13 @@ typedef mat2 ALIGN16  afloat2x2;
 typedef mat3 ALIGN16  afloat3x3;
 typedef mat4 ALIGN16  afloat4x4;
 
-static constexpr float PI                  = 3.1415926;
-static constexpr float TWO_PI              = 6.2831852;
-static constexpr float FOUR_PI             = 12.566370;
-static constexpr float INV_PI              = 0.3183099;
-static constexpr float INV_TWO_PI          = 0.1591549;
-static constexpr float INV_FOUR_PI         = 0.0795775;
-static constexpr float DIELECTRIC_SPECULAR = 0.04;
+static constexpr float PI                  = 3.1415926f;
+static constexpr float TWO_PI              = 6.2831852f;
+static constexpr float FOUR_PI             = 12.566370f;
+static constexpr float INV_PI              = 0.3183099f;
+static constexpr float INV_TWO_PI          = 0.1591549f;
+static constexpr float INV_FOUR_PI         = 0.0795775f;
+static constexpr float DIELECTRIC_SPECULAR = 0.04f;
 
 // https://github.com/graphitemaster/normals_revisited
 static float minor(const float m[16], int r0, int r1, int r2, int c0, int c1, int c2) {
@@ -92,7 +92,7 @@ static inline float halton(int i, int base) {
   float x = 1.0f / base, v = 0.0f;
   while (i > 0) {
     v += x * (i % base);
-    i = floor(i / base);
+    i = (i32)std::floorf((float)i / (float)base);
     x /= base;
   }
   return v;
@@ -188,11 +188,11 @@ class Random_Factory {
   }
 
   static float3 SampleHemisphere_Cosinus(float2 xi) {
-    float phi      = xi.y * 2.0 * PI;
-    float cosTheta = std::sqrt(1.0 - xi.x);
-    float sinTheta = std::sqrt(1.0 - cosTheta * cosTheta);
+    float phi      = xi.y * 2.0f * PI;
+    float cosTheta = std::sqrtf(1.0f - xi.x);
+    float sinTheta = std::sqrtf(1.0f - cosTheta * cosTheta);
 
-    return float3(std::cos(phi) * sinTheta, std::sin(phi) * sinTheta, cosTheta);
+    return float3(std::cosf(phi) * sinTheta, std::sinf(phi) * sinTheta, cosTheta);
   }
 
   private:
@@ -247,7 +247,7 @@ struct Image2D {
       uint2 size = uint2(width, height);
       return *(f32 *)&data[coord.x * bpc + coord.y * size.x * bpc + component * 4u];
     };
-    uint2 size = uint2(width, height);
+    int2 size = int2(width, height);
     if (coord.x >= size.x) coord.x = size.x - 1;
     if (coord.x < 0) coord.x = 0;
     if (coord.y < 0) coord.y = 0;
@@ -291,7 +291,7 @@ struct Image2D {
     case rd::Format::RGBA32_FLOAT: bpc = 16u; break;
     default: ASSERT_PANIC(false && "unsupported format");
     }
-    uint2 size = uint2(width, height);
+    int2 size = int2(width, height);
     if (coord.x >= size.x) coord.x = size.x - 1;
     if (coord.x < 0) coord.x = 0;
     if (coord.y < 0) coord.y = 0;
@@ -504,7 +504,7 @@ static Raw_Mesh_3p16i subdivide_icosahedron(uint32_t level) {
       if (key.first > key.second) swap(key.first, key.second);
 
       if (!lookup.contains(key)) {
-        lookup.insert(key, out.positions.size);
+        lookup.insert(key, (u32)out.positions.size);
         auto v0_x = out.positions[i0].x;
         auto v1_x = out.positions[i1].x;
         auto v0_y = out.positions[i0].y;
@@ -717,7 +717,7 @@ struct Raw_Mesh_Opaque {
     u32 total_mem = 0;
     ito(attributes.size) {
       jto(i) attribute_offsets[i] += attribute_sizes[j];
-      total_mem = attribute_offsets[i] + attribute_sizes[i];
+      total_mem = (u32)attribute_offsets[i] + (u32)attribute_sizes[i];
     }
     ito(num_vertices) {
       jto(attributes.size) {
@@ -727,7 +727,7 @@ struct Raw_Mesh_Opaque {
     }
     ito(attributes.size) {
       attributes[i].stride = attributes[i].size;
-      attributes[i].offset = attribute_offsets[i];
+      attributes[i].offset = (u32)attribute_offsets[i];
     }
     attribute_data.release();
     attribute_data = dst;
@@ -1368,7 +1368,7 @@ template <typename T> struct BVH_Helper {
       };
       {
         TMP_STORAGE_SCOPE;
-        u32           num_items = items.size;
+        u32           num_items = (u32)items.size;
         Sorting_Node *sorted_dims[6];
         ito(6) sorted_dims[i] = (Sorting_Node *)tl_alloc_tmp(sizeof(Sorting_Node) * num_items);
         ito(num_items) {
@@ -1486,7 +1486,7 @@ template <typename T> struct BVH {
       u32 item_offset = alloc_item_chunk();
       node->init_leaf(hnode->min, hnode->max, item_offset);
       ASSERT_DEBUG(hnode->items.size <= BVH_Node::MAX_ITEMS);
-      node->set_num_items(hnode->items.size);
+      node->set_num_items((u32)hnode->items.size);
       T *items = item_pool.at(node->items_offset());
       ito(hnode->items.size) { items[i] = hnode->items[i]; }
     } else {
@@ -1653,7 +1653,7 @@ class MeshNode : public Node {
   }
 
   void     add_surface(Surface *surface) { surfaces.push(surface); }
-  u32      getNumSurfaces() { return surfaces.size; }
+  u32      getNumSurfaces() { return (u32)surfaces.size; }
   Surface *getSurface(u32 i) { return surfaces[i]; }
   Node *   clone() override {
     MeshNode *new_node = create(name.ref());
@@ -1730,11 +1730,13 @@ struct Config {
           traverse(l->next);
         } else {
           if (l->cmp_symbol("min")) {
-            if (parse_decimal_int(l->get(1)->symbol.ptr, l->get(1)->symbol.len, &imin) == false)
-              parse_float(l->get(1)->symbol.ptr, l->get(1)->symbol.len, &fmin);
+            if (parse_decimal_int(l->get(1)->symbol.ptr, (u32)l->get(1)->symbol.len, &imin) ==
+                false)
+              parse_float(l->get(1)->symbol.ptr, (u32)l->get(1)->symbol.len, &fmin);
           } else if (l->cmp_symbol("max")) {
-            if (parse_decimal_int(l->get(1)->symbol.ptr, l->get(1)->symbol.len, &imax) == false)
-              parse_float(l->get(1)->symbol.ptr, l->get(1)->symbol.len, &fmax);
+            if (parse_decimal_int(l->get(1)->symbol.ptr, (u32)l->get(1)->symbol.len, &imax) ==
+                false)
+              parse_float(l->get(1)->symbol.ptr, (u32)l->get(1)->symbol.len, &fmax);
           }
         }
       }
@@ -1971,6 +1973,7 @@ Node *              load_gltf_pbr(ISceneFactory *factory, string_ref filename);
 Raw_Mesh_Opaque     optimize_mesh(Raw_Mesh_Opaque const &opaque_mesh);
 Raw_Mesh_Opaque     simplify_mesh(Raw_Mesh_Opaque const &opaque_mesh);
 Raw_Meshlets_Opaque build_meshlets(Raw_Mesh_Opaque &opaque_mesh);
+void                save_image(string_ref filename, Image2D const *image);
 Image2D *           load_image(string_ref filename, rd::Format format = rd::Format::RGBA8_SRGBA);
 
 class Asset_Manager {
@@ -1994,11 +1997,11 @@ class Asset_Manager {
   }
   u32 add_image(Image2D *img) {
     images.push(img);
-    return images.size - 1;
+    return (u32)images.size - 1;
   }
   u32 load_image(string_ref path, rd::Format format) {
     images.push(::load_image(path, format));
-    return images.size - 1;
+    return (u32)images.size - 1;
   }
   Image2D const *get_image(u32 index) { return images[index]; }
   void           release() {
@@ -2110,8 +2113,8 @@ class GfxSurface {
   Resource_ID buffer;
 
   rd::IDevice *factory;
-  Surface *     surface;
-  rd::Index_t   index_type;
+  Surface *    surface;
+  rd::Index_t  index_type;
 
   void init(rd::IDevice *factory, Surface *surface) {
     MEMZERO(*this);
@@ -2127,18 +2130,18 @@ class GfxSurface {
 
     rd::Buffer_Create_Info info;
     MEMZERO(info);
-    info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
-    info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER |
+    info.memory_type = rd::Memory_Type::GPU_LOCAL;
+    info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER |
                       (u32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER |
                       (u32)rd::Buffer_Usage_Bits::USAGE_UAV |
                       (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
-    info.size = get_needed_memory();
+    info.size = (u32)get_needed_memory();
     buffer    = factory->create_buffer(info);
 
     MEMZERO(info);
-    info.mem_bits             = (u32)rd::Memory_Bits::HOST_VISIBLE;
+    info.memory_type          = rd::Memory_Type::CPU_WRITE_GPU_READ;
     info.usage_bits           = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
-    info.size                 = get_needed_memory();
+    info.size                 = (u32)get_needed_memory();
     Resource_ID stagin_buffer = factory->create_buffer(info);
     defer(factory->release_resource(stagin_buffer));
 
@@ -2158,7 +2161,7 @@ class GfxSurface {
     indices_offset += index_size;
     factory->unmap_buffer(stagin_buffer);
     auto *ctx = factory->start_compute_pass();
-    ctx->copy_buffer(stagin_buffer, 0, buffer, 0, get_needed_memory());
+    ctx->copy_buffer(stagin_buffer, 0, buffer, 0, (u32)get_needed_memory());
     factory->end_compute_pass(ctx);
   }
   size_t get_needed_memory() {
@@ -2245,8 +2248,7 @@ class GfxSufraceComponent : public Node::Component {
     return s;
   }
   void buildBVH() {
-    if (bvh)
-      bvh->release();
+    if (bvh) bvh->release();
     bvh = new BVH<Tri>;
     AutoArray<Tri> tri_pool;
     MeshNode *     mn = node->dyn_cast<MeshNode>();
@@ -2264,9 +2266,9 @@ class GfxSufraceComponent : public Node::Component {
         tri_pool.push(t);
       }
     }
-    bvh->init(&tri_pool[0], tri_pool.size);
+    bvh->init(&tri_pool[0], (u32)tri_pool.size);
   }
-  u32         getNumSurfaces() { return gfx_surfaces.size; }
+  u32         getNumSurfaces() { return (u32)gfx_surfaces.size; }
   GfxSurface *getSurface(u32 i) { return gfx_surfaces[i]; }
   void        release() override {
     ito(gfx_surfaces.size) gfx_surfaces[i]->release();
@@ -2327,12 +2329,12 @@ struct Topo_Mesh {
   Edge *        get_edge(u32 id) { return &edges[id]; }
   u32           add_edge() {
     edges.push({});
-    return edges.size - 1;
+    return (u32)edges.size - 1;
   }
   TriFace *get_face(u32 id) { return &faces[id]; }
   u32      add_face() {
     faces.push({});
-    return faces.size - 1;
+    return (u32)faces.size - 1;
   }
   Vertex *get_vertex(u32 id) { return &vertices[id]; }
   // void    register_edge(u32 vtx0, u32 vtx1, u32 edge_id) {

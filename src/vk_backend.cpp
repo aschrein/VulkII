@@ -378,10 +378,10 @@ VkFormat to_vk(rd::Format format) {
 
   case rd::Format::BGRA8_SRGBA     : return VK_FORMAT_B8G8R8A8_SRGB       ;
 
-  case rd::Format::RGB8_UNORM      : return VK_FORMAT_R8G8B8_UNORM        ;
-  case rd::Format::RGB8_SNORM      : return VK_FORMAT_R8G8B8_SNORM        ;
-  case rd::Format::RGB8_SRGBA      : return VK_FORMAT_R8G8B8_SRGB         ;
-  case rd::Format::RGB8_UINT       : return VK_FORMAT_R8G8B8_UINT         ;
+  //case rd::Format::RGB8_UNORM      : return VK_FORMAT_R8G8B8_UNORM        ;
+  //case rd::Format::RGB8_SNORM      : return VK_FORMAT_R8G8B8_SNORM        ;
+  //case rd::Format::RGB8_SRGBA      : return VK_FORMAT_R8G8B8_SRGB         ;
+  //case rd::Format::RGB8_UINT       : return VK_FORMAT_R8G8B8_UINT         ;
 
   case rd::Format::RGBA32_FLOAT    : return VK_FORMAT_R32G32B32A32_SFLOAT ;
   case rd::Format::RGB32_FLOAT     : return VK_FORMAT_R32G32B32_SFLOAT    ;
@@ -410,10 +410,10 @@ rd::Format from_vk(VkFormat format) {
   case VK_FORMAT_R8G8B8A8_SRGB       : return rd::Format::RGBA8_SRGBA     ;
   case VK_FORMAT_R8G8B8A8_UINT       : return rd::Format::RGBA8_UINT      ;
 
-  case VK_FORMAT_R8G8B8_UNORM        : return rd::Format::RGB8_UNORM      ;
-  case VK_FORMAT_R8G8B8_SNORM        : return rd::Format::RGB8_SNORM      ;
-  case VK_FORMAT_R8G8B8_SRGB         : return rd::Format::RGB8_SRGBA      ;
-  case VK_FORMAT_R8G8B8_UINT         : return rd::Format::RGB8_UINT       ;
+  //case VK_FORMAT_R8G8B8_UNORM        : return rd::Format::RGB8_UNORM      ;
+  //case VK_FORMAT_R8G8B8_SNORM        : return rd::Format::RGB8_SNORM      ;
+  //case VK_FORMAT_R8G8B8_SRGB         : return rd::Format::RGB8_SRGBA      ;
+  //case VK_FORMAT_R8G8B8_UINT         : return rd::Format::RGB8_UINT       ;
 
   case VK_FORMAT_R32G32B32A32_SFLOAT : return rd::Format::RGBA32_FLOAT    ;
   case VK_FORMAT_R32G32B32_SFLOAT    : return rd::Format::RGB32_FLOAT     ;
@@ -586,13 +586,13 @@ static Array<u32> compile_hlsl(VkDevice device, string_ref text, shaderc_shader_
   CComPtr<IDxcBlobEncoding> blob;
   ASSERT_ALWAYS(S_OK ==
                 library->CreateBlobWithEncodingFromPinned(text.ptr, (uint32_t)text.len, 0, &blob));
-  LPCWSTR profile = L"ps_6_0";
+  LPCWSTR profile = L"ps_6_2";
   if (kind == shaderc_vertex_shader)
-    profile = L"vs_6_0";
+    profile = L"vs_6_2";
   else if (kind == shaderc_fragment_shader)
-    profile = L"ps_6_0";
+    profile = L"ps_6_2";
   else if (kind == shaderc_compute_shader)
-    profile = L"cs_6_0";
+    profile = L"cs_6_2";
   else {
     TRAP;
   }
@@ -1159,6 +1159,7 @@ class VK_Binding_Table : public rd::IBinding_Table {
   VkDeviceContext *                  dev_ctx   = NULL;
   VK_Binding_Signature *             signature = NULL;
   InlineArray<VkDescriptorSet, 0x10> sets{};
+  InlineArray<ID, 0x10>              set_ids{};
   u8                                 push_constants_storage[128]{};
 
   public:
@@ -1914,6 +1915,7 @@ struct VkDeviceContext {
     buffer_views.init(this);
     image_views.init(this);
     render_passes.init(this);
+    sets.init(this);
     pipelines.init(this);
     compute_pipelines.init(this);
     fences.init(this);
@@ -1935,6 +1937,7 @@ struct VkDeviceContext {
     buffer_views.release();
     image_views.release();
     render_passes.release();
+    sets.release();
     pipelines.release();
     fences.release();
     events.release();
@@ -2569,7 +2572,7 @@ struct VkDeviceContext {
 #else
         VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_XCB_SURFACE_EXTENSION_NAME,
 #endif
-        VK_EXT_DEBUG_REPORT_EXTENSION_NAME};
+        VK_EXT_DEBUG_UTILS_EXTENSION_NAME};
 
     VkApplicationInfo app_info;
     MEMZERO(app_info);
@@ -2895,6 +2898,7 @@ struct VkDeviceContext {
     buffer_views.tick();
     image_views.tick();
     render_passes.tick();
+    sets.tick();
     pipelines.tick();
     signatures.tick();
     compute_pipelines.tick();
@@ -3053,7 +3057,7 @@ class Vk_Ctx : public rd::ICtx {
   ID                cur_pass{};
   VK_Binding_Table *binding_table = NULL;
 
-  template <typename K, typename V> using Table = Hash_Table<K, V, Default_Allocator, 0x1000>;
+  template <typename K, typename V> using Table = Hash_Table<K, V, Default_Allocator, 64>;
   Table<Resource_ID, BufferLaoutTracker> buffer_layouts;
   Table<Resource_ID, ImageLayoutTracker> image_layouts;
   Pool<u8>                               tmp_pool;
@@ -3118,16 +3122,13 @@ class Vk_Ctx : public rd::ICtx {
       info.imageExtent.depth = image.info.extent.depth;
     else
       info.imageExtent.depth = dst_info.size_z;
-
+    if (dst_info.buffer_row_pitch) info.bufferRowLength = dst_info.buffer_row_pitch;
     info.imageOffset = {(i32)dst_info.offset_x, (i32)dst_info.offset_y, (i32)dst_info.offset_z};
     VkImageSubresourceLayers subres;
     MEMZERO(subres);
-    subres.aspectMask     = image.aspect;
-    subres.baseArrayLayer = dst_info.layer;
-    if (dst_info.num_layers == 0)
-      subres.layerCount = 1;
-    else
-      subres.layerCount = dst_info.num_layers;
+    subres.aspectMask      = image.aspect;
+    subres.baseArrayLayer  = dst_info.layer;
+    subres.layerCount      = 1;
     subres.mipLevel        = dst_info.level;
     info.imageSubresource  = subres;
     info.bufferImageHeight = image.info.extent.height;
@@ -3156,16 +3157,14 @@ class Vk_Ctx : public rd::ICtx {
       info.imageExtent.depth = image.info.extent.depth;
     else
       info.imageExtent.depth = dst_info.size_z;
-
+    if (dst_info.buffer_row_pitch)
+      info.bufferRowLength = dst_info.buffer_row_pitch / get_format_size(image.info.format);
     info.imageOffset = {(i32)dst_info.offset_x, (i32)dst_info.offset_y, (i32)dst_info.offset_z};
     VkImageSubresourceLayers subres;
     MEMZERO(subres);
-    subres.aspectMask     = image.aspect;
-    subres.baseArrayLayer = dst_info.layer;
-    if (dst_info.num_layers == 0)
-      subres.layerCount = 1;
-    else
-      subres.layerCount = dst_info.num_layers;
+    subres.aspectMask      = image.aspect;
+    subres.baseArrayLayer  = dst_info.layer;
+    subres.layerCount      = 1;
     subres.mipLevel        = dst_info.level;
     info.imageSubresource  = subres;
     info.bufferImageHeight = image.info.extent.height;
@@ -3454,7 +3453,7 @@ class VkFactory : public rd::IDevice {
   Resource_ID create_image(rd::Image_Create_Info info) override {
     std::lock_guard<std::mutex> _lock(mutex);
     return dev_ctx->create_image(info.width, info.height, info.depth, info.layers, info.levels,
-                                 to_vk(info.format), info.usage_bits, info.memory_type);
+                                 to_vk(info.format), info.usage_bits, rd::Memory_Type::GPU_LOCAL);
   }
   Resource_ID create_graphics_pso(Resource_ID signature, Resource_ID render_pass,
                                   rd::Graphics_Pipeline_State const &state) override {
@@ -3784,7 +3783,7 @@ VK_Binding_Signature::create(VkDeviceContext *                    dev_ctx,
       auto                         dinfo = info.bindings[i];
       VkDescriptorSetLayoutBinding binding_info;
       MEMZERO(binding_info);
-      binding_info.binding            = dinfo.binding;
+      binding_info.binding            = i;
       binding_info.descriptorCount    = dinfo.num_array_elems;
       binding_info.descriptorType     = to_vk(dinfo.type);
       binding_info.pImmutableSamplers = NULL;
@@ -3795,12 +3794,15 @@ VK_Binding_Signature::create(VkDeviceContext *                    dev_ctx,
 
     ito(num_bindings) {
       if (set_bindings[i].descriptorCount > 1) {
-        binding_flags[i] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
-                           VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
-                           VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT;
+        binding_flags[i] = 0 //
+                           | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT
+            // | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT
+            ;
       } else {
-        binding_flags[i] = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
-                           VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT;
+        binding_flags[i] = 0 //
+                             // | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
+                             // | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT
+            ;
       }
     }
     ASSERT_DEBUG(num_bindings < rd::Binding_Space_Create_Info::MAX_BINDINGS);
@@ -3848,7 +3850,7 @@ VK_Binding_Table *VK_Binding_Table::create(VkDeviceContext *     dev_ctx,
   VK_Binding_Table *out = new VK_Binding_Table;
   out->signature        = signature;
   ito(signature->set_layouts.size) out->sets.push(dev_ctx->allocate_set(signature->set_layouts[i]));
-
+  ito(out->sets.size) out->set_ids.push(dev_ctx->sets.push(DescriptorSet(out->sets[i])));
   out->dev_ctx = dev_ctx;
   return out;
 }
@@ -3920,8 +3922,12 @@ void VK_Binding_Table::bind_texture(u32 space, u32 binding, u32 index, Resource_
     vkformat = img.info.format;
   else
     vkformat = to_vk(format);
+  u32 num_levels = range.num_levels;
+  if (num_levels == -1) num_levels = img.info.mipLevels;
+  u32 num_layers = range.num_layers;
+  if (num_layers == -1) num_layers = img.info.arrayLayers;
   ID view_id = dev_ctx
-                   ->create_image_view(img.id, range.level, range.num_levels, range.layer,
+                   ->create_image_view(img.id, range.level, num_levels, range.layer,
                                        range.num_layers, vkformat)
                    .id;
   ImageView view    = dev_ctx->image_views.read(view_id);
@@ -3969,7 +3975,8 @@ void VK_Binding_Table::bind_UAV_texture(u32 space, u32 binding, u32 index, Resou
   vkUpdateDescriptorSets(dev_ctx->device, 1, &wset, 0, NULL);
 }
 void VK_Binding_Table::release() {
-  ito(sets.size) dev_ctx->desc_pool.free(sets[i]);
+  // ito(sets.size) dev_ctx->desc_pool.free(sets[i]);
+  ito(set_ids.size) dev_ctx->sets.remove(set_ids[i], 3);
   delete this;
 }
 void VK_Binding_Signature::release(VkDeviceContext *dev_ctx) {

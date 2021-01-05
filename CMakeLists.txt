@@ -16,6 +16,10 @@ ELSE()
 ENDIF()
 add_subdirectory(3rdparty/meshoptimizer)
 
+add_library(TracyClient STATIC 3rdparty/tracy/TracyClient.cpp)
+target_include_directories(TracyClient PRIVATE 3rdparty/tracy)
+target_compile_definitions(TracyClient PRIVATE TRACY_ENABLE=1)
+
 IF (WIN32)
   set(SDL2_PATH ${CMAKE_SOURCE_DIR}/bin/SDL2)
   set(IMPLS
@@ -111,6 +115,7 @@ function(ADD_EXAMPLE example_name example_file)
       ${CMAKE_BINARY_DIR}
     )
     target_link_libraries(${example_name}
+    TracyClient
     ${Vulkan_LIBRARY}
     meshoptimizer
     ${LIBS}

@@ -31,6 +31,50 @@ using namespace Microsoft::WRL;
   } while (0)
 
 namespace {
+DXGI_FORMAT to_dx(rd::Format format) {
+  // clang-format off
+  switch (format) {
+  case rd::Format::RGBA8_UNORM     : return DXGI_FORMAT_R8G8B8A8_UNORM      ;
+  case rd::Format::RGBA8_SNORM     : return DXGI_FORMAT_R8G8B8A8_SNORM      ;
+  case rd::Format::RGBA8_SRGBA     : return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB       ;
+  case rd::Format::RGBA8_UINT      : return DXGI_FORMAT_R8G8B8A8_UINT;
+
+  case rd::Format::BGRA8_SRGBA     : return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB       ;
+
+  //case rd::Format::RGB8_UNORM      : return DXGI_FORMAT_R8G8B8_UNORM        ;
+  //case rd::Format::RGB8_SNORM      : return DXGI_FORMAT_R8G8B8_SNORM        ;
+  //case rd::Format::RGB8_SRGBA      : return VK_FORMAT_R8G8B8_SRGB         ;
+  //case rd::Format::RGB8_UINT       : return VK_FORMAT_R8G8B8_UINT         ;
+
+  case rd::Format::RGBA32_FLOAT    : return DXGI_FORMAT_R32G32B32A32_FLOAT ;
+  case rd::Format::RGB32_FLOAT     : return DXGI_FORMAT_R32G32B32_FLOAT    ;
+  case rd::Format::RG32_FLOAT      : return DXGI_FORMAT_R32G32_FLOAT       ;
+  case rd::Format::R32_FLOAT       : return DXGI_FORMAT_R32_FLOAT          ;
+  case rd::Format::R16_FLOAT       : return DXGI_FORMAT_R16_FLOAT          ;
+  case rd::Format::R16_UNORM       : return DXGI_FORMAT_R16_UNORM;
+  case rd::Format::R8_UNORM        : return DXGI_FORMAT_R8_UNORM;
+  case rd::Format::D32_FLOAT       : return DXGI_FORMAT_D32_FLOAT          ;
+  case rd::Format::R32_UINT        : return DXGI_FORMAT_R32_UINT;
+  case rd::Format::R16_UINT        : return DXGI_FORMAT_R16_UINT            ;
+  default: UNIMPLEMENTED;
+  }
+  // clang-format on
+}
+
+D3D12_RESOURCE_STATES to_dx(rd::Image_Access access) {
+  switch (access) {
+  case rd::Image_Access::GENERIC: return D3D12_RESOURCE_STATE_COMMON;
+  case rd::Image_Access::DEPTH_TARGET: return D3D12_RESOURCE_STATE_DEPTH_WRITE;
+  case rd::Image_Access::COLOR_TARGET: return D3D12_RESOURCE_STATE_RENDER_TARGET;
+  case rd::Image_Access::SAMPLED: return D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+  case rd::Image_Access::TRANSFER_DST: return D3D12_RESOURCE_STATE_COPY_DEST;
+  case rd::Image_Access::TRANSFER_SRC: return D3D12_RESOURCE_STATE_COPY_SOURCE;
+  case rd::Image_Access::UAV: return D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+  default: {
+    TRAP;
+  }
+  }
+}
 D3D12_RESOURCE_STATES to_dx(rd::Buffer_Access access) {
   switch (access) {
   case rd::Buffer_Access::GENERIC: return D3D12_RESOURCE_STATE_COMMON;
@@ -47,6 +91,36 @@ D3D12_RESOURCE_STATES to_dx(rd::Buffer_Access access) {
   default: {
     TRAP;
   }
+  }
+}
+D3D12_TEXTURE_ADDRESS_MODE to_dx(rd::Address_Mode mode) {
+  switch (mode) {
+  case rd::Address_Mode::CLAMP_TO_EDGE: return D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+  case rd::Address_Mode::MIRRORED_REPEAT: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR;
+  case rd::Address_Mode::REPEAT: return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+  default: TRAP;
+  }
+}
+
+D3D12_RESOURCE_STATES get_default_state(ID3D12Resource *res) {
+  D3D12_HEAP_PROPERTIES hp{};
+  D3D12_HEAP_FLAGS      hf{};
+  DX_ASSERT_OK(res->GetHeapProperties(&hp, &hf));
+  if (hp.Type == D3D12_HEAP_TYPE_READBACK) return D3D12_RESOURCE_STATE_COPY_DEST;
+  if (hp.Type == D3D12_HEAP_TYPE_UPLOAD) return D3D12_RESOURCE_STATE_GENERIC_READ;
+  if (res->GetDesc().Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
+    return D3D12_RESOURCE_STATE_COMMON;
+  return D3D12_RESOURCE_STATE_COMMON;
+}
+
+D3D12_COMPARISON_FUNC to_dx(rd::Cmp mode) {
+  switch (mode) {
+  case rd::Cmp::EQ: return D3D12_COMPARISON_FUNC_EQUAL;
+  case rd::Cmp::GE: return D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+  case rd::Cmp::GT: return D3D12_COMPARISON_FUNC_GREATER;
+  case rd::Cmp::LE: return D3D12_COMPARISON_FUNC_LESS_EQUAL;
+  case rd::Cmp::LT: return D3D12_COMPARISON_FUNC_LESS;
+  default: TRAP;
   }
 }
 namespace {
@@ -95,6 +169,7 @@ enum class Resource_Type : u32 {
   TEXTURE,
   SIGNATURE,
   SHADER,
+  SAMPLER,
   PSO,
 };
 
@@ -114,7 +189,10 @@ template <typename T> class Resource_Array {
     items.push(item);
     return {(u32)items.size};
   }
-  void free(ID id) { free_slots.push(id.index()); }
+  void free(ID id) {
+    items[id.index()] = {};
+    free_slots.push(id.index());
+  }
   ~Resource_Array() {}
 };
 
@@ -142,20 +220,28 @@ class DX12Device;
 
 struct DX12Binding_Signature {
   ComPtr<ID3D12RootSignature> root_signature;
-  u32                         num_desc_common     = 0;
-  u32                         num_desc_samplers   = 0;
-  u32                         num_params_common   = 0;
-  u32                         num_params_samplers = 0;
-  u32                         num_params_total    = 0;
-  u32                         push_constants_size = 0;
-  InlineArray<u32, 0x10>      common_parameter_heap_offsets{};
-  InlineArray<u32, 0x10>      sampler_parameter_heap_offsets{};
+  u32                         num_desc_common           = 0;
+  u32                         common_desc_heap_ofset    = 0;
+  u32                         num_desc_samplers         = 0;
+  u32                         samplers_desc_heap_offset = 0;
+
+  i32 common_param_id   = -1;
+  i32 samplers_param_id = -1;
+  i32 pc_param_id       = -1;
+  u32 num_params        = 0;
+  // u32                         num_params_common   = 0;
+  // u32                         num_params_samplers = 0;
+  // u32                         num_params_total    = 0;
+  u32 push_constants_size = 0;
+  // InlineArray<u32, 0x10>      common_parameter_heap_offsets{};
+  // InlineArray<u32, 0x10>      common_parameter_space_to_parameter_id{};
+  // InlineArray<u32, 0x10>      sampler_parameter_heap_offsets{};
+  // InlineArray<u32, 0x10>      sampler_parameter_space_to_parameter_id{};
   enum { PUSH_CONSTANTS_SPACE = 777 };
-  struct SpaceDesc {
-    InlineArray<D3D12_DESCRIPTOR_RANGE, 0x10> ranges{};
+  struct ParamDesc {
+    InlineArray<D3D12_DESCRIPTOR_RANGE, 0x10> bindings{};
   };
-  // 16 for common and 16 for samplers
-  SpaceDesc space_descs[0x20]{};
+  ParamDesc space_descs[0x10]{};
 
   static DX12Binding_Signature *create(DX12Device *                         dev_ctx,
                                        rd::Binding_Table_Create_Info const &table_info);
@@ -186,15 +272,34 @@ class DX12Device : public rd::IDevice {
   Resource_Array<IDxcBlob *>              shader_table;
   Resource_Array<ID3D12PipelineState *>   pso_table;
   Resource_Array<HANDLE>                  events_table;
+  Resource_Array<D3D12_SAMPLER_DESC *>    sampler_table;
 
   AutoArray<Pair<Resource_ID, i32>> deferred_release;
 
   ~DX12Device() {}
 
+  // Synchronization
+  void sync_transition_barrier(ID3D12Resource *res, D3D12_RESOURCE_STATES StateBefore,
+                               D3D12_RESOURCE_STATES StateAfter) {
+    auto                   cmd = alloc_graphics_cmd();
+    D3D12_RESOURCE_BARRIER bar{};
+    bar.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    bar.Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    bar.Transition.pResource   = res;
+    bar.Transition.Subresource = 0;
+    bar.Transition.StateBefore = StateBefore;
+    bar.Transition.StateAfter  = StateAfter;
+    cmd->ResourceBarrier(1, &bar);
+    cmd->Close();
+    cmd_queue->ExecuteCommandLists(1, (ID3D12CommandList **)cmd.GetAddressOf());
+    wait_idle();
+  }
+
   public:
   ID3D12Resource *       get_resource(ID id) { return resource_table.load(id); }
   DX12Binding_Signature *get_signature(ID id) { return signature_table.load(id); }
   ID3D12PipelineState *  get_pso(ID id) { return pso_table.load(id); }
+  D3D12_SAMPLER_DESC *   get_sampler(ID id) { return sampler_table.load(id); }
 
   ComPtr<ID3D12Device2>             get_device() { return device; }
   ComPtr<ID3D12GraphicsCommandList> alloc_graphics_cmd() {
@@ -285,14 +390,44 @@ class DX12Device : public rd::IDevice {
   }
   Resource_ID create_image(rd::Image_Create_Info info) override {
     std::lock_guard<std::mutex> _lock(mutex);
-    TRAP;
+    ID3D12Resource *            buf = NULL;
+    D3D12_HEAP_PROPERTIES       prop{};
+    prop.Type                 = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_HEAP_FLAGS    flags = D3D12_HEAP_FLAG_NONE;
+    D3D12_RESOURCE_DESC desc{};
+    if (info.depth == 0) info.depth = 1;
+    if (info.width == 0) info.width = 1;
+    if (info.height == 0) info.height = 1;
+    if (info.depth == 1) {
+      if (info.height == 1)
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE1D;
+      else
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    } else
+      desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+    desc.Alignment        = 0;
+    desc.DepthOrArraySize = info.depth == 1 ? info.layers : info.depth;
+    desc.Flags            = D3D12_RESOURCE_FLAG_NONE;
+    if (info.usage_bits & (u32)rd::Image_Usage_Bits::USAGE_UAV)
+      desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    desc.Format             = to_dx(info.format);
+    desc.Height             = 1;
+    desc.Layout             = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    desc.MipLevels          = info.levels;
+    desc.SampleDesc.Count   = 1;
+    desc.SampleDesc.Quality = 0;
+    desc.Width              = info.width;
+    desc.Height             = info.height;
+    auto state              = D3D12_RESOURCE_STATE_COMMON;
+    DX_ASSERT_OK(
+        device->CreateCommittedResource(&prop, flags, &desc, state, NULL, IID_PPV_ARGS(&buf)));
+    return {resource_table.push(buf), (u32)Resource_Type::TEXTURE};
   }
   Resource_ID create_buffer(rd::Buffer_Create_Info info) override {
-    std::lock_guard<std::mutex> _lock(mutex);
-    ID3D12Resource *            buf   = NULL;
-    D3D12_HEAP_PROPERTIES       prop  = get_heap_properties(info.memory_type);
-    D3D12_HEAP_FLAGS            flags = D3D12_HEAP_FLAG_NONE;
-    D3D12_RESOURCE_DESC         desc{};
+    ID3D12Resource *      buf   = NULL;
+    D3D12_HEAP_PROPERTIES prop  = get_heap_properties(info.memory_type);
+    D3D12_HEAP_FLAGS      flags = D3D12_HEAP_FLAG_NONE;
+    D3D12_RESOURCE_DESC   desc{};
     desc.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
     desc.Alignment        = 0;
     desc.DepthOrArraySize = 1;
@@ -308,10 +443,20 @@ class DX12Device : public rd::IDevice {
     desc.Width              = info.size;
     if (info.usage_bits & (u32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER)
       desc.Width = ((desc.Width + 0xffU) & ~0xffu);
+
     auto state = D3D12_RESOURCE_STATE_COMMON;
-    if (info.memory_type == rd::Memory_Type::CPU_READ_WRITE) state = D3D12_RESOURCE_STATE_COPY_DEST;
-    DX_ASSERT_OK(
-        device->CreateCommittedResource(&prop, flags, &desc, state, NULL, IID_PPV_ARGS(&buf)));
+    if (prop.Type == D3D12_HEAP_TYPE_READBACK) state = D3D12_RESOURCE_STATE_COPY_DEST;
+    if (prop.Type == D3D12_HEAP_TYPE_UPLOAD) state = D3D12_RESOURCE_STATE_GENERIC_READ;
+
+    {
+      std::lock_guard<std::mutex> _lock(mutex);
+      DX_ASSERT_OK(
+          device->CreateCommittedResource(&prop, flags, &desc, state, NULL, IID_PPV_ARGS(&buf)));
+      ASSERT_DEBUG(get_default_state(buf) == state);
+    }
+    /*if (state != D3D12_RESOURCE_STATE_COMMON) {
+      sync_transition_barrier(buf, state, D3D12_RESOURCE_STATE_COMMON);
+    }*/
     return {resource_table.push(buf), (u32)Resource_Type::BUFFER};
   }
   Resource_ID create_shader(rd::Stage_t type, string_ref text,
@@ -325,7 +470,25 @@ class DX12Device : public rd::IDevice {
       return 0;
     }();
     ComPtr<IDxcBlobEncoding> blob;
-    DX_ASSERT_OK(library->CreateBlobWithEncodingFromPinned(text.ptr, (uint32_t)text.len, 0, &blob));
+    // Do a little preprocessing
+    {
+      TMP_STORAGE_SCOPE;
+      // allocated 1 byte but really the rest of memory
+      char *tmp_body = (char *)tl_alloc_tmp(1);
+      sprintf(tmp_body, "%s%.*s", R"(
+#define DX12_PUSH_CONSTANTS_REGISTER register(b0, space777)
+#define u32 uint
+#define i32 int
+#define f32 float
+#define f64 double
+#define float2_splat(x)  float2(x, x)
+#define float3_splat(x)  float3(x, x, x)
+#define float4_splat(x)  float4(x, x, x, x)
+      )",
+              STRF(text));
+      DX_ASSERT_OK(
+          library->CreateBlobWithEncodingFromPinned(tmp_body, (u32)strlen(tmp_body), 0, &blob));
+    }
     LPCWSTR profile = NULL;
     if (type == rd::Stage_t::VERTEX)
       profile = L"vs_6_2";
@@ -339,21 +502,23 @@ class DX12Device : public rd::IDevice {
     Array<DxcDefine> dxc_defines;
     dxc_defines.init();
     TMP_STORAGE_SCOPE;
+
     ito(num_defines) {
       DxcDefine d;
       d.Name  = towstr_tmp(defines[i].first);
       d.Value = towstr_tmp(defines[i].second);
       dxc_defines.push(d);
     }
+
     defer(dxc_defines.release());
-    WCHAR const *               options[] = {L"UNUSED"};
+    WCHAR const *               options[] = {L"-Wignored-attributes", L"UNUSED"};
     ComPtr<IDxcOperationResult> result;
     HRESULT                     hr = compiler->Compile(blob.Get(),     // pSource
                                    L"shader.hlsl", // pSourceName
                                    L"main",        // pEntryPoint
                                    profile,        // pTargetProfile
-                                   options, ARRAYSIZE(options) - 1, // pArguments, argCount
-                                   dxc_defines.ptr, dxc_defines.size, // pDefines, defineCount
+                                   options, (u32)ARRAYSIZE(options) - 1, // pArguments, argCount
+                                   dxc_defines.ptr, (u32)dxc_defines.size, // pDefines, defineCount
                                    NULL,     // pIncludeHandler
                                    &result); // ppResult
     if (SUCCEEDED(hr)) result->GetStatus(&hr);
@@ -375,8 +540,41 @@ class DX12Device : public rd::IDevice {
   }
   Resource_ID create_sampler(rd::Sampler_Create_Info const &info) override {
     std::lock_guard<std::mutex> _lock(mutex);
-    TRAP;
-  }
+    // u32                         id = sampler_desc_heap->allocate(1);
+    D3D12_SAMPLER_DESC desc{};
+    desc.AddressU       = to_dx(info.address_mode_u);
+    desc.AddressV       = to_dx(info.address_mode_v);
+    desc.AddressW       = to_dx(info.address_mode_w);
+    desc.ComparisonFunc = to_dx(info.cmp_op);
+    if (info.min_filter == rd::Filter::LINEAR) {
+      if (info.mag_filter == rd::Filter::LINEAR) {
+        desc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+      } else if (info.mag_filter == rd::Filter::NEAREST) {
+        desc.Filter = D3D12_FILTER_MIN_LINEAR_MAG_MIP_POINT;
+      } else {
+        TRAP;
+      }
+    } else if (info.min_filter == rd::Filter::NEAREST) {
+      if (info.mag_filter == rd::Filter::LINEAR) {
+        desc.Filter = D3D12_FILTER_MIN_POINT_MAG_MIP_LINEAR;
+      } else if (info.mag_filter == rd::Filter::NEAREST) {
+        desc.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+      } else {
+        TRAP;
+      }
+    } else {
+      TRAP;
+    }
+    desc.MaxAnisotropy = (u32)info.max_anisotropy;
+    desc.MaxLOD        = info.max_lod;
+    desc.MinLOD        = info.min_lod;
+    desc.MipLODBias    = info.mip_lod_bias;
+
+    /* device->CreateSampler(&desc,
+                           {sampler_desc_heap->get_heap()->GetCPUDescriptorHandleForHeapStart().ptr
+       + sampler_desc_heap->get_element_size() * id});*/
+    return {sampler_table.push(new D3D12_SAMPLER_DESC(desc)), (u32)Resource_Type::SAMPLER};
+  } // namespace
   void release_resource(Resource_ID id) override {
     std::lock_guard<std::mutex> _lock(mutex);
     deferred_release.push({id, 3});
@@ -540,6 +738,7 @@ class DX12Device : public rd::IDevice {
     }
     deferred_release.reset();
     ito(new_deferred_release.size) { deferred_release.push(new_deferred_release[i]); }
+    cmd_allocs[cur_cmd_id]->Reset();
   }
   void end_frame() override { std::lock_guard<std::mutex> _lock(mutex); }
 };
@@ -559,81 +758,101 @@ D3D12_DESCRIPTOR_RANGE_TYPE to_dx(rd::Binding_t type) {
 DX12Binding_Signature *
 DX12Binding_Signature::create(DX12Device *                         dev_ctx,
                               rd::Binding_Table_Create_Info const &table_info) {
-  DX12Binding_Signature *out                     = new DX12Binding_Signature;
-  out->push_constants_size                       = table_info.push_constants_size;
-  auto                                    device = dev_ctx->get_device();
-  InlineArray<D3D12_ROOT_PARAMETER, 0x20> params{};
-  out->num_params_common = 0;
+  DX12Binding_Signature *out                       = new DX12Binding_Signature;
+  out->push_constants_size                         = table_info.push_constants_size;
+  auto                                      device = dev_ctx->get_device();
+  D3D12_ROOT_PARAMETER                      params[3]{};
+  InlineArray<D3D12_DESCRIPTOR_RANGE, 0x40> ranges{};
   ito(table_info.spaces.size) {
     auto const &info = table_info.spaces[i];
-    out->common_parameter_heap_offsets.push(out->num_desc_common);
     jto(info.bindings.size) {
-      auto const &b = info.bindings[j];
-      // Common descriptors only
-      if (b.type == rd::Binding_t::SAMPLER) continue;
-
-      D3D12_DESCRIPTOR_RANGE desc_range            = {};
-      desc_range.RangeType                         = to_dx(b.type);
-      desc_range.NumDescriptors                    = b.num_array_elems;
-      desc_range.BaseShaderRegister                = b.binding;
-      desc_range.RegisterSpace                     = i;
-      desc_range.OffsetInDescriptorsFromTableStart = out->num_desc_common;
-      out->num_desc_common = MAX(out->num_desc_common, b.binding + b.num_array_elems);
-      out->space_descs[i].ranges.push(desc_range);
+      out->space_descs[i].bindings.size = MAX(j + 1, out->space_descs[i].bindings.size);
     }
-    D3D12_ROOT_PARAMETER param                = {};
-    param.ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    param.DescriptorTable.NumDescriptorRanges = out->space_descs[i].ranges.size;
-    param.DescriptorTable.pDescriptorRanges   = &out->space_descs[i].ranges[0];
-    param.ShaderVisibility                    = D3D12_SHADER_VISIBILITY_ALL;
-    params.push(param);
-    out->num_params_common++;
   }
-  out->num_params_samplers = 0;
-  // ito(table_info.spaces.size) {
-  //  auto const &info = table_info.spaces[i];
-  //  out->sampler_parameter_heap_offsets.push(out->num_desc_samplers);
-  //  jto(info.bindings.size) {
-  //    auto const &b = info.bindings[j];
-  //    // Sampler descriptors only
-  //    if (b.type != rd::Binding_t::SAMPLER) continue;
+  {
+    D3D12_DESCRIPTOR_RANGE *range_ptr  = ranges.elems + ranges.size;
+    u32                     num_ranges = 0;
+    ito(table_info.spaces.size) {
+      auto const &info = table_info.spaces[i];
+      // out->common_parameter_heap_offsets.push(out->num_desc_common);
+      jto(info.bindings.size) {
+        auto const &b = info.bindings[j];
+        // Common descriptors only
+        if (b.type == rd::Binding_t::SAMPLER) continue;
 
-  //    D3D12_DESCRIPTOR_RANGE desc_range            = {};
-  //    desc_range.RangeType                         = to_dx(b.type);
-  //    desc_range.NumDescriptors                    = b.num_array_elems;
-  //    desc_range.BaseShaderRegister                = b.binding;
-  //    desc_range.RegisterSpace                     = i;
-  //    desc_range.OffsetInDescriptorsFromTableStart = out->num_desc_samplers;
-  //    out->num_desc_samplers = MAX(out->num_desc_samplers, b.binding + b.num_array_elems);
-  //    out->space_descs[i + 0x10].ranges.push(desc_range);
-  //  }
-  //  D3D12_ROOT_PARAMETER param                = {};
-  //  param.ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-  //  param.DescriptorTable.NumDescriptorRanges = out->space_descs[i + 0x10].ranges.size;
-  //  param.DescriptorTable.pDescriptorRanges   = &out->space_descs[i + 0x10].ranges[0];
-  //  param.ShaderVisibility                    = D3D12_SHADER_VISIBILITY_ALL;
-  //  params.push(param);
-  //  out->num_params_samplers++;
-  //}
+        D3D12_DESCRIPTOR_RANGE desc_range            = {};
+        desc_range.RangeType                         = to_dx(b.type);
+        desc_range.NumDescriptors                    = b.num_array_elems;
+        desc_range.BaseShaderRegister                = j;
+        desc_range.RegisterSpace                     = i;
+        desc_range.OffsetInDescriptorsFromTableStart = out->num_desc_common;
+        out->num_desc_common            = MAX(out->num_desc_common, j + b.num_array_elems);
+        out->space_descs[i].bindings[j] = desc_range;
+        ranges.push(desc_range);
+        num_ranges++;
+      }
+    }
+    if (num_ranges) {
+      out->common_param_id                      = out->num_params;
+      D3D12_ROOT_PARAMETER param                = {};
+      param.ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      param.DescriptorTable.NumDescriptorRanges = num_ranges;
+      param.DescriptorTable.pDescriptorRanges   = range_ptr;
+      param.ShaderVisibility                    = D3D12_SHADER_VISIBILITY_ALL;
+      params[out->num_params++]                 = param;
+    }
+  }
+  {
+    D3D12_DESCRIPTOR_RANGE *range_ptr  = ranges.elems + ranges.size;
+    u32                     num_ranges = 0;
+    ito(table_info.spaces.size) {
+      auto const &info = table_info.spaces[i];
+      jto(info.bindings.size) {
+        auto const &b = info.bindings[j];
+        // Sampler descriptors only
+        if (b.type != rd::Binding_t::SAMPLER) continue;
+
+        D3D12_DESCRIPTOR_RANGE desc_range            = {};
+        desc_range.RangeType                         = to_dx(b.type);
+        desc_range.NumDescriptors                    = b.num_array_elems;
+        desc_range.BaseShaderRegister                = j;
+        desc_range.RegisterSpace                     = i;
+        desc_range.OffsetInDescriptorsFromTableStart = out->num_desc_samplers;
+        out->num_desc_samplers          = MAX(out->num_desc_samplers, j + b.num_array_elems);
+        out->space_descs[i].bindings[j] = desc_range;
+      }
+    }
+    if (num_ranges) {
+      out->samplers_param_id                    = out->num_params;
+      D3D12_ROOT_PARAMETER param                = {};
+      param.ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      param.DescriptorTable.NumDescriptorRanges = num_ranges;
+      param.DescriptorTable.pDescriptorRanges   = range_ptr;
+      param.ShaderVisibility                    = D3D12_SHADER_VISIBILITY_ALL;
+      params[out->num_params++]                 = param;
+    }
+  }
   if (table_info.push_constants_size > 0) {
+    out->pc_param_id = out->num_params;
     D3D12_ROOT_PARAMETER param{};
     param.ParameterType            = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     param.Constants.ShaderRegister = 0;
     param.Constants.RegisterSpace  = PUSH_CONSTANTS_SPACE;
     param.Constants.Num32BitValues = table_info.push_constants_size / 4;
     param.ShaderVisibility         = D3D12_SHADER_VISIBILITY_ALL;
-    params.push(param);
+    params[out->num_params++]      = param;
   }
-  out->num_params_total          = params.size;
-  D3D12_ROOT_SIGNATURE_DESC desc = {};
-  desc.NumParameters             = params.size;
-  desc.pParameters               = &params[0];
-  desc.Flags                     = D3D12_ROOT_SIGNATURE_FLAG_NONE;
-  ID3DBlob *blob                 = NULL;
-  DX_ASSERT_OK(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, NULL));
-  DX_ASSERT_OK(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
-                                           IID_PPV_ARGS(&out->root_signature)));
-  blob->Release();
+  if (out->num_params) {
+    D3D12_ROOT_SIGNATURE_DESC desc = {};
+    desc.NumParameters             = out->num_params;
+    desc.pParameters               = &params[0];
+    desc.Flags                     = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+    ID3DBlob *blob                 = NULL;
+    DX_ASSERT_OK(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, NULL));
+    DX_ASSERT_OK(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
+                                             IID_PPV_ARGS(&out->root_signature)));
+    blob->Release();
+  }
   return out;
 }
 
@@ -675,36 +894,35 @@ class DX12Binding_Table : public rd::IBinding_Table {
   }
   void flush_bindings(ComPtr<ID3D12GraphicsCommandList> cmd) {
     cmd->SetComputeRootSignature(signature->root_signature.Get());
-    if (signature->num_desc_common) {
+    if (signature->common_param_id >= 0) {
       dev_ctx->get_device()->CopyDescriptorsSimple(
           signature->num_desc_common,
           {dev_ctx->get_common_desc_heap()->get_heap()->GetCPUDescriptorHandleForHeapStart().ptr +
            dev_ctx->get_common_desc_heap()->get_element_size() * common_heap_offset},
           cpu_common_heap->GetCPUDescriptorHandleForHeapStart(),
           D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-      ito(signature->num_params_common) cmd->SetComputeRootDescriptorTable(
-          i,
+      cmd->SetComputeRootDescriptorTable(
+          signature->common_param_id,
           {dev_ctx->get_common_desc_heap()->get_heap()->GetGPUDescriptorHandleForHeapStart().ptr +
-           dev_ctx->get_common_desc_heap()->get_element_size() *
-               (common_heap_offset + signature->common_parameter_heap_offsets[i])});
+           dev_ctx->get_common_desc_heap()->get_element_size() * common_heap_offset});
     }
-    if (signature->num_desc_samplers) {
+    if (signature->samplers_param_id >= 0) {
       dev_ctx->get_device()->CopyDescriptorsSimple(
           signature->num_desc_samplers,
           {dev_ctx->get_sampler_desc_heap()->get_heap()->GetCPUDescriptorHandleForHeapStart().ptr +
            dev_ctx->get_sampler_desc_heap()->get_element_size() * sampler_heap_offset},
           cpu_common_heap->GetCPUDescriptorHandleForHeapStart(),
           D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-      ito(signature->num_params_samplers) cmd->SetComputeRootDescriptorTable(
-          signature->num_params_common + i,
+      cmd->SetComputeRootDescriptorTable(
+          signature->samplers_param_id,
           {dev_ctx->get_sampler_desc_heap()->get_heap()->GetGPUDescriptorHandleForHeapStart().ptr +
-           dev_ctx->get_sampler_desc_heap()->get_element_size() *
-               (sampler_heap_offset + signature->sampler_parameter_heap_offsets[i])});
+           dev_ctx->get_sampler_desc_heap()->get_element_size() * sampler_heap_offset});
     }
   }
   void flush_push_constants(ComPtr<ID3D12GraphicsCommandList> cmd) {
-    cmd->SetComputeRoot32BitConstants(signature->num_params_total - 1,
-                                      signature->push_constants_size / 4, push_constants_data, 0);
+    if (signature->push_constants_size)
+      cmd->SetComputeRoot32BitConstants(signature->pc_param_id, signature->push_constants_size / 4,
+                                        push_constants_data, 0);
   }
   void push_constants(void const *data, size_t offset, size_t size) override {
     memcpy(push_constants_data + offset, data, size);
@@ -713,20 +931,24 @@ class DX12Binding_Table : public rd::IBinding_Table {
   // u32  get_push_constants_size() { return push_constants_size; }
   void bind_cbuffer(u32 space, u32 binding, Resource_ID buf_id, size_t offset,
                     size_t size) override {
-    ID3D12Resource *res          = dev_ctx->get_resource(buf_id.id);
-    u32             space_offset = signature->common_parameter_heap_offsets[space];
+    ID3D12Resource *res = dev_ctx->get_resource(buf_id.id);
     u32             binding_offset =
-        signature->space_descs[space].ranges[binding].OffsetInDescriptorsFromTableStart;
+        signature->space_descs[space].bindings[binding].OffsetInDescriptorsFromTableStart;
     D3D12_CONSTANT_BUFFER_VIEW_DESC desc{};
     ASSERT_DEBUG((offset & 0xffu) == 0);
     desc.BufferLocation = res->GetGPUVirtualAddress() + offset;
     desc.SizeInBytes    = (size + 0xffU) & ~0xffu;
     dev_ctx->get_device()->CreateConstantBufferView(
         &desc, {cpu_common_heap->GetCPUDescriptorHandleForHeapStart().ptr +
-                dev_ctx->get_common_desc_heap()->get_element_size() *
-                    ((u64)space_offset + (u64)binding_offset)});
+                dev_ctx->get_common_desc_heap()->get_element_size() * ((u64)binding_offset)});
   }
-  void bind_sampler(u32 space, u32 binding, Resource_ID sampler_id) override { TRAP; }
+  void bind_sampler(u32 space, u32 binding, Resource_ID sampler_id) override {
+    D3D12_SAMPLER_DESC *desc = dev_ctx->get_sampler(sampler_id.id);
+    u32 offset = signature->space_descs[space].bindings[binding].OffsetInDescriptorsFromTableStart;
+    dev_ctx->get_device()->CreateSampler(
+        desc, {cpu_sampler_heap->GetCPUDescriptorHandleForHeapStart().ptr +
+               dev_ctx->get_sampler_desc_heap()->get_element_size() * ((u64)offset)});
+  }
   void bind_UAV_buffer(u32 space, u32 binding, Resource_ID buf_id, size_t offset,
                        size_t size) override {
     ID3D12Resource *res = dev_ctx->get_resource(buf_id.id);
@@ -738,22 +960,23 @@ class DX12Binding_Table : public rd::IBinding_Table {
       ASSERT_DEBUG((size & 0x3) == 0);
     }
 #endif
+    if (size == 0) {
+      size = res->GetDesc().Width;
+    }
     D3D12_UNORDERED_ACCESS_VIEW_DESC desc{};
     desc.ViewDimension               = D3D12_UAV_DIMENSION_BUFFER;
     desc.Buffer.CounterOffsetInBytes = 0;
-    desc.Buffer.FirstElement         = offset / 4;
+    desc.Buffer.FirstElement         = (u64)offset / 4;
     desc.Buffer.Flags                = D3D12_BUFFER_UAV_FLAG_RAW;
-    desc.Buffer.NumElements          = size / 4;
+    desc.Buffer.NumElements          = (u32)size / 4;
     desc.Buffer.StructureByteStride  = 0;
     desc.Format                      = DXGI_FORMAT_R32_TYPELESS;
-    u32 space_offset                 = signature->common_parameter_heap_offsets[space];
     u32 binding_offset =
-        signature->space_descs[space].ranges[binding].OffsetInDescriptorsFromTableStart;
+        signature->space_descs[space].bindings[binding].OffsetInDescriptorsFromTableStart;
     dev_ctx->get_device()->CreateUnorderedAccessView(
         res, NULL, &desc,
         {cpu_common_heap->GetCPUDescriptorHandleForHeapStart().ptr +
-         dev_ctx->get_sampler_desc_heap()->get_element_size() *
-             ((u64)space_offset + (u64)binding_offset)});
+         dev_ctx->get_sampler_desc_heap()->get_element_size() * ((u64)binding_offset)});
   }
   void bind_texture(u32 space, u32 binding, u32 index, Resource_ID image_id,
                     rd::Image_Subresource const &range, rd::Format format) override {
@@ -763,7 +986,16 @@ class DX12Binding_Table : public rd::IBinding_Table {
                         rd::Image_Subresource const &range, rd::Format format) override {
     TRAP;
   }
-  void release() override { delete this; }
+  void release() override {
+    if (signature->num_desc_common) {
+      dev_ctx->get_common_desc_heap()->free((u32)common_heap_offset, signature->num_desc_common);
+    }
+    if (signature->num_desc_samplers) {
+      dev_ctx->get_sampler_desc_heap()->free((u32)sampler_heap_offset,
+                                             signature->num_desc_samplers);
+    }
+    delete this;
+  }
   void clear_bindings() override { TRAP; }
 };
 
@@ -779,12 +1011,53 @@ class DX12Context : public rd::ICtx {
   DX12Binding_Table *                            cur_binding = NULL;
   Hash_Table<Resource_ID, D3D12_RESOURCE_STATES> resource_state_tracker{};
   ~DX12Context() = default;
+  // Synchronization
+  void _image_barrier(Resource_ID image_id, D3D12_RESOURCE_STATES new_state) {
+    D3D12_RESOURCE_BARRIER bar{};
+    bar.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    bar.Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    bar.Transition.pResource   = dev_ctx->get_resource(image_id.id);
+    bar.Transition.Subresource = 0;
+    if (resource_state_tracker.contains(image_id)) {
+    } else {
+      resource_state_tracker.insert(image_id, get_default_state(bar.Transition.pResource));
+    }
+    bar.Transition.StateBefore           = resource_state_tracker.get(image_id);
+    bar.Transition.StateAfter            = new_state;
+    resource_state_tracker.get(image_id) = bar.Transition.StateAfter;
+    if (bar.Transition.StateAfter == bar.Transition.StateBefore) {
+      bar.Type          = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+      bar.UAV.pResource = dev_ctx->get_resource(image_id.id);
+    }
+    cmd->ResourceBarrier(1, &bar);
+  }
+  void _buffer_barrier(Resource_ID buf_id, D3D12_RESOURCE_STATES new_state) {
+    D3D12_RESOURCE_BARRIER bar{};
+    bar.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    bar.Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    bar.Transition.pResource   = dev_ctx->get_resource(buf_id.id);
+    bar.Transition.Subresource = 0;
+    if (resource_state_tracker.contains(buf_id)) {
+    } else {
+      resource_state_tracker.insert(buf_id, get_default_state(bar.Transition.pResource));
+    }
+    bar.Transition.StateBefore         = resource_state_tracker.get(buf_id);
+    bar.Transition.StateAfter          = new_state;
+    resource_state_tracker.get(buf_id) = bar.Transition.StateAfter;
+    if (bar.Transition.StateAfter == bar.Transition.StateBefore) {
+      bar.Type          = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+      bar.UAV.pResource = dev_ctx->get_resource(buf_id.id);
+    }
+    cmd->ResourceBarrier(1, &bar);
+  }
 
   public:
   void release() {
     resource_state_tracker.iter_pairs([=](Resource_ID res, D3D12_RESOURCE_STATES state) {
       if (res.type == (u32)Resource_Type::BUFFER) {
-        buffer_barrier(res, rd::Buffer_Access::GENERIC);
+        _buffer_barrier(res, get_default_state(dev_ctx->get_resource(res.id)));
+      } else if (res.type == (u32)Resource_Type::TEXTURE) {
+        _image_barrier(res, get_default_state(dev_ctx->get_resource(res.id)));
       } else {
         TRAP;
       }
@@ -847,11 +1120,54 @@ class DX12Context : public rd::ICtx {
   }
   void copy_buffer_to_image(Resource_ID buf_id, size_t buffer_offset, Resource_ID img_id,
                             rd::Image_Copy const &dst_info) override {
-    TRAP;
+    u64                                textureMemorySize             = 0;
+    constexpr u32                      MAX_TEXTURE_SUBRESOURCE_COUNT = 0x100u;
+    u32                                numRows[MAX_TEXTURE_SUBRESOURCE_COUNT];
+    u64                                rowSizesInBytes[MAX_TEXTURE_SUBRESOURCE_COUNT];
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT layouts[MAX_TEXTURE_SUBRESOURCE_COUNT];
+    ID3D12Resource *                   tex  = dev_ctx->get_resource(img_id.id);
+    D3D12_RESOURCE_DESC                desc = tex->GetDesc();
+    u64 numSubResources                     = (u64)desc.MipLevels * (u64)desc.DepthOrArraySize;
+    dev_ctx->get_device()->GetCopyableFootprints(&desc, 0, (u32)numSubResources, 0, layouts,
+                                                 numRows, rowSizesInBytes, &textureMemorySize);
+    D3D12_TEXTURE_COPY_LOCATION src{};
+    src.pResource                       = dev_ctx->get_resource(buf_id.id);
+    src.Type                            = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    src.PlacedFootprint                 = layouts[dst_info.layer * desc.MipLevels + dst_info.level];
+    src.PlacedFootprint.Offset          = buffer_offset;
+    src.PlacedFootprint.Footprint.Width = dst_info.size_x;
+    if (dst_info.buffer_row_pitch)
+      src.PlacedFootprint.Footprint.RowPitch = dst_info.buffer_row_pitch;
+    src.PlacedFootprint.Footprint.Height = dst_info.size_y;
+    src.PlacedFootprint.Footprint.Depth  = dst_info.size_z;
+    D3D12_TEXTURE_COPY_LOCATION dst{};
+    dst.pResource        = tex;
+    dst.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dst.SubresourceIndex = dst_info.layer * desc.MipLevels + dst_info.level;
+    cmd->CopyTextureRegion(&dst, dst_info.offset_x, dst_info.offset_y, dst_info.offset_z, &src,
+                           NULL);
   }
   void copy_image_to_buffer(Resource_ID buf_id, size_t buffer_offset, Resource_ID img_id,
                             rd::Image_Copy const &dst_info) override {
     TRAP;
+    D3D12_TEXTURE_COPY_LOCATION dst{};
+    dst.pResource = dev_ctx->get_resource(buf_id.id);
+    dst.Type      = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    D3D12_TEXTURE_COPY_LOCATION src{};
+    src.pResource = dev_ctx->get_resource(img_id.id);
+    src.Type      = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    // src.PlacedFootprint.Offset           = 0;
+    // src.PlacedFootprint.Footprint.Width  = dst_info.size_x;
+    // src.PlacedFootprint.Footprint.Height = dst_info.size_y;
+    // src.PlacedFootprint.Footprint.Depth  = dst_info.size_z;
+    D3D12_BOX box{};
+    box.left   = dst_info.offset_x;
+    box.top    = dst_info.offset_y;
+    box.front  = dst_info.offset_z;
+    box.right  = box.left + dst_info.size_x;
+    box.bottom = box.top + dst_info.size_y;
+    box.back   = box.front + dst_info.size_z;
+    cmd->CopyTextureRegion(&dst, buffer_offset, 0, 0, &src, &box);
   }
   void copy_buffer(Resource_ID src_buf_id, size_t src_offset, Resource_ID dst_buf_id,
                    size_t dst_offset, u32 size) override {
@@ -860,26 +1176,11 @@ class DX12Context : public rd::ICtx {
     cmd->CopyBufferRegion(dst, dst_offset, src, src_offset, size);
   }
   // Synchronization
-  void image_barrier(Resource_ID image_id, rd::Image_Access access) override { TRAP; }
+  void image_barrier(Resource_ID image_id, rd::Image_Access access) override {
+    _image_barrier(image_id, to_dx(access));
+  }
   void buffer_barrier(Resource_ID buf_id, rd::Buffer_Access access) override {
-    D3D12_RESOURCE_BARRIER bar{};
-    bar.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    bar.Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    bar.Transition.pResource   = dev_ctx->get_resource(buf_id.id);
-    bar.Transition.Subresource = 0;
-    if (resource_state_tracker.contains(buf_id)) {
-      bar.Transition.StateBefore = resource_state_tracker.get(buf_id);
-    } else {
-      bar.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
-      resource_state_tracker.insert(buf_id, D3D12_RESOURCE_STATE_COMMON);
-    }
-    bar.Transition.StateAfter          = to_dx(access);
-    resource_state_tracker.get(buf_id) = bar.Transition.StateAfter;
-    if (bar.Transition.StateAfter == bar.Transition.StateBefore) {
-      bar.Type          = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-      bar.UAV.pResource = dev_ctx->get_resource(buf_id.id);
-    }
-    cmd->ResourceBarrier(1, &bar);
+    _buffer_barrier(buf_id, to_dx(access));
   }
   void insert_event(Resource_ID id) override { TRAP; }
   void insert_timestamp(Resource_ID timestamp_id) override { TRAP; }
