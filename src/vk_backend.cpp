@@ -3122,7 +3122,8 @@ class Vk_Ctx : public rd::ICtx {
       info.imageExtent.depth = image.info.extent.depth;
     else
       info.imageExtent.depth = dst_info.size_z;
-    if (dst_info.buffer_row_pitch) info.bufferRowLength = dst_info.buffer_row_pitch;
+    if (dst_info.buffer_row_pitch)
+      info.bufferRowLength = dst_info.buffer_row_pitch / get_format_size(image.info.format);
     info.imageOffset = {(i32)dst_info.offset_x, (i32)dst_info.offset_y, (i32)dst_info.offset_z};
     VkImageSubresourceLayers subres;
     MEMZERO(subres);

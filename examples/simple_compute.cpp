@@ -111,7 +111,6 @@ void test_mipmap_generation(rd::IDevice *factory) {
       Mip_Builder::create_image(factory, image, (u32)rd::Image_Usage_Bits::USAGE_SAMPLED);
 
   fprintf(stdout, "MIP levels generated\n");
-  return;
   Resource_ID sampler_state = [&] {
     rd::Sampler_Create_Info info;
     MEMZERO(info);
@@ -180,23 +179,25 @@ void main(uint3 tid : SV_DispatchThreadID)
   if (tid.x >= width || tid.y >= height)
     return;
   float2 uv = (float2(tid.xy) + float2(0.5f, 0.5f)) / float2(width, height);
-  rwtex[tid.xy] = pow(rtex.SampleLevel(ss, uv, lerp(0.0f, 10.0f, pow(uv.x, 2.2f))), 0.5);
+  rwtex[tid.xy] = pow(rtex.SampleLevel(ss, uv, lerp(0.0f, 10.0f, uv.x)), 0.5f);
 }
 )"),
                                         NULL, 0)));
   ctx->dispatch(image->width / 16 + 1, image->height / 16 + 1, 1);
-
+  u32         pitch    = rd::IDevice::align_up(sizeof(float) * 4 * image->width,
+                                    rd::IDevice::TEXTURE_DATA_PITCH_ALIGNMENT);
   Resource_ID readback = [=] {
     rd::Buffer_Create_Info buf_info;
     MEMZERO(buf_info);
     buf_info.memory_type = rd::Memory_Type::CPU_READ_WRITE;
     buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
-    buf_info.size        = sizeof(float) * 4 * image->width * image->height;
+
+    buf_info.size = pitch * image->height;
     return factory->create_buffer(buf_info);
   }();
   factory->release_resource(readback);
   ctx->image_barrier(rw_texture, rd::Image_Access::TRANSFER_SRC);
-  ctx->copy_image_to_buffer(readback, 0, rw_texture, rd::Image_Copy::top_level());
+  ctx->copy_image_to_buffer(readback, 0, rw_texture, rd::Image_Copy::top_level(pitch));
   factory->end_compute_pass(ctx);
   factory->wait_idle();
   u8 *map = (u8 *)factory->map_buffer(readback);
@@ -206,7 +207,7 @@ void main(uint3 tid : SV_DispatchThreadID)
     tmp.width  = image->width;
     tmp.height = image->height;
     tmp.format = rd::Format::RGBA32_FLOAT;
-    write_image_rgba32_float_pfm("img.pfm", tmp.data, tmp.width, tmp.width, true);
+    write_image_rgba32_float_pfm("img.pfm", tmp.data, tmp.width, pitch, tmp.height, true);
   }
 
   factory->unmap_buffer(readback);
@@ -230,10 +231,10 @@ int main(int argc, char *argv[]) {
       RenderDoc_CTX::end();
       // test_buffers(factory);
     };
-    fprintf(stdout, "Testing Vulkan backend\n");
-     launch_tests(rd::create_vulkan(NULL));
+    // fprintf(stdout, "Testing Vulkan backend\n");
+    // launch_tests(rd::create_vulkan(NULL));
     fprintf(stdout, "Testing Dx12 backend\n");
-    //launch_tests(rd::create_dx12(NULL));
+    launch_tests(rd::create_dx12(NULL));
   }
   // factory->release_resource(res_id);
   //

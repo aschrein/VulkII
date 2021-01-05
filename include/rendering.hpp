@@ -345,11 +345,12 @@ struct Image_Copy {
   u32               size_x;
   u32               size_y;
   u32               size_z;
-  static Image_Copy top_level() {
+  static Image_Copy top_level(u32 pitch = 0) {
     Image_Copy out;
     MEMZERO(out);
-    out.layer = 0;
-    out.level = 0;
+    out.buffer_row_pitch = pitch;
+    out.layer            = 0;
+    out.level            = 0;
     return out;
   }
 };

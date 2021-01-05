@@ -766,6 +766,7 @@ DX12Binding_Signature::create(DX12Device *                         dev_ctx,
   ito(table_info.spaces.size) {
     auto const &info = table_info.spaces[i];
     jto(info.bindings.size) {
+      ASSERT_DEBUG(info.bindings[j].num_array_elems > 0);
       out->space_descs[i].bindings.size = MAX(j + 1, out->space_descs[i].bindings.size);
     }
   }
@@ -786,7 +787,7 @@ DX12Binding_Signature::create(DX12Device *                         dev_ctx,
         desc_range.BaseShaderRegister                = j;
         desc_range.RegisterSpace                     = i;
         desc_range.OffsetInDescriptorsFromTableStart = out->num_desc_common;
-        out->num_desc_common            = MAX(out->num_desc_common, j + b.num_array_elems);
+        out->num_desc_common += b.num_array_elems;
         out->space_descs[i].bindings[j] = desc_range;
         ranges.push(desc_range);
         num_ranges++;
@@ -818,8 +819,10 @@ DX12Binding_Signature::create(DX12Device *                         dev_ctx,
         desc_range.BaseShaderRegister                = j;
         desc_range.RegisterSpace                     = i;
         desc_range.OffsetInDescriptorsFromTableStart = out->num_desc_samplers;
-        out->num_desc_samplers          = MAX(out->num_desc_samplers, j + b.num_array_elems);
+        out->num_desc_samplers += b.num_array_elems;
         out->space_descs[i].bindings[j] = desc_range;
+        ranges.push(desc_range);
+        num_ranges++;
       }
     }
     if (num_ranges) {
@@ -907,12 +910,13 @@ class DX12Binding_Table : public rd::IBinding_Table {
            dev_ctx->get_common_desc_heap()->get_element_size() * common_heap_offset});
     }
     if (signature->samplers_param_id >= 0) {
+      auto heap_start =
+          dev_ctx->get_sampler_desc_heap()->get_heap()->GetCPUDescriptorHandleForHeapStart().ptr;
+      auto stride = dev_ctx->get_sampler_desc_heap()->get_element_size();
       dev_ctx->get_device()->CopyDescriptorsSimple(
-          signature->num_desc_samplers,
-          {dev_ctx->get_sampler_desc_heap()->get_heap()->GetCPUDescriptorHandleForHeapStart().ptr +
-           dev_ctx->get_sampler_desc_heap()->get_element_size() * sampler_heap_offset},
-          cpu_common_heap->GetCPUDescriptorHandleForHeapStart(),
-          D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+          signature->num_desc_samplers, {heap_start + stride * sampler_heap_offset},
+          cpu_sampler_heap->GetCPUDescriptorHandleForHeapStart(),
+          D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
       cmd->SetComputeRootDescriptorTable(
           signature->samplers_param_id,
           {dev_ctx->get_sampler_desc_heap()->get_heap()->GetGPUDescriptorHandleForHeapStart().ptr +
@@ -979,12 +983,120 @@ class DX12Binding_Table : public rd::IBinding_Table {
          dev_ctx->get_sampler_desc_heap()->get_element_size() * ((u64)binding_offset)});
   }
   void bind_texture(u32 space, u32 binding, u32 index, Resource_ID image_id,
-                    rd::Image_Subresource const &range, rd::Format format) override {
-    TRAP;
+                    rd::Image_Subresource const &_range, rd::Format format) override {
+    ID3D12Resource *res = dev_ctx->get_resource(image_id.id);
+    u32             binding_offset =
+        signature->space_descs[space].bindings[binding].OffsetInDescriptorsFromTableStart + index;
+    D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
+    auto                            res_desc = res->GetDesc();
+    rd::Image_Subresource           range    = _range;
+    if (range.num_layers == -1) range.num_layers = res_desc.DepthOrArraySize;
+    if (range.num_levels == -1) range.num_levels = res_desc.MipLevels;
+    desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    if (format == rd::Format::NATIVE)
+      desc.Format = res_desc.Format;
+    else
+      desc.Format = to_dx(format);
+    if (res_desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D) {
+      if (res_desc.DepthOrArraySize == 1) {
+        desc.ViewDimension             = D3D12_SRV_DIMENSION_TEXTURE1D;
+        desc.Texture1D.MipLevels       = range.num_levels;
+        desc.Texture1D.MostDetailedMip = range.level;
+        ASSERT_DEBUG(range.num_layers == 1);
+        ASSERT_DEBUG(range.layer == 0);
+      } else {
+        desc.ViewDimension                  = D3D12_SRV_DIMENSION_TEXTURE1DARRAY;
+        desc.Texture1DArray.MipLevels       = range.num_levels;
+        desc.Texture1DArray.MipLevels       = range.num_levels;
+        desc.Texture1DArray.ArraySize       = range.num_layers;
+        desc.Texture1DArray.FirstArraySlice = range.layer;
+        desc.Texture1DArray.MostDetailedMip = range.level;
+      }
+    } else if (res_desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D) {
+      if (res_desc.DepthOrArraySize == 1) {
+        desc.ViewDimension             = D3D12_SRV_DIMENSION_TEXTURE2D;
+        desc.Texture2D.MipLevels       = range.num_levels;
+        desc.Texture2D.MostDetailedMip = range.level;
+        ASSERT_DEBUG(range.num_layers == 1);
+        ASSERT_DEBUG(range.layer == 0);
+      } else {
+        desc.ViewDimension                  = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        desc.Texture2DArray.MipLevels       = range.num_levels;
+        desc.Texture2DArray.MipLevels       = range.num_levels;
+        desc.Texture2DArray.ArraySize       = range.num_layers;
+        desc.Texture2DArray.FirstArraySlice = range.layer;
+        desc.Texture2DArray.MostDetailedMip = range.level;
+      }
+    } else if (res_desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D) {
+      desc.ViewDimension             = D3D12_SRV_DIMENSION_TEXTURE3D;
+      desc.Texture3D.MipLevels       = range.num_levels;
+      desc.Texture3D.MostDetailedMip = range.level;
+      ASSERT_DEBUG(range.num_layers == 1);
+      ASSERT_DEBUG(range.layer == 0);
+    }
+
+    dev_ctx->get_device()->CreateShaderResourceView(
+        res, &desc,
+        {cpu_common_heap->GetCPUDescriptorHandleForHeapStart().ptr +
+         dev_ctx->get_common_desc_heap()->get_element_size() * ((u64)binding_offset)});
   }
   void bind_UAV_texture(u32 space, u32 binding, u32 index, Resource_ID image_id,
-                        rd::Image_Subresource const &range, rd::Format format) override {
-    TRAP;
+                        rd::Image_Subresource const &_range, rd::Format format) override {
+    ID3D12Resource *res = dev_ctx->get_resource(image_id.id);
+#ifdef DEBUG_BUILD
+    {
+      D3D12_RESOURCE_DESC desc = res->GetDesc();
+      ASSERT_DEBUG(desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    }
+#endif
+    D3D12_UNORDERED_ACCESS_VIEW_DESC desc{};
+    auto                             res_desc = res->GetDesc();
+    rd::Image_Subresource            range    = _range;
+    if (range.num_layers == -1) range.num_layers = res_desc.DepthOrArraySize;
+    if (range.num_levels == -1) range.num_levels = res_desc.MipLevels;
+    // UAVs can only bind one mip level at a time
+    ASSERT_DEBUG(range.num_levels == 1);
+    if (res_desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D) {
+      if (res_desc.DepthOrArraySize == 1) {
+        desc.ViewDimension      = D3D12_UAV_DIMENSION_TEXTURE1D;
+        desc.Texture1D.MipSlice = range.level;
+        ASSERT_DEBUG(range.num_layers == 1);
+        ASSERT_DEBUG(range.layer == 0);
+      } else {
+        desc.ViewDimension                  = D3D12_UAV_DIMENSION_TEXTURE1DARRAY;
+        desc.Texture1DArray.MipSlice        = range.level;
+        desc.Texture1DArray.ArraySize       = range.num_layers;
+        desc.Texture1DArray.FirstArraySlice = range.layer;
+      }
+    } else if (res_desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D) {
+      if (res_desc.DepthOrArraySize == 1) {
+        desc.ViewDimension      = D3D12_UAV_DIMENSION_TEXTURE2D;
+        desc.Texture2D.MipSlice = range.level;
+        ASSERT_DEBUG(range.num_layers == 1);
+        ASSERT_DEBUG(range.layer == 0);
+      } else {
+        desc.ViewDimension                  = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+        desc.Texture2DArray.ArraySize       = range.num_layers;
+        desc.Texture2DArray.FirstArraySlice = range.layer;
+        desc.Texture2DArray.MipSlice        = range.level;
+      }
+    } else if (res_desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D) {
+      desc.ViewDimension         = D3D12_UAV_DIMENSION_TEXTURE3D;
+      desc.Texture3D.MipSlice    = range.level;
+      desc.Texture3D.FirstWSlice = 0;
+      desc.Texture3D.WSize       = res_desc.DepthOrArraySize;
+    }
+
+    if (format == rd::Format::NATIVE)
+      desc.Format = res_desc.Format;
+    else
+      desc.Format = to_dx(format);
+    u32 binding_offset =
+        signature->space_descs[space].bindings[binding].OffsetInDescriptorsFromTableStart + index;
+    dev_ctx->get_device()->CreateUnorderedAccessView(
+        res, NULL, &desc,
+        {cpu_common_heap->GetCPUDescriptorHandleForHeapStart().ptr +
+         dev_ctx->get_sampler_desc_heap()->get_element_size() * ((u64)binding_offset)});
   }
   void release() override {
     if (signature->num_desc_common) {
@@ -1013,23 +1125,34 @@ class DX12Context : public rd::ICtx {
   ~DX12Context() = default;
   // Synchronization
   void _image_barrier(Resource_ID image_id, D3D12_RESOURCE_STATES new_state) {
-    D3D12_RESOURCE_BARRIER bar{};
-    bar.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    bar.Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    bar.Transition.pResource   = dev_ctx->get_resource(image_id.id);
-    bar.Transition.Subresource = 0;
+    InlineArray<D3D12_RESOURCE_BARRIER, 0x10> bars{};
+    ID3D12Resource *                          res  = dev_ctx->get_resource(image_id.id);
+    auto                                      desc = res->GetDesc();
     if (resource_state_tracker.contains(image_id)) {
     } else {
-      resource_state_tracker.insert(image_id, get_default_state(bar.Transition.pResource));
+      resource_state_tracker.insert(image_id, get_default_state(res));
     }
-    bar.Transition.StateBefore           = resource_state_tracker.get(image_id);
-    bar.Transition.StateAfter            = new_state;
-    resource_state_tracker.get(image_id) = bar.Transition.StateAfter;
-    if (bar.Transition.StateAfter == bar.Transition.StateBefore) {
-      bar.Type          = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-      bar.UAV.pResource = dev_ctx->get_resource(image_id.id);
+    D3D12_RESOURCE_STATES StateBefore    = resource_state_tracker.get(image_id);
+    D3D12_RESOURCE_STATES StateAfter     = new_state;
+    resource_state_tracker.get(image_id) = StateAfter;
+
+    u32 num_subresources = desc.DepthOrArraySize * desc.MipLevels;
+    if (desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D) num_subresources = desc.MipLevels;
+    ito(num_subresources) {
+      D3D12_RESOURCE_BARRIER bar{};
+      bar.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      bar.Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+      bar.Transition.pResource   = res;
+      bar.Transition.Subresource = i;
+      bar.Transition.StateBefore = StateBefore;
+      bar.Transition.StateAfter  = StateAfter;
+      if (bar.Transition.StateAfter == bar.Transition.StateBefore) {
+        bar.Type          = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        bar.UAV.pResource = dev_ctx->get_resource(image_id.id);
+      }
+      bars.push(bar);
     }
-    cmd->ResourceBarrier(1, &bar);
+    cmd->ResourceBarrier(bars.size, &bars[0]);
   }
   void _buffer_barrier(Resource_ID buf_id, D3D12_RESOURCE_STATES new_state) {
     D3D12_RESOURCE_BARRIER bar{};
@@ -1131,15 +1254,22 @@ class DX12Context : public rd::ICtx {
     dev_ctx->get_device()->GetCopyableFootprints(&desc, 0, (u32)numSubResources, 0, layouts,
                                                  numRows, rowSizesInBytes, &textureMemorySize);
     D3D12_TEXTURE_COPY_LOCATION src{};
-    src.pResource                       = dev_ctx->get_resource(buf_id.id);
-    src.Type                            = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    src.PlacedFootprint                 = layouts[dst_info.layer * desc.MipLevels + dst_info.level];
-    src.PlacedFootprint.Offset          = buffer_offset;
-    src.PlacedFootprint.Footprint.Width = dst_info.size_x;
+    src.pResource              = dev_ctx->get_resource(buf_id.id);
+    src.Type                   = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    src.PlacedFootprint        = layouts[dst_info.layer * desc.MipLevels + dst_info.level];
+    src.PlacedFootprint.Offset = buffer_offset;
     if (dst_info.buffer_row_pitch)
       src.PlacedFootprint.Footprint.RowPitch = dst_info.buffer_row_pitch;
+    src.PlacedFootprint.Footprint.Width  = dst_info.size_x;
     src.PlacedFootprint.Footprint.Height = dst_info.size_y;
     src.PlacedFootprint.Footprint.Depth  = dst_info.size_z;
+
+    if (src.PlacedFootprint.Footprint.Width == 0) src.PlacedFootprint.Footprint.Width = desc.Width;
+    if (src.PlacedFootprint.Footprint.Height == 0)
+      src.PlacedFootprint.Footprint.Height = desc.Height;
+    if (src.PlacedFootprint.Footprint.Depth == 0)
+      src.PlacedFootprint.Footprint.Depth = desc.DepthOrArraySize;
+
     D3D12_TEXTURE_COPY_LOCATION dst{};
     dst.pResource        = tex;
     dst.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
@@ -1149,17 +1279,40 @@ class DX12Context : public rd::ICtx {
   }
   void copy_image_to_buffer(Resource_ID buf_id, size_t buffer_offset, Resource_ID img_id,
                             rd::Image_Copy const &dst_info) override {
-    TRAP;
+    u64                                textureMemorySize             = 0;
+    constexpr u32                      MAX_TEXTURE_SUBRESOURCE_COUNT = 0x100u;
+    u32                                numRows[MAX_TEXTURE_SUBRESOURCE_COUNT];
+    u64                                rowSizesInBytes[MAX_TEXTURE_SUBRESOURCE_COUNT];
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT layouts[MAX_TEXTURE_SUBRESOURCE_COUNT];
+    ID3D12Resource *                   tex  = dev_ctx->get_resource(img_id.id);
+    D3D12_RESOURCE_DESC                desc = tex->GetDesc();
+    u64 numSubResources                     = (u64)desc.MipLevels * (u64)desc.DepthOrArraySize;
+    dev_ctx->get_device()->GetCopyableFootprints(&desc, 0, (u32)numSubResources, 0, layouts,
+                                                 numRows, rowSizesInBytes, &textureMemorySize);
     D3D12_TEXTURE_COPY_LOCATION dst{};
-    dst.pResource = dev_ctx->get_resource(buf_id.id);
-    dst.Type      = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.pResource              = dev_ctx->get_resource(buf_id.id);
+    dst.Type                   = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint        = layouts[dst_info.layer * desc.MipLevels + dst_info.level];
+    dst.PlacedFootprint.Offset = buffer_offset;
+
+    if (dst_info.buffer_row_pitch)
+      dst.PlacedFootprint.Footprint.RowPitch = dst_info.buffer_row_pitch;
+
+    dst.PlacedFootprint.Footprint.Width  = dst_info.size_x;
+    dst.PlacedFootprint.Footprint.Height = dst_info.size_y;
+    dst.PlacedFootprint.Footprint.Depth  = dst_info.size_z;
+
+    if (dst.PlacedFootprint.Footprint.Width == 0) dst.PlacedFootprint.Footprint.Width = desc.Width;
+    if (dst.PlacedFootprint.Footprint.Height == 0)
+      dst.PlacedFootprint.Footprint.Height = desc.Height;
+    if (dst.PlacedFootprint.Footprint.Depth == 0)
+      dst.PlacedFootprint.Footprint.Depth = desc.DepthOrArraySize;
+
     D3D12_TEXTURE_COPY_LOCATION src{};
-    src.pResource = dev_ctx->get_resource(img_id.id);
-    src.Type      = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    // src.PlacedFootprint.Offset           = 0;
-    // src.PlacedFootprint.Footprint.Width  = dst_info.size_x;
-    // src.PlacedFootprint.Footprint.Height = dst_info.size_y;
-    // src.PlacedFootprint.Footprint.Depth  = dst_info.size_z;
+    src.pResource        = tex;
+    src.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.SubresourceIndex = dst_info.layer * desc.MipLevels + dst_info.level;
+
     D3D12_BOX box{};
     box.left   = dst_info.offset_x;
     box.top    = dst_info.offset_y;
@@ -1167,7 +1320,24 @@ class DX12Context : public rd::ICtx {
     box.right  = box.left + dst_info.size_x;
     box.bottom = box.top + dst_info.size_y;
     box.back   = box.front + dst_info.size_z;
-    cmd->CopyTextureRegion(&dst, buffer_offset, 0, 0, &src, &box);
+
+    if (dst_info.size_x == 0) box.right = box.left + desc.Width;
+    if (dst_info.size_y == 0) box.bottom = box.top + desc.Height;
+    if (dst_info.size_z == 0) box.back = box.front + desc.DepthOrArraySize;
+
+    cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
+    // D3D12_TEXTURE_COPY_LOCATION dst{};
+    // dst.pResource = dev_ctx->get_resource(buf_id.id);
+    // dst.Type      = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    // D3D12_TEXTURE_COPY_LOCATION src{};
+    // src.pResource = dev_ctx->get_resource(img_id.id);
+    // src.Type      = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    //// src.PlacedFootprint.Offset           = 0;
+    //// src.PlacedFootprint.Footprint.Width  = dst_info.size_x;
+    //// src.PlacedFootprint.Footprint.Height = dst_info.size_y;
+    //// src.PlacedFootprint.Footprint.Depth  = dst_info.size_z;
+
+    // cmd->CopyTextureRegion(&dst, buffer_offset, 0, 0, &src, &box);
   }
   void copy_buffer(Resource_ID src_buf_id, size_t src_offset, Resource_ID dst_buf_id,
                    size_t dst_offset, u32 size) override {

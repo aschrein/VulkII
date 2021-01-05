@@ -128,8 +128,14 @@ using f64 = double;
 
 class RenderDoc_CTX {
   private:
-  RENDERDOC_API_1_4_1 * renderdoc_api = NULL;
-  bool                  dll_not_found = false;
+  RENDERDOC_API_1_4_1 *renderdoc_api = NULL;
+  bool                 dll_not_found = false;
+
+  ~RenderDoc_CTX() {
+    if (renderdoc_api) {
+      renderdoc_api->Shutdown();
+    }
+  }
   static RenderDoc_CTX &get() {
     static RenderDoc_CTX ctx;
     return ctx;
@@ -864,14 +870,15 @@ static inline string_ref read_file_tmp_stref(char const *filename) {
 // Saves RGBA32_FLOAT. The extension must be .pfm. 'Xn View' (https://www.xnview.com/) can parse
 // such files.
 static inline void ATTR_USED write_image_rgba32_float_pfm(const char *file_name, void *data,
-                                                          uint32_t width, uint32_t height,
-                                                          bool flip_y = false) {
+                                                          uint32_t width, u32 pitch,
+                                                          uint32_t height, bool flip_y = false) {
   FILE *file = fopen(file_name, "wb");
   ASSERT_ALWAYS(file);
   fprintf(file, "PF\n%d %d\n%lf\n", width, height, -1.0f);
   ito(height) {
     jto(width) {
-      float *src = &((float *)data)[width * (flip_y ? (height - 1 - i) : i) * 4 + j * 4];
+      float *src =
+          &((float *)data)[pitch / sizeof(float) * (flip_y ? (height - 1 - i) : i) + j * 4];
       fwrite((void *)(src + 0), 1, 4, file);
       fwrite((void *)(src + 1), 1, 4, file);
       fwrite((void *)(src + 2), 1, 4, file);
