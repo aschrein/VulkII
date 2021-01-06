@@ -1182,7 +1182,6 @@ class VK_Binding_Table : public rd::IBinding_Table {
   void push_constants(void const *data, size_t offset, size_t size) override {
     memcpy(push_constants_storage + offset, data, size);
   }
-  void clear_bindings() override { TRAP; }
   void bind(VkCommandBuffer cmd, VkPipelineBindPoint bind_point) {
     if (signature->push_constants_size) {
       vkCmdPushConstants(cmd, signature->pipeline_layout, VK_SHADER_STAGE_ALL, 0,
@@ -3203,7 +3202,16 @@ class Vk_Ctx : public rd::ICtx {
     binfo.clearValueCount = pass.clear_values.size;
     vkCmdBeginRenderPass(cmd, &binfo, VK_SUBPASS_CONTENTS_INLINE);
   }
-  void end_render_pass() override { vkCmdEndRenderPass(cmd); }
+  void end_render_pass() override {
+    vkCmdEndRenderPass(cmd);
+    Render_Pass pass = dev_ctx->render_passes.read(cur_pass);
+    ito(pass.create_info.rts.size) {
+      _image_barrier(cmd, pass.create_info.rts[i].image, 0, VK_IMAGE_LAYOUT_GENERAL);
+    }
+    if (pass.depth_target_view.is_null() == false) {
+      _image_barrier(cmd, pass.create_info.depth_target.image, 0, VK_IMAGE_LAYOUT_GENERAL);
+    }
+  }
 
   // u64  get_dt() { return last_ms; }
   void reset() {
@@ -3509,6 +3517,7 @@ class VkFactory : public rd::IDevice {
     std::lock_guard<std::mutex> _lock(mutex);
     release_queue.push(id);
   }
+  u32         get_num_swapchain_images() override { return dev_ctx->sc_image_count; }
   Resource_ID get_swapchain_image() override {
     std::lock_guard<std::mutex> _lock(mutex);
     return {dev_ctx->sc_images[dev_ctx->image_index], (u32)Resource_Type::IMAGE};
@@ -3560,8 +3569,8 @@ class VkFactory : public rd::IDevice {
       attachments.release();
       refs.release();
     });
-    u32 width  = info.width;
-    u32 height = info.height;
+    u32 width  = 0;
+    u32 height = 0;
     ito(info.rts.size) {
       VkAttachmentDescription attachment;
       MEMZERO(attachment);

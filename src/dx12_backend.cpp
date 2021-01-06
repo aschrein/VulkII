@@ -38,14 +38,7 @@ DXGI_FORMAT to_dx(rd::Format format) {
   case rd::Format::RGBA8_SNORM     : return DXGI_FORMAT_R8G8B8A8_SNORM      ;
   case rd::Format::RGBA8_SRGBA     : return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB       ;
   case rd::Format::RGBA8_UINT      : return DXGI_FORMAT_R8G8B8A8_UINT;
-
   case rd::Format::BGRA8_SRGBA     : return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB       ;
-
-  //case rd::Format::RGB8_UNORM      : return DXGI_FORMAT_R8G8B8_UNORM        ;
-  //case rd::Format::RGB8_SNORM      : return DXGI_FORMAT_R8G8B8_SNORM        ;
-  //case rd::Format::RGB8_SRGBA      : return VK_FORMAT_R8G8B8_SRGB         ;
-  //case rd::Format::RGB8_UINT       : return VK_FORMAT_R8G8B8_UINT         ;
-
   case rd::Format::RGBA32_FLOAT    : return DXGI_FORMAT_R32G32B32A32_FLOAT ;
   case rd::Format::RGB32_FLOAT     : return DXGI_FORMAT_R32G32B32_FLOAT    ;
   case rd::Format::RG32_FLOAT      : return DXGI_FORMAT_R32G32_FLOAT       ;
@@ -56,6 +49,29 @@ DXGI_FORMAT to_dx(rd::Format format) {
   case rd::Format::D32_FLOAT       : return DXGI_FORMAT_D32_FLOAT          ;
   case rd::Format::R32_UINT        : return DXGI_FORMAT_R32_UINT;
   case rd::Format::R16_UINT        : return DXGI_FORMAT_R16_UINT            ;
+  default: UNIMPLEMENTED;
+  }
+  // clang-format on
+}
+
+rd::Format from_dx(DXGI_FORMAT format) {
+  // clang-format off
+  switch (format) {
+  case DXGI_FORMAT_R8G8B8A8_UNORM     : return rd::Format::RGBA8_UNORM ;
+  case DXGI_FORMAT_R8G8B8A8_SNORM     : return rd::Format::RGBA8_SNORM ;
+  case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return rd::Format::RGBA8_SRGBA ;
+  case DXGI_FORMAT_R8G8B8A8_UINT      : return rd::Format::RGBA8_UINT  ;
+  case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return rd::Format::BGRA8_SRGBA ;
+  case DXGI_FORMAT_R32G32B32A32_FLOAT : return rd::Format::RGBA32_FLOAT;
+  case DXGI_FORMAT_R32G32B32_FLOAT    : return rd::Format::RGB32_FLOAT ;
+  case DXGI_FORMAT_R32G32_FLOAT       : return rd::Format::RG32_FLOAT  ;
+  case DXGI_FORMAT_R32_FLOAT          : return rd::Format::R32_FLOAT   ;
+  case DXGI_FORMAT_R16_FLOAT          : return rd::Format::R16_FLOAT   ;
+  case DXGI_FORMAT_R16_UNORM          : return rd::Format::R16_UNORM   ;
+  case DXGI_FORMAT_R8_UNORM           : return rd::Format::R8_UNORM    ;
+  case DXGI_FORMAT_D32_FLOAT          : return rd::Format::D32_FLOAT   ;
+  case DXGI_FORMAT_R32_UINT           : return rd::Format::R32_UINT    ;
+  case DXGI_FORMAT_R16_UINT           : return rd::Format::R16_UINT    ;
   default: UNIMPLEMENTED;
   }
   // clang-format on
@@ -131,6 +147,14 @@ static int              get_thread_id() {
 };
 } // namespace
 
+// The scope shall not be entered by multiple threads
+#define ASSERT_SINGLE_THREAD_SCOPE                                                                 \
+  _grab_st_lock();                                                                                 \
+  defer(_release_st_lock());
+
+// Just mutex
+#define SCOPED_LOCK std::lock_guard<std::mutex> _lock(mutex);
+
 class GPU_Desc_Heap {
   private:
   ComPtr<ID3D12DescriptorHeap> heap;
@@ -143,22 +167,23 @@ class GPU_Desc_Heap {
   SIZE_T                       get_element_size() { return element_size; }
   D3D12_DESCRIPTOR_HEAP_TYPE   get_type() { return type; }
   ComPtr<ID3D12DescriptorHeap> get_heap() { return heap; }
-  GPU_Desc_Heap(ID3D12Device *device, D3D12_DESCRIPTOR_HEAP_TYPE type, u32 size)
+  GPU_Desc_Heap(ID3D12Device *device, D3D12_DESCRIPTOR_HEAP_TYPE type, u32 size,
+                D3D12_DESCRIPTOR_HEAP_FLAGS flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)
       : ual(size), type(type) {
     D3D12_DESCRIPTOR_HEAP_DESC desc = {};
     desc.Type                       = type;
     desc.NumDescriptors             = size;
-    desc.Flags                      = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    desc.Flags                      = flags;
     DX_ASSERT_OK(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&heap)));
     element_size = device->GetDescriptorHandleIncrementSize(type);
   }
   ~GPU_Desc_Heap() {}
   i32 allocate(u32 size) {
-    std::lock_guard<std::mutex> _lock(mutex);
+    SCOPED_LOCK;
     return ual.alloc(size);
   }
   void free(u32 offset, u32 size) {
-    std::lock_guard<std::mutex> _lock(mutex);
+    SCOPED_LOCK;
     ual.free(offset, size);
   }
 };
@@ -171,6 +196,7 @@ enum class Resource_Type : u32 {
   SHADER,
   SAMPLER,
   PSO,
+  RENDER_PASS,
 };
 
 template <typename T> class Resource_Array {
@@ -225,77 +251,126 @@ struct DX12Binding_Signature {
   u32                         num_desc_samplers         = 0;
   u32                         samplers_desc_heap_offset = 0;
 
-  i32 common_param_id   = -1;
-  i32 samplers_param_id = -1;
-  i32 pc_param_id       = -1;
-  u32 num_params        = 0;
-  // u32                         num_params_common   = 0;
-  // u32                         num_params_samplers = 0;
-  // u32                         num_params_total    = 0;
+  i32 common_param_id     = -1;
+  i32 samplers_param_id   = -1;
+  i32 pc_param_id         = -1;
+  u32 num_params          = 0;
   u32 push_constants_size = 0;
-  // InlineArray<u32, 0x10>      common_parameter_heap_offsets{};
-  // InlineArray<u32, 0x10>      common_parameter_space_to_parameter_id{};
-  // InlineArray<u32, 0x10>      sampler_parameter_heap_offsets{};
-  // InlineArray<u32, 0x10>      sampler_parameter_space_to_parameter_id{};
   enum { PUSH_CONSTANTS_SPACE = 777 };
   struct ParamDesc {
     InlineArray<D3D12_DESCRIPTOR_RANGE, 0x10> bindings{};
   };
-  ParamDesc space_descs[0x10]{};
-
+  ParamDesc                     space_descs[0x10]{};
+  void                          release() { delete this; }
   static DX12Binding_Signature *create(DX12Device *                         dev_ctx,
                                        rd::Binding_Table_Create_Info const &table_info);
 };
-
+class RenderPass;
 class DX12Device : public rd::IDevice {
   static constexpr u32 NUM_BACK_BUFFERS = 3;
   static constexpr u32 MAX_THREADS      = 0x100;
 
-  ComPtr<ID3D12Device2>          device;
-  ComPtr<ID3D12CommandQueue>     cmd_queue;
-  ComPtr<IDXGISwapChain4>        sc;
-  ComPtr<ID3D12Resource>         sc_images[NUM_BACK_BUFFERS];
-  ComPtr<ID3D12CommandAllocator> cmd_allocs[NUM_BACK_BUFFERS];
-  ComPtr<ID3D12DescriptorHeap>   rtv_desc_heap;
-  ComPtr<ID3D12Fence>            fence;
-  HANDLE                         fence_event = 0;
-  ComPtr<ID3D12Resource>         main_rt[NUM_BACK_BUFFERS];
-  D3D12_CPU_DESCRIPTOR_HANDLE    main_rt_desc[NUM_BACK_BUFFERS];
-  HANDLE                         sc_wait_obj       = 0;
-  u32                            cur_cmd_id        = 0;
-  GPU_Desc_Heap *                common_desc_heap  = NULL;
-  GPU_Desc_Heap *                sampler_desc_heap = NULL;
-  std::mutex                     mutex;
+  ComPtr<ID3D12Device2>      device;
+  ComPtr<ID3D12CommandQueue> cmd_queue;
+
+  // Swap Chain. Not used when there's no window.
+  struct SwapChain_Context {
+    bool                    enabled = false;
+    ComPtr<IDXGISwapChain4> sc;
+    ID                      images[NUM_BACK_BUFFERS]{};
+    ComPtr<ID3D12Fence>     fence;
+    UINT64                  last_fence_signaled_value = 0;
+    HANDLE                  fence_event               = 0;
+    HANDLE                  sc_wait_obj               = 0;
+    u32                     width                     = 0;
+    u32                     height                    = 0;
+  } sc{};
+  GPU_Desc_Heap *dsv_desc_heap     = NULL;
+  GPU_Desc_Heap *rtv_desc_heap     = NULL;
+  GPU_Desc_Heap *common_desc_heap  = NULL;
+  GPU_Desc_Heap *sampler_desc_heap = NULL;
+
+  struct Frame_Context {
+    UINT64                         fence_value = 0;
+    ComPtr<ID3D12CommandAllocator> cmd_allocs[MAX_THREADS];
+    u32                            sc_image_id = 0;
+  } frame_contexts[NUM_BACK_BUFFERS]{};
+  u32 cur_ctx_id = 0;
+
+  // Multi-threading
+  std::mutex       mutex;
+  std::atomic<i32> single_thread_guard;
+
+  void _grab_st_lock() {
+    i32 old = single_thread_guard.exchange((i32)get_thread_id());
+    ASSERT_DEBUG(old == -1 || old == (i32)get_thread_id());
+  }
+
+  void _release_st_lock() { single_thread_guard.exchange(-1); }
 
   Resource_Array<ID3D12Resource *>        resource_table;
   Resource_Array<DX12Binding_Signature *> signature_table;
   Resource_Array<IDxcBlob *>              shader_table;
   Resource_Array<ID3D12PipelineState *>   pso_table;
-  Resource_Array<HANDLE>                  events_table;
-  Resource_Array<D3D12_SAMPLER_DESC *>    sampler_table;
+  // Resource_Array<HANDLE>                  events_table;
+  Resource_Array<D3D12_SAMPLER_DESC *> sampler_table;
+  Resource_Array<RenderPass *>         renderpass_table;
 
   AutoArray<Pair<Resource_ID, i32>> deferred_release;
+  struct Deferred_Descriptor_Range_Release {
+    D3D12_DESCRIPTOR_HEAP_TYPE type;
+    u32                        offset;
+    u32                        size;
+    i32                        timeout;
+  };
+  AutoArray<Deferred_Descriptor_Range_Release> deferred_desc_range_release;
+
+  void deferred_resource_release_iteration();
+  void deferred_desc_range_release_iteration();
 
   ~DX12Device() {}
 
   // Synchronization
   void sync_transition_barrier(ID3D12Resource *res, D3D12_RESOURCE_STATES StateBefore,
                                D3D12_RESOURCE_STATES StateAfter) {
+    ASSERT_SINGLE_THREAD_SCOPE;
     auto                   cmd = alloc_graphics_cmd();
     D3D12_RESOURCE_BARRIER bar{};
     bar.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     bar.Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
     bar.Transition.pResource   = res;
-    bar.Transition.Subresource = 0;
+    bar.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     bar.Transition.StateBefore = StateBefore;
     bar.Transition.StateAfter  = StateAfter;
     cmd->ResourceBarrier(1, &bar);
-    cmd->Close();
+    DX_ASSERT_OK(cmd->Close());
     cmd_queue->ExecuteCommandLists(1, (ID3D12CommandList **)cmd.GetAddressOf());
     wait_idle();
   }
+  void update_sc_images() {
+    if (!sc.enabled) return;
+    ASSERT_SINGLE_THREAD_SCOPE;
+    ito(NUM_BACK_BUFFERS) {
+      if (sc.images[i].is_valid()) {
+        resource_table.load(sc.images[i])->Release();
+        resource_table.free(sc.images[i]);
+      }
+      ID3D12Resource *res = NULL;
+      sc.sc->GetBuffer(i, IID_PPV_ARGS(&res));
+      sc.images[i] = resource_table.push(res);
+    }
+  }
+  void wait_for_next_frame() {
+    if (sc.fence->GetCompletedValue() >= frame_contexts[cur_ctx_id].fence_value) return;
+    sc.fence->SetEventOnCompletion(frame_contexts[cur_ctx_id].fence_value, sc.fence_event);
+    WaitForSingleObject(sc.fence_event, INFINITE);
+  }
 
   public:
+  void deferred_release_desc_range(D3D12_DESCRIPTOR_HEAP_TYPE type, u32 offset, u32 size) {
+    SCOPED_LOCK;
+    deferred_desc_range_release.push({type, offset, size, 3});
+  }
   ID3D12Resource *       get_resource(ID id) { return resource_table.load(id); }
   DX12Binding_Signature *get_signature(ID id) { return signature_table.load(id); }
   ID3D12PipelineState *  get_pso(ID id) { return pso_table.load(id); }
@@ -304,8 +379,9 @@ class DX12Device : public rd::IDevice {
   ComPtr<ID3D12Device2>             get_device() { return device; }
   ComPtr<ID3D12GraphicsCommandList> alloc_graphics_cmd() {
     ComPtr<ID3D12GraphicsCommandList> out;
-    DX_ASSERT_OK(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                           cmd_allocs[cur_cmd_id].Get(), NULL, IID_PPV_ARGS(&out)));
+    DX_ASSERT_OK(device->CreateCommandList(
+        0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+        frame_contexts[cur_ctx_id].cmd_allocs[get_thread_id()].Get(), NULL, IID_PPV_ARGS(&out)));
     return out;
   }
   void bind_desc_heaps(ID3D12GraphicsCommandList *cmd) {
@@ -317,7 +393,10 @@ class DX12Device : public rd::IDevice {
   }
   GPU_Desc_Heap *get_sampler_desc_heap() { return sampler_desc_heap; }
   GPU_Desc_Heap *get_common_desc_heap() { return common_desc_heap; }
+  GPU_Desc_Heap *get_rtv_desc_heap() { return rtv_desc_heap; }
+  GPU_Desc_Heap *get_dsv_desc_heap() { return dsv_desc_heap; }
   DX12Device(void *hdl) {
+    single_thread_guard = false;
     {
       ComPtr<ID3D12Debug> debugInterface;
       DX_ASSERT_OK(D3D12GetDebugInterface(IID_PPV_ARGS(&debugInterface)));
@@ -325,26 +404,17 @@ class DX12Device : public rd::IDevice {
     }
     D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_12_0;
     DX_ASSERT_OK(D3D12CreateDevice(NULL, featureLevel, IID_PPV_ARGS(&device)));
+    dsv_desc_heap     = new GPU_Desc_Heap(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 2048,
+                                      D3D12_DESCRIPTOR_HEAP_FLAG_NONE);
+    rtv_desc_heap     = new GPU_Desc_Heap(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 2048,
+                                      D3D12_DESCRIPTOR_HEAP_FLAG_NONE);
     sampler_desc_heap = new GPU_Desc_Heap(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 2048);
     common_desc_heap =
         new GPU_Desc_Heap(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1 << 19);
+    DX_ASSERT_OK(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&sc.fence)));
 
-    {
-      D3D12_DESCRIPTOR_HEAP_DESC desc = {};
-      desc.Type                       = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-      desc.NumDescriptors             = NUM_BACK_BUFFERS;
-      desc.Flags                      = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-      desc.NodeMask                   = 1;
-      DX_ASSERT_OK(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&rtv_desc_heap)));
-
-      SIZE_T rtvDescriptorSize =
-          device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-      D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = rtv_desc_heap->GetCPUDescriptorHandleForHeapStart();
-      for (UINT i = 0; i < NUM_BACK_BUFFERS; i++) {
-        main_rt_desc[i] = rtvHandle;
-        rtvHandle.ptr += rtvDescriptorSize;
-      }
-    }
+    sc.fence_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+    ASSERT_DEBUG(sc.fence_event);
     {
       D3D12_COMMAND_QUEUE_DESC desc = {};
       desc.Type                     = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -353,14 +423,26 @@ class DX12Device : public rd::IDevice {
       DX_ASSERT_OK(device->CreateCommandQueue(&desc, IID_PPV_ARGS(&cmd_queue)));
     }
 
-    ito(NUM_BACK_BUFFERS) DX_ASSERT_OK(device->CreateCommandAllocator(
-        D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&cmd_allocs[i])));
-
-    DX_ASSERT_OK(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)));
-
-    fence_event = CreateEvent(NULL, FALSE, FALSE, NULL);
-    ASSERT_ALWAYS(fence_event);
+    ito(NUM_BACK_BUFFERS) {
+      jto(MAX_THREADS) {
+        DX_ASSERT_OK(device->CreateCommandAllocator(
+            D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&frame_contexts[i].cmd_allocs[j])));
+      }
+    }
     if (hdl) {
+      sc.enabled = true;
+      //{
+
+      //  SIZE_T rtvDescriptorSize =
+      //      device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+      //  D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle =
+      //      rtv_desc_heap->get_heap()->GetCPUDescriptorHandleForHeapStart();
+      //  for (UINT i = 0; i < NUM_BACK_BUFFERS; i++) {
+      //    main_rt_desc[i] = rtvHandle;
+      //    rtvHandle.ptr += rtvDescriptorSize;
+      //  }
+      //}
+
       ComPtr<IDXGIFactory4>   dxgiFactory;
       ComPtr<IDXGISwapChain1> swapChain1;
       DX_ASSERT_OK(CreateDXGIFactory1(IID_PPV_ARGS(&dxgiFactory)));
@@ -382,16 +464,21 @@ class DX12Device : public rd::IDevice {
       }
       DX_ASSERT_OK(dxgiFactory->CreateSwapChainForHwnd(cmd_queue.Get(), (HWND)hdl, &sd, NULL, NULL,
                                                        &swapChain1));
-      DX_ASSERT_OK(swapChain1->QueryInterface(IID_PPV_ARGS(&sc)));
-
-      sc->SetMaximumFrameLatency(NUM_BACK_BUFFERS);
-      sc_wait_obj = sc->GetFrameLatencyWaitableObject();
+      DX_ASSERT_OK(swapChain1->QueryInterface(IID_PPV_ARGS(&sc.sc)));
+      update_sc_images();
+      sc.sc->SetMaximumFrameLatency(NUM_BACK_BUFFERS);
+      sc.sc_wait_obj = sc.sc->GetFrameLatencyWaitableObject();
+      RECT rect{};
+      DX_ASSERT_OK(GetWindowRect((HWND)hdl, &rect));
+      sc.width  = rect.right - rect.left;
+      sc.height = rect.bottom - rect.top;
+      ASSERT_DEBUG(sc.sc_wait_obj);
     }
   }
   Resource_ID create_image(rd::Image_Create_Info info) override {
-    std::lock_guard<std::mutex> _lock(mutex);
-    ID3D12Resource *            buf = NULL;
-    D3D12_HEAP_PROPERTIES       prop{};
+    SCOPED_LOCK;
+    ID3D12Resource *      buf = NULL;
+    D3D12_HEAP_PROPERTIES prop{};
     prop.Type                 = D3D12_HEAP_TYPE_DEFAULT;
     D3D12_HEAP_FLAGS    flags = D3D12_HEAP_FLAG_NONE;
     D3D12_RESOURCE_DESC desc{};
@@ -449,7 +536,7 @@ class DX12Device : public rd::IDevice {
     if (prop.Type == D3D12_HEAP_TYPE_UPLOAD) state = D3D12_RESOURCE_STATE_GENERIC_READ;
 
     {
-      std::lock_guard<std::mutex> _lock(mutex);
+      SCOPED_LOCK;
       DX_ASSERT_OK(
           device->CreateCommittedResource(&prop, flags, &desc, state, NULL, IID_PPV_ARGS(&buf)));
       ASSERT_DEBUG(get_default_state(buf) == state);
@@ -461,7 +548,7 @@ class DX12Device : public rd::IDevice {
   }
   Resource_ID create_shader(rd::Stage_t type, string_ref text,
                             Pair<string_ref, string_ref> *defines, size_t num_defines) override {
-    std::lock_guard<std::mutex> _lock(mutex);
+    SCOPED_LOCK;
     static ComPtr<IDxcLibrary>  library;
     static ComPtr<IDxcCompiler> compiler;
     static int                  _init = [] {
@@ -538,8 +625,9 @@ class DX12Device : public rd::IDevice {
       return {shader_table.push(bytecode), (u32)Resource_Type::SHADER};
     }
   }
+  u32         get_num_swapchain_images() override { return NUM_BACK_BUFFERS; }
   Resource_ID create_sampler(rd::Sampler_Create_Info const &info) override {
-    std::lock_guard<std::mutex> _lock(mutex);
+    SCOPED_LOCK;
     // u32                         id = sampler_desc_heap->allocate(1);
     D3D12_SAMPLER_DESC desc{};
     desc.AddressU       = to_dx(info.address_mode_u);
@@ -576,7 +664,7 @@ class DX12Device : public rd::IDevice {
     return {sampler_table.push(new D3D12_SAMPLER_DESC(desc)), (u32)Resource_Type::SAMPLER};
   } // namespace
   void release_resource(Resource_ID id) override {
-    std::lock_guard<std::mutex> _lock(mutex);
+    SCOPED_LOCK;
     deferred_release.push({id, 3});
     // if (id.type == (u32)Resource_Type::BUFFER) {
     //  // get_resource(id.id)->Release();
@@ -588,39 +676,56 @@ class DX12Device : public rd::IDevice {
   Resource_ID create_event() override {
     /* ComPtr<ID3D12Fence> fence;
      {
-       std::lock_guard<std::mutex> _lock(mutex);
+       SCOPED_LOCK;
        DX_ASSERT_OK(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)));
      }
      HANDLE event = CreateEventEx(nullptr, false, false, EVENT_ALL_ACCESS);
      defer(CloseHandle(event));
      DX_ASSERT_OK(fence->SetEventOnCompletion(1, event));
      {
-       std::lock_guard<std::mutex> _lock(mutex);
+       SCOPED_LOCK;
        cmd_queue->Signal(fence.Get(), 1);
      }
      WaitForSingleObject(event, INFINITE);*/
     TRAP;
   }
   Resource_ID create_timestamp() override {
-    std::lock_guard<std::mutex> _lock(mutex);
+    SCOPED_LOCK;
     TRAP;
   }
   Resource_ID get_swapchain_image() override {
-    std::lock_guard<std::mutex> _lock(mutex);
-    TRAP;
+    return {sc.images[frame_contexts[cur_ctx_id].sc_image_id], (u32)Resource_Type::TEXTURE};
   }
   rd::Image2D_Info get_swapchain_image_info() override {
-    std::lock_guard<std::mutex> _lock(mutex);
-    TRAP;
+    SCOPED_LOCK;
+    rd::Image2D_Info info{};
+    ID3D12Resource * res  = get_resource(sc.images[frame_contexts[cur_ctx_id].sc_image_id]);
+    auto             desc = res->GetDesc();
+    info.height           = desc.Height;
+    info.layers           = desc.DepthOrArraySize;
+    info.levels           = desc.MipLevels;
+    info.width            = desc.Width;
+    info.format           = from_dx(desc.Format);
+    return info;
   }
   rd::Image_Info get_image_info(Resource_ID res_id) override {
-    std::lock_guard<std::mutex> _lock(mutex);
-    TRAP;
+    SCOPED_LOCK;
+    rd::Image_Info  info{};
+    ID3D12Resource *res  = get_resource(res_id.id);
+    auto            desc = res->GetDesc();
+    info.depth           = desc.DepthOrArraySize;
+    info.height          = desc.Height;
+    info.layers          = desc.DepthOrArraySize;
+    info.levels          = desc.MipLevels;
+    info.width           = desc.Width;
+    info.format          = from_dx(desc.Format);
+    info.is_depth        = rd::is_depth_format(info.format);
+    return info;
   }
   void *map_buffer(Resource_ID id) override {
-    std::lock_guard<std::mutex> _lock(mutex);
-    ID3D12Resource *            res = get_resource(id.id);
-    D3D12_RANGE                 rr{};
+    // SCOPED_LOCK;
+    ID3D12Resource *res = get_resource(id.id);
+    D3D12_RANGE     rr{};
     rr.Begin                 = 0;
     rr.End                   = 0;
     D3D12_RESOURCE_DESC desc = res->GetDesc();
@@ -636,9 +741,9 @@ class DX12Device : public rd::IDevice {
     return data;
   }
   void unmap_buffer(Resource_ID id) override {
-    std::lock_guard<std::mutex> _lock(mutex);
-    ID3D12Resource *            res = get_resource(id.id);
-    D3D12_RANGE                 rr{};
+    // SCOPED_LOCK;
+    ID3D12Resource *res = get_resource(id.id);
+    D3D12_RANGE     rr{};
     rr.Begin                 = 0;
     rr.End                   = 0;
     D3D12_RESOURCE_DESC desc = res->GetDesc();
@@ -646,12 +751,9 @@ class DX12Device : public rd::IDevice {
     rr.End = desc.Width;
     res->Unmap(0, &rr);
   }
-  Resource_ID create_render_pass(rd::Render_Pass_Create_Info const &info) override {
-    std::lock_guard<std::mutex> _lock(mutex);
-    TRAP;
-  }
+  Resource_ID create_render_pass(rd::Render_Pass_Create_Info const &info) override;
   Resource_ID create_compute_pso(Resource_ID signature, Resource_ID cs) override {
-    std::lock_guard<std::mutex>       _lock(mutex);
+    SCOPED_LOCK;
     IDxcBlob *                        bytecode = shader_table.load(cs.id);
     DX12Binding_Signature *           sig      = signature_table.load(signature.id);
     D3D12_COMPUTE_PIPELINE_STATE_DESC desc{};
@@ -665,7 +767,7 @@ class DX12Device : public rd::IDevice {
   }
   Resource_ID create_graphics_pso(Resource_ID signature, Resource_ID render_pass,
                                   rd::Graphics_Pipeline_State const &) override {
-    std::lock_guard<std::mutex> _lock(mutex);
+    SCOPED_LOCK;
     TRAP;
   }
   Resource_ID create_signature(rd::Binding_Table_Create_Info const &info) override {
@@ -673,74 +775,125 @@ class DX12Device : public rd::IDevice {
             (u32)Resource_Type::SIGNATURE};
   }
   rd::IBinding_Table *create_binding_table(Resource_ID signature) override;
-  rd::ICtx *          start_render_pass(Resource_ID render_pass) override {
-    std::lock_guard<std::mutex> _lock(mutex);
-    TRAP;
-  }
-  void end_render_pass(rd::ICtx *ctx) override {
-    std::lock_guard<std::mutex> _lock(mutex);
-    TRAP;
-  }
-  rd::ICtx *start_compute_pass() override;
-  void      end_compute_pass(rd::ICtx *ctx) override;
-  bool      get_timestamp_state(Resource_ID) override {
-    std::lock_guard<std::mutex> _lock(mutex);
+  rd::ICtx *          start_render_pass(Resource_ID render_pass) override;
+  void                end_render_pass(rd::ICtx *ctx) override;
+  rd::ICtx *          start_compute_pass() override;
+  void                end_compute_pass(rd::ICtx *ctx) override;
+  bool                get_timestamp_state(Resource_ID) override {
+    SCOPED_LOCK;
     TRAP;
   }
   double get_timestamp_ms(Resource_ID t0, Resource_ID t1) override {
-    std::lock_guard<std::mutex> _lock(mutex);
+    SCOPED_LOCK;
     TRAP;
   }
   void wait_idle() override {
     ComPtr<ID3D12Fence> fence;
     {
-      std::lock_guard<std::mutex> _lock(mutex);
+      SCOPED_LOCK;
       DX_ASSERT_OK(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)));
     }
     HANDLE event = CreateEventEx(nullptr, false, false, EVENT_ALL_ACCESS);
     defer(CloseHandle(event));
     DX_ASSERT_OK(fence->SetEventOnCompletion(1, event));
     {
-      std::lock_guard<std::mutex> _lock(mutex);
+      SCOPED_LOCK;
       cmd_queue->Signal(fence.Get(), 1);
     }
     WaitForSingleObject(event, INFINITE);
   }
   bool get_event_state(Resource_ID id) override {
-    std::lock_guard<std::mutex> _lock(mutex);
+    SCOPED_LOCK;
     TRAP;
   }
   rd::Impl_t getImplType() override { TRAP; }
   void       release() override {
+    ASSERT_SINGLE_THREAD_SCOPE; // not a reentrant scope.
     wait_idle();
     if (common_desc_heap) delete common_desc_heap;
     if (sampler_desc_heap) delete sampler_desc_heap;
+    if (rtv_desc_heap) delete rtv_desc_heap;
+    if (dsv_desc_heap) delete dsv_desc_heap;
     delete this;
   }
   void start_frame() override {
-    std::lock_guard<std::mutex>       _lock(mutex);
-    AutoArray<Pair<Resource_ID, i32>> new_deferred_release;
-    ito(deferred_release.size) {
-      auto item = deferred_release[i];
-      item.second -= 1;
-      if (item.second == 0) {
-        if (item.first.type == (u32)Resource_Type::BUFFER ||
-            item.first.type == (u32)Resource_Type::TEXTURE) {
-          ID3D12Resource *res = resource_table.load(item.first.id);
-          res->Release();
-          resource_table.free(item.first.id);
-        } else {
-          TRAP;
+    ASSERT_SINGLE_THREAD_SCOPE; // not a reentrant scope.
+
+    // Handle buffer resizal
+    if (sc.enabled) {
+      DXGI_SWAP_CHAIN_DESC desc{};
+      DX_ASSERT_OK(sc.sc->GetDesc(&desc));
+      RECT rect{};
+      DX_ASSERT_OK(GetClientRect(desc.OutputWindow, &rect));
+      u32 new_width  = rect.right - rect.left;
+      u32 new_height = rect.bottom - rect.top;
+      if (new_width != sc.width || new_height != sc.height) {
+        wait_idle();
+        ito(NUM_BACK_BUFFERS) {
+          if (sc.images[i].is_valid()) {
+            resource_table.load(sc.images[i])->Release();
+            resource_table.free(sc.images[i]);
+          }
+          sc.images[i] = {};
         }
-      } else {
-        new_deferred_release.push(item);
+        DX_ASSERT_OK(sc.sc->ResizeBuffers(NUM_BACK_BUFFERS, new_width, new_height,
+                                          DXGI_FORMAT_UNKNOWN,
+                                          DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT));
+        sc.width  = new_width;
+        sc.height = new_height;
+        update_sc_images();
       }
     }
-    deferred_release.reset();
-    ito(new_deferred_release.size) { deferred_release.push(new_deferred_release[i]); }
-    cmd_allocs[cur_cmd_id]->Reset();
+    cur_ctx_id = (cur_ctx_id + 1) % NUM_BACK_BUFFERS;
+    // Now wait to make sure the frame context is free to use
+    wait_for_next_frame();
+
+    // Deferred release iteration.
+    deferred_desc_range_release_iteration();
+    deferred_resource_release_iteration();
+
+    ito(MAX_THREADS) frame_contexts[cur_ctx_id].cmd_allocs[i]->Reset();
+    // Prepare the swap chain image for consumption.
+    if (sc.enabled) {
+      // Switch to the new swap chain image
+      frame_contexts[cur_ctx_id].sc_image_id = sc.sc->GetCurrentBackBufferIndex();
+      /*auto                   cmd             = alloc_graphics_cmd();
+      D3D12_RESOURCE_BARRIER barrier         = {};
+      barrier.Type                           = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      barrier.Flags                          = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+      barrier.Transition.pResource =
+          get_resource(sc.images[frame_contexts[cur_ctx_id].sc_image_id]);
+      barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+      barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+      barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_COMMON;
+      cmd->ResourceBarrier(1, &barrier);
+      DX_ASSERT_OK(cmd->Close());
+      cmd_queue->ExecuteCommandLists(1, (ID3D12CommandList **)cmd.GetAddressOf());*/
+    }
   }
-  void end_frame() override { std::lock_guard<std::mutex> _lock(mutex); }
+  void end_frame() override {
+    ASSERT_SINGLE_THREAD_SCOPE; // not a reentrant scope.
+    // Prepare the swapchain image for presentation.
+    if (sc.enabled) {
+      /* auto cmd = alloc_graphics_cmd();
+       D3D12_RESOURCE_BARRIER barrier = {};
+        barrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        barrier.Transition.pResource =
+            get_resource(sc.images[frame_contexts[cur_ctx_id].sc_image_id]);
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+        barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PRESENT;
+        cmd->ResourceBarrier(1, &barrier);
+        DX_ASSERT_OK(cmd->Close());
+        cmd_queue->ExecuteCommandLists(1, (ID3D12CommandList **)cmd.GetAddressOf());*/
+      sc.sc->Present(0, 0);
+    }
+    u64 fence_value = sc.last_fence_signaled_value + 1;
+    cmd_queue->Signal(sc.fence.Get(), fence_value);
+    frame_contexts[cur_ctx_id].fence_value = fence_value;
+    sc.last_fence_signaled_value           = fence_value;
+  }
 };
 
 D3D12_DESCRIPTOR_RANGE_TYPE to_dx(rd::Binding_t type) {
@@ -858,7 +1011,6 @@ DX12Binding_Signature::create(DX12Device *                         dev_ctx,
   }
   return out;
 }
-
 class DX12Binding_Table : public rd::IBinding_Table {
   DX12Device *           dev_ctx   = NULL;
   DX12Binding_Signature *signature = NULL;
@@ -868,6 +1020,9 @@ class DX12Binding_Table : public rd::IBinding_Table {
   size_t                       common_heap_offset  = 0;
   size_t                       sampler_heap_offset = 0;
   u8                           push_constants_data[128];
+  bool                         is_bindings_dirty       = false;
+  bool                         is_push_constants_dirty = false;
+  bool                         is_bound                = false;
 
   public:
   static DX12Binding_Table *create(DX12Device *dev_ctx, DX12Binding_Signature *signature) {
@@ -895,40 +1050,64 @@ class DX12Binding_Table : public rd::IBinding_Table {
         dev_ctx->get_sampler_desc_heap()->allocate(signature->num_desc_samplers);
     return out;
   }
-  void flush_bindings(ComPtr<ID3D12GraphicsCommandList> cmd) {
-    cmd->SetComputeRootSignature(signature->root_signature.Get());
+  void bind(ComPtr<ID3D12GraphicsCommandList> cmd, rd::Pass_t pass_type) {
+    if (pass_type == rd::Pass_t::COMPUTE)
+      cmd->SetComputeRootSignature(signature->root_signature.Get());
+    else
+      cmd->SetGraphicsRootSignature(signature->root_signature.Get());
     if (signature->common_param_id >= 0) {
-      dev_ctx->get_device()->CopyDescriptorsSimple(
-          signature->num_desc_common,
-          {dev_ctx->get_common_desc_heap()->get_heap()->GetCPUDescriptorHandleForHeapStart().ptr +
-           dev_ctx->get_common_desc_heap()->get_element_size() * common_heap_offset},
-          cpu_common_heap->GetCPUDescriptorHandleForHeapStart(),
-          D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-      cmd->SetComputeRootDescriptorTable(
-          signature->common_param_id,
-          {dev_ctx->get_common_desc_heap()->get_heap()->GetGPUDescriptorHandleForHeapStart().ptr +
-           dev_ctx->get_common_desc_heap()->get_element_size() * common_heap_offset});
+      if (is_bindings_dirty) {
+        dev_ctx->get_device()->CopyDescriptorsSimple(
+            signature->num_desc_common,
+            {dev_ctx->get_common_desc_heap()->get_heap()->GetCPUDescriptorHandleForHeapStart().ptr +
+             dev_ctx->get_common_desc_heap()->get_element_size() * common_heap_offset},
+            cpu_common_heap->GetCPUDescriptorHandleForHeapStart(),
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+      }
+      D3D12_GPU_DESCRIPTOR_HANDLE handle = {
+          dev_ctx->get_common_desc_heap()->get_heap()->GetGPUDescriptorHandleForHeapStart().ptr +
+          dev_ctx->get_common_desc_heap()->get_element_size() * common_heap_offset};
+      if (pass_type == rd::Pass_t::COMPUTE)
+        cmd->SetComputeRootDescriptorTable(signature->common_param_id, handle);
+      else
+        cmd->SetGraphicsRootDescriptorTable(signature->common_param_id, handle);
     }
     if (signature->samplers_param_id >= 0) {
-      auto heap_start =
-          dev_ctx->get_sampler_desc_heap()->get_heap()->GetCPUDescriptorHandleForHeapStart().ptr;
-      auto stride = dev_ctx->get_sampler_desc_heap()->get_element_size();
-      dev_ctx->get_device()->CopyDescriptorsSimple(
-          signature->num_desc_samplers, {heap_start + stride * sampler_heap_offset},
-          cpu_sampler_heap->GetCPUDescriptorHandleForHeapStart(),
-          D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-      cmd->SetComputeRootDescriptorTable(
-          signature->samplers_param_id,
-          {dev_ctx->get_sampler_desc_heap()->get_heap()->GetGPUDescriptorHandleForHeapStart().ptr +
-           dev_ctx->get_sampler_desc_heap()->get_element_size() * sampler_heap_offset});
+      if (is_bindings_dirty) {
+        auto heap_start =
+            dev_ctx->get_sampler_desc_heap()->get_heap()->GetCPUDescriptorHandleForHeapStart().ptr;
+        auto stride = dev_ctx->get_sampler_desc_heap()->get_element_size();
+        dev_ctx->get_device()->CopyDescriptorsSimple(
+            signature->num_desc_samplers, {heap_start + stride * sampler_heap_offset},
+            cpu_sampler_heap->GetCPUDescriptorHandleForHeapStart(),
+            D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+      }
+      D3D12_GPU_DESCRIPTOR_HANDLE handle = {
+          dev_ctx->get_sampler_desc_heap()->get_heap()->GetGPUDescriptorHandleForHeapStart().ptr +
+          dev_ctx->get_sampler_desc_heap()->get_element_size() * sampler_heap_offset};
+      if (pass_type == rd::Pass_t::COMPUTE)
+        cmd->SetComputeRootDescriptorTable(signature->samplers_param_id, handle);
+      else
+        cmd->SetGraphicsRootDescriptorTable(signature->samplers_param_id, handle);
     }
+    is_bound          = true;
+    is_bindings_dirty = false;
   }
-  void flush_push_constants(ComPtr<ID3D12GraphicsCommandList> cmd) {
-    if (signature->push_constants_size)
-      cmd->SetComputeRoot32BitConstants(signature->pc_param_id, signature->push_constants_size / 4,
-                                        push_constants_data, 0);
+  void unbind() { is_bound = false; }
+  void flush_push_constants(ComPtr<ID3D12GraphicsCommandList> cmd, rd::Pass_t pass_type) {
+    if (!is_push_constants_dirty) return;
+    if (signature->push_constants_size) {
+      if (pass_type == rd::Pass_t::COMPUTE)
+        cmd->SetComputeRoot32BitConstants(
+            signature->pc_param_id, signature->push_constants_size / 4, push_constants_data, 0);
+      else
+        cmd->SetGraphicsRoot32BitConstants(
+            signature->pc_param_id, signature->push_constants_size / 4, push_constants_data, 0);
+    }
+    is_push_constants_dirty = false;
   }
   void push_constants(void const *data, size_t offset, size_t size) override {
+    is_push_constants_dirty = true;
     memcpy(push_constants_data + offset, data, size);
   }
   // u32  get_push_constants_parameter_id() { return num_params_total - 1; }
@@ -945,6 +1124,7 @@ class DX12Binding_Table : public rd::IBinding_Table {
     dev_ctx->get_device()->CreateConstantBufferView(
         &desc, {cpu_common_heap->GetCPUDescriptorHandleForHeapStart().ptr +
                 dev_ctx->get_common_desc_heap()->get_element_size() * ((u64)binding_offset)});
+    is_bindings_dirty = true;
   }
   void bind_sampler(u32 space, u32 binding, Resource_ID sampler_id) override {
     D3D12_SAMPLER_DESC *desc = dev_ctx->get_sampler(sampler_id.id);
@@ -952,6 +1132,7 @@ class DX12Binding_Table : public rd::IBinding_Table {
     dev_ctx->get_device()->CreateSampler(
         desc, {cpu_sampler_heap->GetCPUDescriptorHandleForHeapStart().ptr +
                dev_ctx->get_sampler_desc_heap()->get_element_size() * ((u64)offset)});
+    is_bindings_dirty = true;
   }
   void bind_UAV_buffer(u32 space, u32 binding, Resource_ID buf_id, size_t offset,
                        size_t size) override {
@@ -981,6 +1162,7 @@ class DX12Binding_Table : public rd::IBinding_Table {
         res, NULL, &desc,
         {cpu_common_heap->GetCPUDescriptorHandleForHeapStart().ptr +
          dev_ctx->get_sampler_desc_heap()->get_element_size() * ((u64)binding_offset)});
+    is_bindings_dirty = true;
   }
   void bind_texture(u32 space, u32 binding, u32 index, Resource_ID image_id,
                     rd::Image_Subresource const &_range, rd::Format format) override {
@@ -1039,6 +1221,7 @@ class DX12Binding_Table : public rd::IBinding_Table {
         res, &desc,
         {cpu_common_heap->GetCPUDescriptorHandleForHeapStart().ptr +
          dev_ctx->get_common_desc_heap()->get_element_size() * ((u64)binding_offset)});
+    is_bindings_dirty = true;
   }
   void bind_UAV_texture(u32 space, u32 binding, u32 index, Resource_ID image_id,
                         rd::Image_Subresource const &_range, rd::Format format) override {
@@ -1097,32 +1280,144 @@ class DX12Binding_Table : public rd::IBinding_Table {
         res, NULL, &desc,
         {cpu_common_heap->GetCPUDescriptorHandleForHeapStart().ptr +
          dev_ctx->get_sampler_desc_heap()->get_element_size() * ((u64)binding_offset)});
+    is_bindings_dirty = true;
   }
   void release() override {
     if (signature->num_desc_common) {
-      dev_ctx->get_common_desc_heap()->free((u32)common_heap_offset, signature->num_desc_common);
+      dev_ctx->deferred_release_desc_range(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                                           (u32)common_heap_offset, signature->num_desc_common);
     }
     if (signature->num_desc_samplers) {
-      dev_ctx->get_sampler_desc_heap()->free((u32)sampler_heap_offset,
-                                             signature->num_desc_samplers);
+      dev_ctx->deferred_release_desc_range(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
+                                           (u32)sampler_heap_offset, signature->num_desc_samplers);
     }
     delete this;
   }
-  void clear_bindings() override { TRAP; }
 };
 
 rd::IBinding_Table *DX12Device::create_binding_table(Resource_ID signature) {
-  std::lock_guard<std::mutex> _lock(mutex);
+  SCOPED_LOCK;
   return DX12Binding_Table::create(this, signature_table.load(signature.id));
 }
+class RenderPass {
+  private:
+  DX12Device *                dev_ctx    = NULL;
+  u32                         rtv_offset = -1;
+  i32                         dsv_offset = -1;
+  rd::Render_Pass_Create_Info info;
 
+  D3D12_CPU_DESCRIPTOR_HANDLE get_rtv_handle(u32 i) {
+    return {dev_ctx->get_rtv_desc_heap()->get_heap()->GetCPUDescriptorHandleForHeapStart().ptr +
+            (rtv_offset + i) * dev_ctx->get_rtv_desc_heap()->get_element_size()};
+  }
+
+  D3D12_CPU_DESCRIPTOR_HANDLE get_dsv_handle() {
+    return {dev_ctx->get_dsv_desc_heap()->get_heap()->GetCPUDescriptorHandleForHeapStart().ptr +
+            rtv_offset * dev_ctx->get_dsv_desc_heap()->get_element_size()};
+  }
+
+  public:
+  RenderPass(DX12Device *dev_ctx, rd::Render_Pass_Create_Info const &info)
+      : dev_ctx(dev_ctx), info(info) {
+    if (info.rts.size) {
+      rtv_offset = dev_ctx->get_rtv_desc_heap()->allocate(info.rts.size);
+      ito(info.rts.size) {
+        ID3D12Resource *res = dev_ctx->get_resource(info.rts[i].image.id);
+        // Initialize RTVs
+        dev_ctx->get_device()->CreateRenderTargetView(res, NULL, get_rtv_handle(i));
+      }
+    }
+    if (info.depth_target.image.is_valid()) {
+      dsv_offset          = dev_ctx->get_dsv_desc_heap()->allocate(1);
+      ID3D12Resource *res = dev_ctx->get_resource(info.depth_target.image.id);
+      // Initialize DSV
+      dev_ctx->get_device()->CreateDepthStencilView(res, NULL, get_dsv_handle());
+    }
+  }
+  void bind(ComPtr<ID3D12GraphicsCommandList> cmd) {
+    InlineArray<D3D12_CPU_DESCRIPTOR_HANDLE, 8> rtvs{};
+    ito(info.rts.size) rtvs.push(get_rtv_handle(i));
+    if (dsv_offset >= 0) {
+      D3D12_CPU_DESCRIPTOR_HANDLE dsv = get_dsv_handle();
+      cmd->OMSetRenderTargets(rtvs.size, rtvs.size ? rtvs.elems : NULL, FALSE, &dsv);
+    } else {
+      cmd->OMSetRenderTargets(rtvs.size, rtvs.size ? rtvs.elems : NULL, FALSE, NULL);
+    }
+    ito(info.rts.size) {
+      ASSERT_ALWAYS(info.rts[i].format == rd::Format::NATIVE);
+      ASSERT_ALWAYS(info.rts[i].layer == 0);
+      ASSERT_ALWAYS(info.rts[i].level == 0);
+      D3D12_RESOURCE_BARRIER bar{};
+      bar.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      bar.Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+      bar.Transition.pResource   = dev_ctx->get_resource(info.rts[i].image.id);
+      bar.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+      bar.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+      bar.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
+      cmd->ResourceBarrier(1, &bar);
+
+      if (info.rts[i].clear_color.clear) {
+        cmd->ClearRenderTargetView(get_rtv_handle(i), (float *)&info.rts[i].clear_color.r, 0, NULL);
+      }
+    }
+    if (info.depth_target.image.is_valid()) {
+      ASSERT_ALWAYS(info.depth_target.format == rd::Format::NATIVE);
+      ASSERT_ALWAYS(info.depth_target.layer == 0);
+      ASSERT_ALWAYS(info.depth_target.level == 0);
+      D3D12_RESOURCE_BARRIER bar{};
+      bar.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      bar.Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+      bar.Transition.pResource   = dev_ctx->get_resource(info.depth_target.image.id);
+      bar.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+      bar.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+      bar.Transition.StateAfter  = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+      cmd->ResourceBarrier(1, &bar);
+      cmd->ClearDepthStencilView(get_dsv_handle(),
+                                 D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
+                                 info.depth_target.clear_depth.d, 0, 0, NULL);
+    }
+  }
+  void unbind(ComPtr<ID3D12GraphicsCommandList> cmd) {
+    ito(info.rts.size) {
+      D3D12_RESOURCE_BARRIER bar{};
+      bar.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      bar.Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+      bar.Transition.pResource   = dev_ctx->get_resource(info.rts[i].image.id);
+      bar.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+      bar.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+      bar.Transition.StateAfter  = D3D12_RESOURCE_STATE_COMMON;
+      cmd->ResourceBarrier(1, &bar);
+    }
+    if (dsv_offset >= 0) {
+      D3D12_RESOURCE_BARRIER bar{};
+      bar.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      bar.Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+      bar.Transition.pResource   = dev_ctx->get_resource(info.depth_target.image.id);
+      bar.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+      bar.Transition.StateBefore = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+      bar.Transition.StateAfter  = D3D12_RESOURCE_STATE_COMMON;
+      cmd->ResourceBarrier(1, &bar);
+    }
+  }
+
+  void release() {
+    if (rtv_offset >= 0)
+      dev_ctx->deferred_release_desc_range(D3D12_DESCRIPTOR_HEAP_TYPE_RTV, rtv_offset,
+                                           info.rts.size);
+    if (dsv_offset >= 0)
+      dev_ctx->deferred_release_desc_range(D3D12_DESCRIPTOR_HEAP_TYPE_DSV, dsv_offset,
+                                           info.rts.size);
+    delete this;
+  }
+};
 class DX12Context : public rd::ICtx {
   ComPtr<ID3D12GraphicsCommandList>              cmd;
   rd::Pass_t                                     type;
   DX12Device *                                   dev_ctx     = NULL;
   DX12Binding_Table *                            cur_binding = NULL;
   Hash_Table<Resource_ID, D3D12_RESOURCE_STATES> resource_state_tracker{};
-  ~DX12Context() = default;
+  RenderPass *                                   render_pass = NULL;
+  ~DX12Context()                                             = default;
   // Synchronization
   void _image_barrier(Resource_ID image_id, D3D12_RESOURCE_STATES new_state) {
     InlineArray<D3D12_RESOURCE_BARRIER, 0x10> bars{};
@@ -1138,20 +1433,20 @@ class DX12Context : public rd::ICtx {
 
     u32 num_subresources = desc.DepthOrArraySize * desc.MipLevels;
     if (desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D) num_subresources = desc.MipLevels;
-    ito(num_subresources) {
-      D3D12_RESOURCE_BARRIER bar{};
-      bar.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-      bar.Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-      bar.Transition.pResource   = res;
-      bar.Transition.Subresource = i;
-      bar.Transition.StateBefore = StateBefore;
-      bar.Transition.StateAfter  = StateAfter;
-      if (bar.Transition.StateAfter == bar.Transition.StateBefore) {
-        bar.Type          = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-        bar.UAV.pResource = dev_ctx->get_resource(image_id.id);
-      }
-      bars.push(bar);
+    // ito(num_subresources) {
+    D3D12_RESOURCE_BARRIER bar{};
+    bar.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    bar.Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    bar.Transition.pResource   = res;
+    bar.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    bar.Transition.StateBefore = StateBefore;
+    bar.Transition.StateAfter  = StateAfter;
+    if (bar.Transition.StateAfter == bar.Transition.StateBefore) {
+      bar.Type          = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+      bar.UAV.pResource = dev_ctx->get_resource(image_id.id);
     }
+    bars.push(bar);
+    //}
     cmd->ResourceBarrier(bars.size, &bars[0]);
   }
   void _buffer_barrier(Resource_ID buf_id, D3D12_RESOURCE_STATES new_state) {
@@ -1159,7 +1454,7 @@ class DX12Context : public rd::ICtx {
     bar.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     bar.Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
     bar.Transition.pResource   = dev_ctx->get_resource(buf_id.id);
-    bar.Transition.Subresource = 0;
+    bar.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     if (resource_state_tracker.contains(buf_id)) {
     } else {
       resource_state_tracker.insert(buf_id, get_default_state(bar.Transition.pResource));
@@ -1185,20 +1480,29 @@ class DX12Context : public rd::ICtx {
         TRAP;
       }
     });
+    if (cur_binding) cur_binding->unbind();
     resource_state_tracker.release();
     delete this;
   }
-  DX12Context(DX12Device *device, rd::Pass_t type) : type(type), dev_ctx(device) {
+  DX12Context(DX12Device *device, rd::Pass_t type, RenderPass *render_pass = NULL)
+      : type(type), dev_ctx(device), render_pass(render_pass) {
     cmd = device->alloc_graphics_cmd();
     device->bind_desc_heaps(cmd.Get());
   }
   void bind_table(rd::IBinding_Table *table) override { //
+    if (cur_binding) cur_binding->unbind();
     cur_binding = (DX12Binding_Table *)table;
   }
   ComPtr<ID3D12GraphicsCommandList> get_cmd() { return cmd; }
   // Graphics
-  void start_render_pass() override { TRAP; }
-  void end_render_pass() override { TRAP; }
+  void start_render_pass() override {
+    ASSERT_DEBUG(render_pass && type == rd::Pass_t::RENDER);
+    render_pass->bind(cmd);
+  }
+  void end_render_pass() override {
+    ASSERT_DEBUG(render_pass && type == rd::Pass_t::RENDER);
+    render_pass->unbind(cmd);
+  }
   void bind_graphics_pso(Resource_ID pso) override { TRAP; }
   void draw_indexed(u32 indices, u32 instances, u32 first_index, u32 first_instance,
                     i32 vertex_offset) override {
@@ -1227,8 +1531,8 @@ class DX12Context : public rd::ICtx {
   }
   void dispatch(u32 dim_x, u32 dim_y, u32 dim_z) override {
     ASSERT_DEBUG(cur_binding);
-    cur_binding->flush_bindings(cmd);
-    cur_binding->flush_push_constants(cmd);
+    cur_binding->bind(cmd, type);
+    cur_binding->flush_push_constants(cmd, type);
     cmd->Dispatch(dim_x, dim_y, dim_z);
   }
   // Memory movement
@@ -1357,17 +1661,113 @@ class DX12Context : public rd::ICtx {
 };
 
 rd::ICtx *DX12Device::start_compute_pass() {
-  std::lock_guard<std::mutex> _lock(mutex);
+  SCOPED_LOCK;
   return new DX12Context(this, rd::Pass_t::COMPUTE);
 }
 void DX12Device::end_compute_pass(rd::ICtx *ctx) {
-  std::lock_guard<std::mutex>       _lock(mutex);
+  SCOPED_LOCK;
   DX12Context *                     d3dctx = ((DX12Context *)ctx);
   ComPtr<ID3D12GraphicsCommandList> cmd    = d3dctx->get_cmd();
   ID3D12CommandList *               icmd   = cmd.Get();
   d3dctx->release();
-  cmd->Close();
+  DX_ASSERT_OK(cmd->Close());
   cmd_queue->ExecuteCommandLists(1, &icmd);
+}
+Resource_ID DX12Device::create_render_pass(rd::Render_Pass_Create_Info const &info) {
+  SCOPED_LOCK;
+  return {renderpass_table.push(new RenderPass(this, info)), (u32)Resource_Type::RENDER_PASS};
+}
+rd::ICtx *DX12Device::start_render_pass(Resource_ID render_pass) {
+  SCOPED_LOCK;
+  RenderPass *rp = renderpass_table.load(render_pass.id);
+  return new DX12Context(this, rd::Pass_t::RENDER, rp);
+}
+void DX12Device::end_render_pass(rd::ICtx *ctx) {
+  SCOPED_LOCK;
+  DX12Context *                     d3dctx = ((DX12Context *)ctx);
+  ComPtr<ID3D12GraphicsCommandList> cmd    = d3dctx->get_cmd();
+  ID3D12CommandList *               icmd   = cmd.Get();
+  d3dctx->release();
+  DX_ASSERT_OK(cmd->Close());
+  cmd_queue->ExecuteCommandLists(1, &icmd);
+}
+void DX12Device::deferred_desc_range_release_iteration() {
+  AutoArray<Deferred_Descriptor_Range_Release> new_deferred_desc_range_release;
+  new_deferred_desc_range_release.reserve(deferred_desc_range_release.size);
+  ito(deferred_desc_range_release.size) {
+    auto item = deferred_desc_range_release[i];
+    item.timeout -= 1;
+    if (item.timeout == 0) {
+      switch (item.type) {
+      case D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV: {
+        common_desc_heap->free(item.offset, item.size);
+        break;
+      }
+      case D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER: {
+        sampler_desc_heap->free(item.offset, item.size);
+        break;
+      }
+      case D3D12_DESCRIPTOR_HEAP_TYPE_RTV: {
+        rtv_desc_heap->free(item.offset, item.size);
+        break;
+      }
+      case D3D12_DESCRIPTOR_HEAP_TYPE_DSV: {
+        dsv_desc_heap->free(item.offset, item.size);
+        break;
+      }
+      default: {
+        TRAP;
+      }
+      }
+    } else {
+      new_deferred_desc_range_release.push(item);
+    }
+  }
+  deferred_desc_range_release.reset();
+  ito(new_deferred_desc_range_release.size) {
+    deferred_desc_range_release.push(new_deferred_desc_range_release[i]);
+  }
+}
+void DX12Device::deferred_resource_release_iteration() {
+  AutoArray<Pair<Resource_ID, i32>> new_deferred_release;
+  ito(deferred_release.size) {
+    auto item = deferred_release[i];
+    item.second -= 1;
+    if (item.second == 0) {
+      if (item.first.type == (u32)Resource_Type::BUFFER ||
+          item.first.type == (u32)Resource_Type::TEXTURE) {
+        ID3D12Resource *res = resource_table.load(item.first.id);
+        res->Release();
+        resource_table.free(item.first.id);
+      } else if (item.first.type == (u32)Resource_Type::RENDER_PASS) {
+        auto render_pass = renderpass_table.load(item.first.id);
+        render_pass->release();
+        renderpass_table.free(item.first.id);
+      } else if (item.first.type == (u32)Resource_Type::PSO) {
+        auto pso = pso_table.load(item.first.id);
+        pso->Release();
+        pso_table.free(item.first.id);
+      } else if (item.first.type == (u32)Resource_Type::SIGNATURE) {
+        auto sig = signature_table.load(item.first.id);
+        sig->release();
+        signature_table.free(item.first.id);
+      } else if (item.first.type == (u32)Resource_Type::SHADER) {
+        auto sig = shader_table.load(item.first.id);
+        sig->Release();
+        shader_table.free(item.first.id);
+      } else if (item.first.type == (u32)Resource_Type::SAMPLER) {
+        auto s = sampler_table.load(item.first.id);
+        delete s;
+        sampler_table.free(item.first.id);
+      } else {
+        TRAP;
+      }
+    } else {
+      new_deferred_release.push(item);
+    }
+  }
+  deferred_release.reset();
+  ito(new_deferred_release.size) { deferred_release.push(new_deferred_release[i]); }
 }
 } // namespace
 

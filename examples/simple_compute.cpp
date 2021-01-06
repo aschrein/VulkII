@@ -216,9 +216,6 @@ void main(uint3 tid : SV_DispatchThreadID)
 int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
-  // rd::IDevice *factory = rd::create_dx12(NULL);
-
-  //
   {
     auto launch_tests = [](rd::IDevice *factory) {
       factory->start_frame();
@@ -228,16 +225,14 @@ int main(int argc, char *argv[]) {
         factory->release();
       });
       test_mipmap_generation(factory);
+      test_buffers(factory);
       RenderDoc_CTX::end();
-      // test_buffers(factory);
     };
     // fprintf(stdout, "Testing Vulkan backend\n");
     // launch_tests(rd::create_vulkan(NULL));
     fprintf(stdout, "Testing Dx12 backend\n");
     launch_tests(rd::create_dx12(NULL));
   }
-  // factory->release_resource(res_id);
-  //
 
   return 0;
 }

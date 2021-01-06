@@ -58,10 +58,6 @@ enum class Format : u32 {
   RGBA8_SNORM,
   RGBA8_SRGBA,
   RGBA8_UINT,
-  // RGB8_UNORM,
-  // RGB8_SNORM,
-  // RGB8_SRGBA,
-  // RGB8_UINT,
   RGBA32_FLOAT,
   RGB32_FLOAT,
   RG32_FLOAT,
@@ -85,10 +81,6 @@ static inline char const *format_to_cstr(Format format) {
       case Format::RGBA8_SNORM : return "RGBA8_SNORM";
       case Format::RGBA8_SRGBA : return "RGBA8_SRGBA";
       case Format::RGBA8_UINT  : return "RGBA8_UINT";
-      //case Format::RGB8_UNORM  : return "RGB8_UNORM";
-      //case Format::RGB8_SNORM  : return "RGB8_SNORM";
-      //case Format::RGB8_SRGBA  : return "RGB8_SRGBA";
-      //case Format::RGB8_UINT   : return "RGB8_UINT";
       case Format::RGBA32_FLOAT: return "RGBA32_FLOAT";
       case Format::RGB32_FLOAT : return "RGB32_FLOAT";
       case Format::RG32_FLOAT  : return "RG32_FLOAT";
@@ -98,6 +90,13 @@ static inline char const *format_to_cstr(Format format) {
       case Format::D32_FLOAT   : return "D32_FLOAT";
   // clang-format on
   default: TRAP;
+  }
+}
+
+static inline bool is_depth_format(Format format) {
+  switch (format) {
+  case Format::D32_FLOAT: return true;
+  default: return false;
   }
 }
 
@@ -336,7 +335,8 @@ struct Image_Subresource {
 };
 ASSERT_ISPOD(Image_Subresource);
 struct Image_Copy {
-  u32               buffer_row_pitch;
+  u32 buffer_row_pitch;
+  // u32               buffer_slice_pitch;
   u32               layer;
   u32               level;
   u32               offset_x;
@@ -377,16 +377,16 @@ struct RT_View {
   Format      format;
   u32         layer;
   u32         level;
-  Clear_Color clear_color;
-  Clear_Depth clear_depth;
-  void        reset() { MEMZERO(*this); }
+  union {
+    Clear_Color clear_color;
+    Clear_Depth clear_depth;
+  };
+  void reset() { MEMZERO(*this); }
 };
 
 ASSERT_ISPOD(RT_View);
 
 struct Render_Pass_Create_Info {
-  u32                        width;
-  u32                        height;
   InlineArray<RT_View, 0x10> rts;
   RT_View                    depth_target;
   void                       reset() { MEMZERO(*this); }
@@ -461,6 +461,7 @@ struct Graphics_Pipeline_State {
   Blend_State    blend_states[8];
   MS_State       ms_state;
 
+  // Utility functions.
   void IA_set_topology(Primitive topology) { this->topology = topology; }
   void IA_set_vertex_binding(u32 index, u32 stride, Input_Rate rate) {
     num_vs_bindings           = MAX(num_vs_bindings, index + 1);
@@ -496,11 +497,15 @@ static inline u64 hash_of(Graphics_Pipeline_State const &state) {
   return hash_of(string_ref{(char const *)&state, sizeof(state)});
 }
 
+// Single threaded entity to manage descriptor binding. Semi-lightweight, not much allocations going
+// on.
 class IBinding_Table {
   public:
+  // size=0 means whole size.
   virtual void bind_cbuffer(u32 space, u32 binding, Resource_ID buf_id, size_t offset,
-                            size_t size)                                       = 0;
-  virtual void bind_sampler(u32 space, u32 binding, Resource_ID sampler_id)    = 0;
+                            size_t size)                                    = 0;
+  virtual void bind_sampler(u32 space, u32 binding, Resource_ID sampler_id) = 0;
+  // ByteAddressBuffer. size=0 means whole size.
   virtual void bind_UAV_buffer(u32 space, u32 binding, Resource_ID buf_id, size_t offset,
                                size_t size)                                    = 0;
   virtual void bind_texture(u32 space, u32 binding, u32 index, Resource_ID image_id,
@@ -508,30 +513,39 @@ class IBinding_Table {
   virtual void bind_UAV_texture(u32 space, u32 binding, u32 index, Resource_ID image_id,
                                 Image_Subresource const &range, Format format) = 0;
   virtual void push_constants(void const *data, size_t offset, size_t size)    = 0;
-  virtual void release()                                                       = 0;
-  virtual void clear_bindings()                                                = 0;
+  // The pointer for this object is invalid after this call
+  virtual void release() = 0;
 };
-
+// Multi threaded entity, accesses are wrapped in synchronization primitives internally. Used to
+// create resources. start_frame/end_frame needed to switch between swap chain images and also to
+// control deferred resource release.
 class IDevice {
   public:
-  static constexpr u32 BUFFER_ALIGNMENT             = 0x100;
-  static constexpr u32 BUFFER_COPY_ALIGNMENT        = 512;
+  // Uniform buffer offset alignment
+  static constexpr u32 BUFFER_ALIGNMENT      = 0x100;
+  static constexpr u32 BUFFER_COPY_ALIGNMENT = 512;
+  // For copy_buffer_to_image and copy_image_to_buffer the pitch must be aligned up to this value.
   static constexpr u32 TEXTURE_DATA_PITCH_ALIGNMENT = 256;
   static size_t        align_up(size_t size, size_t alignment = BUFFER_ALIGNMENT) {
     return (size + alignment - 1) & ~(alignment - 1);
   }
-  static size_t align_down(size_t size) { return (size) & ~(BUFFER_ALIGNMENT - 1); }
+  static size_t align_down(size_t size, size_t alignment = BUFFER_ALIGNMENT) {
+    return (size) & ~(alignment - 1);
+  }
 
-  virtual Resource_ID     create_image(Image_Create_Info info)   = 0;
-  virtual Resource_ID     create_buffer(Buffer_Create_Info info) = 0;
-  virtual Resource_ID     create_shader(Stage_t type, string_ref text,
-                                        Pair<string_ref, string_ref> *defines, size_t num_defines) = 0;
-  virtual Resource_ID     create_sampler(Sampler_Create_Info const &info)           = 0;
+  virtual Resource_ID create_image(Image_Create_Info info)                                     = 0;
+  virtual Resource_ID create_buffer(Buffer_Create_Info info)                                   = 0;
+  virtual Resource_ID create_shader(Stage_t type, string_ref text,
+                                    Pair<string_ref, string_ref> *defines, size_t num_defines) = 0;
+  virtual Resource_ID create_sampler(Sampler_Create_Info const &info)                          = 0;
+  // Deferred release. Must call new_frame 3-6 times for the actual release to make sure it's not
+  // used by the GPU.
   virtual void            release_resource(Resource_ID id)                          = 0;
   virtual Resource_ID     create_event()                                            = 0;
   virtual Resource_ID     create_timestamp()                                        = 0;
   virtual Resource_ID     get_swapchain_image()                                     = 0;
   virtual Image2D_Info    get_swapchain_image_info()                                = 0;
+  virtual u32             get_num_swapchain_images()                                = 0;
   virtual Image_Info      get_image_info(Resource_ID res_id)                        = 0;
   virtual void *          map_buffer(Resource_ID id)                                = 0;
   virtual void            unmap_buffer(Resource_ID id)                              = 0;
@@ -551,10 +565,13 @@ class IDevice {
   virtual bool            get_event_state(Resource_ID id)                           = 0;
   virtual Impl_t          getImplType()                                             = 0;
   virtual void            release()                                                 = 0;
-  virtual void            start_frame()                                             = 0;
-  virtual void            end_frame()                                               = 0;
+  // Does the deferred release iteration and increments the swap chain image if there's any.
+  virtual void start_frame() = 0;
+  virtual void end_frame()   = 0;
 };
-
+// Single threaded entity.
+// Used to record commands to command list/ buffer and later submit it via
+// end_compute_pass/end_render_pass.
 class ICtx {
   public:
   virtual void bind_table(IBinding_Table *table) = 0;
@@ -599,7 +616,11 @@ class ICtx {
 };
 
 IDevice *create_vulkan(void *window_handler);
+#ifdef WIN32
 IDevice *create_dx12(void *window_handler);
+#else
+static inline IDevice *create_dx12(void *window_handler) { return NULL; }
+#endif
 
 } // namespace rd
 

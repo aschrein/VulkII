@@ -1,5 +1,7 @@
-
-#include "marching_cubes/marching_cubes.h"
+#define UTILS_TL_IMPL
+#define SCRIPT_IMPL
+#define UTILS_RENDERDOC
+//#include "marching_cubes/marching_cubes.h"
 #include "rendering.hpp"
 #include "rendering_utils.hpp"
 
@@ -11,6 +13,7 @@
 #include <mutex>
 #include <thread>
 
+#if 0
 struct RenderingContext {
   rd::IDevice *factory     = NULL;
   Config *      config      = NULL;
@@ -476,11 +479,104 @@ class Event_Consumer : public IGUIApp {
     gbuffer_pass.render(rctx);
   }
 };
-
+#endif
 int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
+  static int init = [] { return SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS); }();
 
-  IGUIApp::start<Event_Consumer>(rd::Impl_t::VULKAN);
+  auto window_loop = [](rd::Impl_t impl) {
+    SDL_Window *window = SDL_CreateWindow("VulkII", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                                          512, 512, SDL_WINDOW_RESIZABLE);
+    void *      handle = NULL;
+#ifdef WIN32
+    SDL_SysWMinfo wmInfo;
+    SDL_VERSION(&wmInfo.version);
+    SDL_GetWindowWMInfo(window, &wmInfo);
+    HWND hwnd = wmInfo.info.win.window;
+    handle    = (void *)hwnd;
+#else
+    SDL_SysWMinfo wmInfo;
+    SDL_VERSION(&wmInfo.version);
+    SDL_GetWindowWMInfo(window, &wmInfo);
+    Window            hwnd       = wmInfo.info.x11.window;
+    xcb_connection_t *connection = XGetXCBConnection(wmInfo.info.x11.display);
+    Ptr2              ptrs{(void *)hwnd, (void *)connection};
+    handle = (void *)&ptrs;
+#endif
+    rd::IDevice *factory = NULL;
+    if (impl == rd::Impl_t::VULKAN) {
+      factory = rd::create_vulkan(handle);
+    } else if (impl == rd::Impl_t::DX12) {
+      factory = rd::create_dx12(handle);
+    } else {
+      TRAP;
+    }
+    if (factory == NULL) return;
+    factory->start_frame();
+    factory->end_frame();
+
+    constexpr u32 MAX_FRAMES = 0x10;
+    u32           NUM_FRAMES = factory->get_num_swapchain_images();
+    Resource_ID   render_passes[MAX_FRAMES]{};
+    defer(ito(NUM_FRAMES) if (render_passes[i].is_valid())
+              factory->release_resource(render_passes[i]););
+    u32  frame_id = 0;
+    u32  width = 0, height = 0;
+    u32  window_id    = SDL_GetWindowID(window);
+    bool focus_events = false;
+    while (true) {
+      SDL_Event event;
+      while (SDL_PollEvent(&event)) {
+        if (focus_events) {
+          if (event.type == SDL_QUIT) {
+            return;
+          }
+        }
+        if (event.type == SDL_WINDOWEVENT) {
+          if (event.window.windowID != window_id) continue;
+          if (event.window.event == SDL_WINDOWEVENT_ENTER) {
+            focus_events = true;
+          } else if (event.window.event == SDL_WINDOWEVENT_LEAVE) {
+            focus_events = false;
+          } else if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
+          }
+        }
+      }
+      factory->start_frame();
+      rd::Image2D_Info scinfo = factory->get_swapchain_image_info();
+      if (width != scinfo.width || height != scinfo.height) {
+        width  = scinfo.width;
+        height = scinfo.height;
+        ito(NUM_FRAMES) {
+          if (render_passes[i].is_valid()) factory->release_resource(render_passes[i]);
+          render_passes[i] = {};
+        }
+      }
+      if (render_passes[frame_id].is_null()) {
+        rd::Render_Pass_Create_Info info;
+        MEMZERO(info);
+        rd::RT_View rt0;
+        MEMZERO(rt0);
+        rt0.image             = factory->get_swapchain_image();
+        rt0.format            = rd::Format::NATIVE;
+        rt0.clear_color.clear = true;
+        rt0.clear_color.g     = 1.0f;
+        info.rts.push(rt0);
+        render_passes[frame_id] = factory->create_render_pass(info);
+      }
+      rd::ICtx *ctx = factory->start_render_pass(render_passes[frame_id]);
+      ctx->start_render_pass();
+      ctx->end_render_pass();
+      factory->end_render_pass(ctx);
+      factory->end_frame();
+      frame_id = (frame_id + 1) % NUM_FRAMES;
+    }
+  };
+  std::thread vulkan_thread = std::thread([window_loop] { window_loop(rd::Impl_t::VULKAN); });
+  std::thread dx12_thread   = std::thread([window_loop] { window_loop(rd::Impl_t::DX12); });
+  vulkan_thread.join();
+  dx12_thread.join();
+  // IGUIApp::start<Event_Consumer>(rd::Impl_t::VULKAN);
   return 0;
 }
