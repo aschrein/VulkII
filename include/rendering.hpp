@@ -591,8 +591,6 @@ class ICtx {
   virtual void set_viewport(float x, float y, float width, float height, float mindepth,
                             float maxdepth)                     = 0;
   virtual void set_scissor(u32 x, u32 y, u32 width, u32 height) = 0;
-  virtual void RS_set_line_width(float width)                   = 0;
-  virtual void RS_set_depth_bias(float width)                   = 0;
   // Compute
   virtual void bind_compute(Resource_ID id)              = 0;
   virtual void dispatch(u32 dim_x, u32 dim_y, u32 dim_z) = 0;

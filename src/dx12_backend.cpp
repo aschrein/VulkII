@@ -31,6 +31,72 @@ using namespace Microsoft::WRL;
   } while (0)
 
 namespace {
+
+D3D12_CULL_MODE to_dx(rd::Cull_Mode op) {
+  switch (op) {
+  case rd::Cull_Mode::BACK: return D3D12_CULL_MODE_BACK;
+  case rd::Cull_Mode::FRONT: return D3D12_CULL_MODE_FRONT;
+  case rd::Cull_Mode::NONE: return D3D12_CULL_MODE_NONE;
+  default: {
+    TRAP;
+  }
+  }
+}
+D3D12_BLEND_OP to_dx(rd::Blend_OP op) {
+  switch (op) {
+  case rd::Blend_OP::ADD: return D3D12_BLEND_OP_ADD;
+  case rd::Blend_OP::MAX: return D3D12_BLEND_OP_MAX;
+  case rd::Blend_OP::MIN: return D3D12_BLEND_OP_MIN;
+  case rd::Blend_OP::REVERSE_SUBTRACT: return D3D12_BLEND_OP_REV_SUBTRACT;
+  case rd::Blend_OP::SUBTRACT: return D3D12_BLEND_OP_SUBTRACT;
+  default: {
+    TRAP;
+  }
+  }
+}
+D3D12_PRIMITIVE_TOPOLOGY_TYPE to_dx_type(rd::Primitive op) {
+  switch (op) {
+  case rd::Primitive::LINE_LIST: return D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
+  case rd::Primitive::TRIANGLE_LIST: return D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+  case rd::Primitive::TRIANGLE_STRIP: return D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+  default: {
+    TRAP;
+  }
+  }
+}
+D3D12_PRIMITIVE_TOPOLOGY to_dx(rd::Primitive op) {
+  switch (op) {
+  case rd::Primitive::LINE_LIST: return D3D_PRIMITIVE_TOPOLOGY_LINELIST;
+  case rd::Primitive::TRIANGLE_LIST: return D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+  case rd::Primitive::TRIANGLE_STRIP: return D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
+  default: {
+    TRAP;
+  }
+  }
+}
+D3D12_BLEND to_dx(rd::Blend_Factor factor) {
+  switch (factor) {
+    // clang-format off
+    case rd::Blend_Factor::ZERO                     : return D3D12_BLEND_ZERO;
+    case rd::Blend_Factor::ONE                      : return D3D12_BLEND_ONE;
+    case rd::Blend_Factor::SRC_COLOR                : return D3D12_BLEND_SRC_COLOR;
+    case rd::Blend_Factor::ONE_MINUS_SRC_COLOR      : return D3D12_BLEND_INV_SRC_COLOR;
+    case rd::Blend_Factor::DST_COLOR                : return D3D12_BLEND_DEST_COLOR;
+    case rd::Blend_Factor::ONE_MINUS_DST_COLOR      : return D3D12_BLEND_INV_DEST_COLOR;
+    case rd::Blend_Factor::SRC_ALPHA                : return D3D12_BLEND_SRC_ALPHA;
+    case rd::Blend_Factor::ONE_MINUS_SRC_ALPHA      : return D3D12_BLEND_INV_SRC_ALPHA;
+    case rd::Blend_Factor::DST_ALPHA                : return D3D12_BLEND_DEST_ALPHA;
+    case rd::Blend_Factor::ONE_MINUS_DST_ALPHA      : return D3D12_BLEND_INV_DEST_ALPHA;
+    case rd::Blend_Factor::CONSTANT_COLOR           : return D3D12_BLEND_SRC1_COLOR;
+    case rd::Blend_Factor::ONE_MINUS_CONSTANT_COLOR : return D3D12_BLEND_INV_SRC1_COLOR;
+    case rd::Blend_Factor::CONSTANT_ALPHA           : return D3D12_BLEND_SRC1_ALPHA;
+    case rd::Blend_Factor::ONE_MINUS_CONSTANT_ALPHA : return D3D12_BLEND_INV_SRC1_ALPHA;
+    // clang-format on
+  default: {
+    TRAP;
+  }
+  }
+}
 DXGI_FORMAT to_dx(rd::Format format) {
   // clang-format off
   switch (format) {
@@ -195,7 +261,8 @@ enum class Resource_Type : u32 {
   SIGNATURE,
   SHADER,
   SAMPLER,
-  PSO,
+  COMPUTE_PSO,
+  GRAPHICS_PSO,
   RENDER_PASS,
 };
 
@@ -266,6 +333,10 @@ struct DX12Binding_Signature {
                                        rd::Binding_Table_Create_Info const &table_info);
 };
 class RenderPass;
+struct GraphicsPSOWrapper {
+  ID3D12PipelineState *  pso      = NULL;
+  D3D_PRIMITIVE_TOPOLOGY topology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
+};
 class DX12Device : public rd::IDevice {
   static constexpr u32 NUM_BACK_BUFFERS = 3;
   static constexpr u32 MAX_THREADS      = 0x100;
@@ -311,7 +382,8 @@ class DX12Device : public rd::IDevice {
   Resource_Array<ID3D12Resource *>        resource_table;
   Resource_Array<DX12Binding_Signature *> signature_table;
   Resource_Array<IDxcBlob *>              shader_table;
-  Resource_Array<ID3D12PipelineState *>   pso_table;
+  Resource_Array<ID3D12PipelineState *>   compute_pso_table;
+  Resource_Array<GraphicsPSOWrapper *>    graphics_pso_table;
   // Resource_Array<HANDLE>                  events_table;
   Resource_Array<D3D12_SAMPLER_DESC *> sampler_table;
   Resource_Array<RenderPass *>         renderpass_table;
@@ -373,7 +445,8 @@ class DX12Device : public rd::IDevice {
   }
   ID3D12Resource *       get_resource(ID id) { return resource_table.load(id); }
   DX12Binding_Signature *get_signature(ID id) { return signature_table.load(id); }
-  ID3D12PipelineState *  get_pso(ID id) { return pso_table.load(id); }
+  ID3D12PipelineState *  get_compute_pso(ID id) { return compute_pso_table.load(id); }
+  GraphicsPSOWrapper *   get_graphics_pso(ID id) { return graphics_pso_table.load(id); }
   D3D12_SAMPLER_DESC *   get_sampler(ID id) { return sampler_table.load(id); }
 
   ComPtr<ID3D12Device2>             get_device() { return device; }
@@ -557,25 +630,7 @@ class DX12Device : public rd::IDevice {
       return 0;
     }();
     ComPtr<IDxcBlobEncoding> blob;
-    // Do a little preprocessing
-    {
-      TMP_STORAGE_SCOPE;
-      // allocated 1 byte but really the rest of memory
-      char *tmp_body = (char *)tl_alloc_tmp(1);
-      sprintf(tmp_body, "%s%.*s", R"(
-#define DX12_PUSH_CONSTANTS_REGISTER register(b0, space777)
-#define u32 uint
-#define i32 int
-#define f32 float
-#define f64 double
-#define float2_splat(x)  float2(x, x)
-#define float3_splat(x)  float3(x, x, x)
-#define float4_splat(x)  float4(x, x, x, x)
-      )",
-              STRF(text));
-      DX_ASSERT_OK(
-          library->CreateBlobWithEncodingFromPinned(tmp_body, (u32)strlen(tmp_body), 0, &blob));
-    }
+
     LPCWSTR profile = NULL;
     if (type == rd::Stage_t::VERTEX)
       profile = L"vs_6_2";
@@ -600,14 +655,31 @@ class DX12Device : public rd::IDevice {
     defer(dxc_defines.release());
     WCHAR const *               options[] = {L"-Wignored-attributes", L"UNUSED"};
     ComPtr<IDxcOperationResult> result;
-    HRESULT                     hr = compiler->Compile(blob.Get(),     // pSource
-                                   L"shader.hlsl", // pSourceName
-                                   L"main",        // pEntryPoint
-                                   profile,        // pTargetProfile
-                                   options, (u32)ARRAYSIZE(options) - 1, // pArguments, argCount
+    // Do a little preprocessing
+    // allocated 1 byte but really the rest of memory
+    char *tmp_body = (char *)tl_alloc_tmp(1);
+    sprintf(tmp_body, "%s%.*s", R"(
+#define DX12_PUSH_CONSTANTS_REGISTER register(b0, space777)
+#define u32 uint
+#define i32 int
+#define f32 float
+#define f64 double
+#define float2_splat(x)  float2(x, x)
+#define float3_splat(x)  float3(x, x, x)
+#define float4_splat(x)  float4(x, x, x, x)
+      )",
+            STRF(text));
+    DX_ASSERT_OK(
+        library->CreateBlobWithEncodingFromPinned(tmp_body, (u32)strlen(tmp_body), 0, &blob));
+
+    HRESULT hr = compiler->Compile(blob.Get(),                             // pSource
+                                   L"shader.hlsl",                         // pSourceName
+                                   L"main",                                // pEntryPoint
+                                   profile,                                // pTargetProfile
+                                   options, (u32)ARRAYSIZE(options) - 1,   // pArguments, argCount
                                    dxc_defines.ptr, (u32)dxc_defines.size, // pDefines, defineCount
-                                   NULL,     // pIncludeHandler
-                                   &result); // ppResult
+                                   NULL,                                   // pIncludeHandler
+                                   &result);                               // ppResult
     if (SUCCEEDED(hr)) result->GetStatus(&hr);
     if (FAILED(hr)) {
       if (result) {
@@ -763,13 +835,10 @@ class DX12Device : public rd::IDevice {
     desc.Flags               = D3D12_PIPELINE_STATE_FLAG_NONE;
     ID3D12PipelineState *pso = NULL;
     DX_ASSERT_OK(device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&pso)));
-    return {pso_table.push(pso), (u32)Resource_Type::PSO};
+    return {compute_pso_table.push(pso), (u32)Resource_Type::COMPUTE_PSO};
   }
   Resource_ID create_graphics_pso(Resource_ID signature, Resource_ID render_pass,
-                                  rd::Graphics_Pipeline_State const &) override {
-    SCOPED_LOCK;
-    TRAP;
-  }
+                                  rd::Graphics_Pipeline_State const &) override;
   Resource_ID create_signature(rd::Binding_Table_Create_Info const &info) override {
     return {signature_table.push(DX12Binding_Signature::create(this, info)),
             (u32)Resource_Type::SIGNATURE};
@@ -1317,6 +1386,7 @@ class RenderPass {
   }
 
   public:
+  rd::Render_Pass_Create_Info const &get_info() { return info; }
   RenderPass(DX12Device *dev_ctx, rd::Render_Pass_Create_Info const &info)
       : dev_ctx(dev_ctx), info(info) {
     if (info.rts.size) {
@@ -1503,30 +1573,50 @@ class DX12Context : public rd::ICtx {
     ASSERT_DEBUG(render_pass && type == rd::Pass_t::RENDER);
     render_pass->unbind(cmd);
   }
-  void bind_graphics_pso(Resource_ID pso) override { TRAP; }
+  void bind_graphics_pso(Resource_ID pso) override {
+    GraphicsPSOWrapper *wpso = dev_ctx->get_graphics_pso(pso.id);
+    cmd->IASetPrimitiveTopology(wpso->topology);
+    cmd->SetPipelineState(wpso->pso);
+  }
   void draw_indexed(u32 indices, u32 instances, u32 first_index, u32 first_instance,
                     i32 vertex_offset) override {
     TRAP;
   }
   void bind_index_buffer(Resource_ID id, u32 offset, rd::Index_t format) override { TRAP; }
   void bind_vertex_buffer(u32 index, Resource_ID buffer, size_t offset) override { TRAP; }
-  void draw(u32 vertices, u32 instances, u32 first_vertex, u32 first_instance) override { TRAP; }
+  void draw(u32 vertices, u32 instances, u32 first_vertex, u32 first_instance) override {
+    ASSERT_DEBUG(cur_binding);
+    cur_binding->bind(cmd, type);
+    cur_binding->flush_push_constants(cmd, type);
+    cmd->DrawInstanced(vertices, instances, first_vertex, first_instance);
+  }
   void multi_draw_indexed_indirect(Resource_ID arg_buf_id, u32 arg_buf_offset,
                                    Resource_ID cnt_buf_id, u32 cnt_buf_offset, u32 max_count,
                                    u32 stride) override {
     TRAP;
   }
-
   void set_viewport(float x, float y, float width, float height, float mindepth,
                     float maxdepth) override {
-    TRAP;
+    D3D12_VIEWPORT vp{};
+    vp.TopLeftX = x;
+    vp.TopLeftY = y;
+    vp.Width    = width;
+    vp.Height   = height;
+    vp.MinDepth = mindepth;
+    vp.MaxDepth = maxdepth;
+    cmd->RSSetViewports(1, &vp);
   }
-  void set_scissor(u32 x, u32 y, u32 width, u32 height) override { TRAP; }
-  void RS_set_line_width(float width) override { TRAP; }
-  void RS_set_depth_bias(float width) override { TRAP; }
+  void set_scissor(u32 x, u32 y, u32 width, u32 height) override {
+    D3D12_RECT rect{};
+    rect.left   = x;
+    rect.right  = x + width;
+    rect.top    = y;
+    rect.bottom = y + height;
+    cmd->RSSetScissorRects(1, &rect);
+  }
   // Compute
   void bind_compute(Resource_ID id) override {
-    ID3D12PipelineState *pso = dev_ctx->get_pso(id.id);
+    ID3D12PipelineState *pso = dev_ctx->get_compute_pso(id.id);
     cmd->SetPipelineState(pso);
   }
   void dispatch(u32 dim_x, u32 dim_y, u32 dim_z) override {
@@ -1673,6 +1763,126 @@ void DX12Device::end_compute_pass(rd::ICtx *ctx) {
   DX_ASSERT_OK(cmd->Close());
   cmd_queue->ExecuteCommandLists(1, &icmd);
 }
+Resource_ID DX12Device::create_graphics_pso(Resource_ID signature, Resource_ID render_pass,
+                                            rd::Graphics_Pipeline_State const &state) {
+  SCOPED_LOCK;
+  RenderPass *                       rp  = renderpass_table.load(render_pass.id);
+  DX12Binding_Signature *            sig = signature_table.load(signature.id);
+  D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
+  ito(rp->get_info().rts.size) {
+    desc.BlendState.RenderTarget[i].BlendEnable    = state.blend_states[i].enabled;
+    desc.BlendState.RenderTarget[i].BlendOp        = to_dx(state.blend_states[i].color_blend_op);
+    desc.BlendState.RenderTarget[i].BlendOpAlpha   = to_dx(state.blend_states[i].alpha_blend_op);
+    desc.BlendState.RenderTarget[i].SrcBlend       = to_dx(state.blend_states[i].src_color);
+    desc.BlendState.RenderTarget[i].SrcBlendAlpha  = to_dx(state.blend_states[i].src_alpha);
+    desc.BlendState.RenderTarget[i].DestBlend      = to_dx(state.blend_states[i].dst_color);
+    desc.BlendState.RenderTarget[i].DestBlendAlpha = to_dx(state.blend_states[i].dst_alpha);
+    desc.BlendState.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    if (rp->get_info().rts[i].format == rd::Format::NATIVE) {
+      ID3D12Resource *res = get_resource(rp->get_info().rts[i].image.id);
+      desc.RTVFormats[i]  = res->GetDesc().Format;
+    } else
+      desc.RTVFormats[i] = to_dx(rp->get_info().rts[i].format);
+  }
+  if (rp->get_info().depth_target.image.is_valid()) {
+    if (rp->get_info().depth_target.format == rd::Format::NATIVE) {
+      ID3D12Resource *res = get_resource(rp->get_info().depth_target.image.id);
+      desc.DSVFormat      = res->GetDesc().Format;
+    } else
+      desc.DSVFormat = to_dx(rp->get_info().depth_target.format);
+  }
+  desc.SampleDesc.Count   = 1;
+  desc.SampleDesc.Quality = 0;
+  desc.SampleMask         = UINT_MAX;
+
+  if (state.vs.is_valid()) {
+    auto shader             = shader_table.load(state.vs.id);
+    desc.VS.BytecodeLength  = shader->GetBufferSize();
+    desc.VS.pShaderBytecode = shader->GetBufferPointer();
+  }
+
+  if (state.ps.is_valid()) {
+    auto shader             = shader_table.load(state.ps.id);
+    desc.PS.BytecodeLength  = shader->GetBufferSize();
+    desc.PS.pShaderBytecode = shader->GetBufferPointer();
+  }
+
+  desc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
+
+  desc.DepthStencilState.DepthEnable = state.ds_state.enable_depth_test;
+  desc.DepthStencilState.DepthWriteMask =
+      state.ds_state.enable_depth_write ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
+  desc.DepthStencilState.DepthFunc = to_dx(state.ds_state.cmp_op);
+  InlineArray<D3D12_INPUT_ELEMENT_DESC, 0x10> ie_desc{};
+  ito(state.num_attributes) {
+    auto const &             binding = state.bindings[state.attributes[i].binding];
+    D3D12_INPUT_ELEMENT_DESC desc{};
+    desc.AlignedByteOffset = state.attributes[i].offset;
+    desc.Format            = to_dx(state.attributes[i].format);
+    desc.InputSlot         = state.attributes[i].location;
+    desc.InputSlotClass    = binding.inputRate == rd::Input_Rate::VERTEX
+                              ? D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA
+                              : D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA;
+    desc.InstanceDataStepRate = 1;
+    switch (state.attributes[i].type) {
+    case rd::Attriute_t::POSITION: {
+      desc.SemanticIndex = 0;
+      desc.SemanticName  = "POSITION";
+      break;
+    }
+    case rd::Attriute_t::NORMAL: {
+      desc.SemanticIndex = 0;
+      desc.SemanticName  = "NORMAL";
+      break;
+    }
+    case rd::Attriute_t::BINORMAL: {
+      desc.SemanticIndex = 0;
+      desc.SemanticName  = "BINORMAL";
+      break;
+    }
+    case rd::Attriute_t::TANGENT: {
+      desc.SemanticIndex = 0;
+      desc.SemanticName  = "TANGENT";
+      break;
+    }
+    case rd::Attriute_t::TEXCOORD0:
+    case rd::Attriute_t::TEXCOORD1:
+    case rd::Attriute_t::TEXCOORD2:
+    case rd::Attriute_t::TEXCOORD3:
+    case rd::Attriute_t::TEXCOORD4:
+    case rd::Attriute_t::TEXCOORD5:
+    case rd::Attriute_t::TEXCOORD6:
+    case rd::Attriute_t::TEXCOORD7: {
+      desc.SemanticIndex = (u32)state.attributes[i].type - (u32)rd::Attriute_t::TEXCOORD0;
+      desc.SemanticName  = "TEXCOORD";
+      break;
+    }
+    }
+    ie_desc.push(desc);
+  }
+  desc.InputLayout.NumElements        = ie_desc.size;
+  desc.InputLayout.pInputElementDescs = &ie_desc[0];
+  desc.NumRenderTargets               = state.num_rts;
+  desc.PrimitiveTopologyType          = to_dx_type(state.topology);
+
+  desc.RasterizerState.AntialiasedLineEnable = false;
+  desc.RasterizerState.ConservativeRaster    = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+  desc.RasterizerState.CullMode              = to_dx(state.rs_state.cull_mode);
+  desc.RasterizerState.FillMode              = state.rs_state.polygon_mode == rd::Polygon_Mode::FILL
+                                      ? D3D12_FILL_MODE_SOLID
+                                      : D3D12_FILL_MODE_WIREFRAME;
+  desc.RasterizerState.FrontCounterClockwise =
+      state.rs_state.front_face == rd::Front_Face::CW ? true : false;
+
+  desc.pRootSignature = sig->root_signature.Get();
+
+  ID3D12PipelineState *pso = NULL;
+  DX_ASSERT_OK(device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pso)));
+  GraphicsPSOWrapper *wrapper = new GraphicsPSOWrapper;
+  wrapper->topology           = to_dx(state.topology);
+  wrapper->pso                = pso;
+  return {graphics_pso_table.push(wrapper), (u32)Resource_Type::GRAPHICS_PSO};
+}
 Resource_ID DX12Device::create_render_pass(rd::Render_Pass_Create_Info const &info) {
   SCOPED_LOCK;
   return {renderpass_table.push(new RenderPass(this, info)), (u32)Resource_Type::RENDER_PASS};
@@ -1743,10 +1953,15 @@ void DX12Device::deferred_resource_release_iteration() {
         auto render_pass = renderpass_table.load(item.first.id);
         render_pass->release();
         renderpass_table.free(item.first.id);
-      } else if (item.first.type == (u32)Resource_Type::PSO) {
-        auto pso = pso_table.load(item.first.id);
+      } else if (item.first.type == (u32)Resource_Type::COMPUTE_PSO) {
+        auto pso = compute_pso_table.load(item.first.id);
         pso->Release();
-        pso_table.free(item.first.id);
+        compute_pso_table.free(item.first.id);
+      } else if (item.first.type == (u32)Resource_Type::GRAPHICS_PSO) {
+        auto pso = graphics_pso_table.load(item.first.id);
+        pso->pso->Release();
+        delete pso;
+        compute_pso_table.free(item.first.id);
       } else if (item.first.type == (u32)Resource_Type::SIGNATURE) {
         auto sig = signature_table.load(item.first.id);
         sig->release();

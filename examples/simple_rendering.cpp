@@ -519,12 +519,75 @@ int main(int argc, char *argv[]) {
     constexpr u32 MAX_FRAMES = 0x10;
     u32           NUM_FRAMES = factory->get_num_swapchain_images();
     Resource_ID   render_passes[MAX_FRAMES]{};
-    defer(ito(NUM_FRAMES) if (render_passes[i].is_valid())
-              factory->release_resource(render_passes[i]););
+    Resource_ID   psos[MAX_FRAMES]{};
+    defer(ito(NUM_FRAMES) {
+      if (render_passes[i].is_valid()) factory->release_resource(render_passes[i]);
+      if (psos[i].is_valid()) factory->release_resource(psos[i]);
+    });
     u32  frame_id = 0;
     u32  width = 0, height = 0;
     u32  window_id    = SDL_GetWindowID(window);
     bool focus_events = false;
+    struct PushConstants {
+      float angle;
+    };
+    Resource_ID signature = [=] {
+      rd::Binding_Space_Create_Info set_info{};
+      set_info.bindings.push({rd::Binding_t::TEXTURE, 1});
+      set_info.bindings.push({rd::Binding_t::SAMPLER, 1});
+      rd::Binding_Table_Create_Info table_info{};
+      table_info.spaces.push(set_info);
+      table_info.push_constants_size = sizeof(PushConstants);
+      return factory->create_signature(table_info);
+    }();
+    static string_ref            shader    = stref_s(R"(
+
+struct PushConstants
+{
+  float angle;
+};
+[[vk::push_constant]] ConstantBuffer<PushConstants> pc : DX12_PUSH_CONSTANTS_REGISTER;
+
+struct PSInput {
+  [[vk::location(0)]] float4 pos   : SV_POSITION;
+};
+
+#ifdef VERTEX
+
+PSInput main(in uint id : SV_VertexID) {
+  PSInput output;
+  static float2 pos_arr[3] = {
+    float2(-1.0f, -1.0f),
+    float2(0.0f, 1.0f),
+    float2(1.0f, -1.0f),
+  };
+  float2x2 rot = {
+    cos(pc.angle), sin(pc.angle),
+    -sin(pc.angle), cos(pc.angle)
+  };
+  output.pos   = float4(mul(rot, pos_arr[id]), 0.0f, 1.0f);
+  return output;
+}
+#endif
+#ifdef PIXEL
+
+float4 main(in PSInput input) : SV_TARGET0 {
+  return float4(1.0f, 0.0f, 0.0f, 1.0f);
+}
+#endif
+
+)");
+    Pair<string_ref, string_ref> defines[] = {
+        {stref_s("VERTEX"), {}},
+        {stref_s("PIXEL"), {}},
+    };
+    Resource_ID vs = factory->create_shader(rd::Stage_t::VERTEX, shader, &defines[0], 1);
+    Resource_ID ps = factory->create_shader(rd::Stage_t::PIXEL, shader, &defines[1], 1);
+    defer({
+      factory->release_resource(vs);
+      factory->release_resource(ps);
+    });
+    rd::IBinding_Table *table = factory->create_binding_table(signature);
     while (true) {
       SDL_Event event;
       while (SDL_PollEvent(&event)) {
@@ -550,7 +613,9 @@ int main(int argc, char *argv[]) {
         height = scinfo.height;
         ito(NUM_FRAMES) {
           if (render_passes[i].is_valid()) factory->release_resource(render_passes[i]);
+          if (psos[i].is_valid()) factory->release_resource(psos[i]);
           render_passes[i] = {};
+          psos[i]          = {};
         }
       }
       if (render_passes[frame_id].is_null()) {
@@ -564,9 +629,67 @@ int main(int argc, char *argv[]) {
         rt0.clear_color.g     = 1.0f;
         info.rts.push(rt0);
         render_passes[frame_id] = factory->create_render_pass(info);
+        rd::Graphics_Pipeline_State gfx_state{};
+        setup_default_state(gfx_state);
+        rd::Blend_State bs;
+        MEMZERO(bs);
+        bs.enabled        = true;
+        bs.alpha_blend_op = rd::Blend_OP::ADD;
+        bs.color_blend_op = rd::Blend_OP::ADD;
+        bs.dst_alpha      = rd::Blend_Factor::ONE_MINUS_SRC_ALPHA;
+        bs.src_alpha      = rd::Blend_Factor::SRC_ALPHA;
+        bs.dst_color      = rd::Blend_Factor::ONE_MINUS_SRC_ALPHA;
+        bs.src_color      = rd::Blend_Factor::SRC_ALPHA;
+        bs.color_write_mask =
+            (u32)rd::Color_Component_Bit::R_BIT | (u32)rd::Color_Component_Bit::G_BIT |
+            (u32)rd::Color_Component_Bit::B_BIT | (u32)rd::Color_Component_Bit::A_BIT;
+        gfx_state.OM_set_blend_state(0, bs);
+        gfx_state.VS_set_shader(vs);
+        gfx_state.PS_set_shader(ps);
+        /* {
+           rd::Attribute_Info info;
+           MEMZERO(info);
+           info.binding  = 0;
+           info.format   = rd::Format::RG32_FLOAT;
+           info.location = 0;
+           info.offset   = 0;
+           info.type     = rd::Attriute_t::POSITION;
+           gfx_state.IA_set_attribute(info);
+         }
+         {
+           rd::Attribute_Info info;
+           MEMZERO(info);
+           info.binding  = 0;
+           info.format   = rd::Format::RG32_FLOAT;
+           info.location = 1;
+           info.offset   = 8;
+           info.type     = rd::Attriute_t::TEXCOORD0;
+           gfx_state.IA_set_attribute(info);
+         }
+         {
+           rd::Attribute_Info info;
+           MEMZERO(info);
+           info.binding  = 0;
+           info.format   = rd::Format::RGBA8_UNORM;
+           info.location = 2;
+           info.offset   = 16;
+           info.type     = rd::Attriute_t::TEXCOORD1;
+           gfx_state.IA_set_attribute(info);
+         }*/
+        psos[frame_id] =
+            factory->create_graphics_pso(signature, render_passes[frame_id], gfx_state);
       }
       rd::ICtx *ctx = factory->start_render_pass(render_passes[frame_id]);
       ctx->start_render_pass();
+      auto         sc_info = factory->get_swapchain_image_info();
+      static float angle   = 0.0f;
+      angle += 1.0e-3f;
+      table->push_constants(&angle, 0, sizeof(angle));
+      ctx->bind_table(table);
+      ctx->set_scissor(0, 0, sc_info.width, sc_info.height);
+      ctx->set_viewport(0.0f, 0.0f, (f32)sc_info.width, (f32)sc_info.height, 0.0f, 1.0f);
+      ctx->bind_graphics_pso(psos[frame_id]);
+      ctx->draw(3, 1, 0, 0);
       ctx->end_render_pass();
       factory->end_render_pass(ctx);
       factory->end_frame();

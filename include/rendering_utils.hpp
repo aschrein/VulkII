@@ -19,8 +19,7 @@
 #include <imgui.h>
 #include <imgui/examples/imgui_impl_sdl.h>
 
-f32 max3(float3 const &a) { return MAX3(a.x, a.y, a.z); }
-#if 0
+f32         max3(float3 const &a) { return MAX3(a.x, a.y, a.z); }
 static void setup_default_state(rd::Graphics_Pipeline_State &state, u32 num_rts = 1) {
   rd::Blend_State bs;
   MEMZERO(bs);
@@ -47,6 +46,8 @@ static void setup_default_state(rd::Graphics_Pipeline_State &state, u32 num_rts 
   ms_state.num_samples = 1;
   state.MS_set_state(ms_state);
 }
+#if 0
+
 
 struct ImGui_ID {
   Resource_ID     id;
@@ -709,9 +710,9 @@ struct Mip_Builder {
     InlineArray<u32, 0x10>  mip_offsets{};
     InlineArray<u32, 0x10>  mip_pitch{};
     InlineArray<int2, 0x10> mip_sizes{};
-    u32 w          = image->width;
-    u32 h          = image->height;
-    u32 mip_offset = 0;
+    u32                     w          = image->width;
+    u32                     h          = image->height;
+    u32                     mip_offset = 0;
     while (w || h) {
       mip_offsets.push(mip_offset);
       w = MAX(1, w);
@@ -901,7 +902,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     MEMZERO(pc);
     pc.op = filter;
     switch (image->format) {
-      // clang-format off
+    // clang-format off
       case rd::Format::RGBA8_SRGBA:  {  pc.format = 0; } break;
       case rd::Format::RGBA8_UNORM:  {  pc.format = 1; } break;
       case rd::Format::RGB32_FLOAT:  {  pc.format = 2; } break;

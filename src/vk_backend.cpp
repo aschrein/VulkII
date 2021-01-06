@@ -1228,7 +1228,7 @@ struct Graphics_Pipeline_Wrapper : public Slot {
     // InlineArray<VkDescriptorSetLayout, 8> set_layouts;
     // MEMZERO(set_layouts);
     // push_constants_size = 0;
-    VkPipelineShaderStageCreateInfo stages[2];
+    VkPipelineShaderStageCreateInfo stages[2]{};
     // Shader_Reflection::Table<u32, Shader_Reflection::Table<u32, Shader_Descriptor>>
     //    merged_set_table;
     // merged_set_table.init();
@@ -1237,21 +1237,21 @@ struct Graphics_Pipeline_Wrapper : public Slot {
       VK_Binding_Table *vk_table = (VK_Binding_Table *)table[i];
       set_layouts.push(vk_table->get_set_layout());
     }*/
-    //{
-    //  vs_module = vs_shader.compile(device);
-    //  VkPipelineShaderStageCreateInfo stage;
-    //  MEMZERO(stage);
-    //  stage.sType                     = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    //  stage.stage                     = VK_SHADER_STAGE_VERTEX_BIT;
-    //  stage.module                    = vs_module;
-    //  stage.pName                     = "main";
-    //  stages[0]                       = stage;
-    //  Shader_Reflection vs_reflection = reflect_shader(vs_shader);
-    //  push_constants_size             = MAX(vs_reflection.push_constants_size,
-    //  push_constants_size);
-    //  // vs_reflection.merge_into(merged_set_table);
-    //  defer(vs_reflection.release(device));
-    //}
+    {
+      vs_module = vs_shader.compile(device);
+      VkPipelineShaderStageCreateInfo stage;
+      MEMZERO(stage);
+      stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+      stage.stage  = VK_SHADER_STAGE_VERTEX_BIT;
+      stage.module = vs_module;
+      stage.pName  = "main";
+      stages[0]    = stage;
+      // Shader_Reflection vs_reflection = reflect_shader(vs_shader);
+      // push_constants_size             = MAX(vs_reflection.push_constants_size,
+      // push_constants_size);
+      // vs_reflection.merge_into(merged_set_table);
+      // defer(vs_reflection.release(device));
+    }
     {
       ps_module = ps_shader.compile(device);
       VkPipelineShaderStageCreateInfo stage;
@@ -1309,8 +1309,8 @@ struct Graphics_Pipeline_Wrapper : public Slot {
       VkDynamicState dynamic_states[] = {
           VK_DYNAMIC_STATE_VIEWPORT,
           VK_DYNAMIC_STATE_SCISSOR,
-          VK_DYNAMIC_STATE_DEPTH_BIAS,
-          VK_DYNAMIC_STATE_LINE_WIDTH,
+        /*  VK_DYNAMIC_STATE_DEPTH_BIAS,
+          VK_DYNAMIC_STATE_LINE_WIDTH,*/
       };
       VkPipelineDynamicStateCreateInfo dy_create_info;
       MEMZERO(dy_create_info);
@@ -3406,8 +3406,8 @@ class Vk_Ctx : public rd::ICtx {
     Buffer buf = dev_ctx->buffers.read(buf_id.id);
     vkCmdUpdateBuffer(cmd, buf.buffer, offset, data_size, data);
   }
-  void RS_set_line_width(float width) override { vkCmdSetLineWidth(cmd, width); }
-  void RS_set_depth_bias(float b) override { vkCmdSetDepthBias(cmd, b, 0.0f, 0.0f); }
+  //void RS_set_line_width(float width) override { vkCmdSetLineWidth(cmd, width); }
+  //void RS_set_depth_bias(float b) override { vkCmdSetDepthBias(cmd, b, 0.0f, 0.0f); }
 }; // namespace
 
 class VkFactory : public rd::IDevice {
