@@ -617,8 +617,9 @@ class ICtx {
   virtual void fill_buffer(Resource_ID id, size_t offset, size_t size, u32 value) = 0;
   virtual void clear_image(Resource_ID id, Image_Subresource const &range,
                            Clear_Value const &cv)                                 = 0;
-  virtual void update_buffer(Resource_ID buf_id, size_t offset, void const *data,
-                             size_t data_size)                                    = 0;
+  // Unsupported by DX12?
+  //virtual void update_buffer(Resource_ID buf_id, size_t offset, void const *data,
+  //                           size_t data_size)                                    = 0;
   virtual void copy_buffer_to_image(Resource_ID buf_id, size_t buffer_offset, Resource_ID img_id,
                                     Image_Copy const &dst_info)                   = 0;
   virtual void copy_image_to_buffer(Resource_ID buf_id, size_t buffer_offset, Resource_ID img_id,

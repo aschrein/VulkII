@@ -76,7 +76,7 @@ D3D12_PRIMITIVE_TOPOLOGY to_dx(rd::Primitive op) {
 }
 D3D12_BLEND to_dx(rd::Blend_Factor factor) {
   switch (factor) {
-    // clang-format off
+  // clang-format off
     case rd::Blend_Factor::ZERO                     : return D3D12_BLEND_ZERO;
     case rd::Blend_Factor::ONE                      : return D3D12_BLEND_ONE;
     case rd::Blend_Factor::SRC_COLOR                : return D3D12_BLEND_SRC_COLOR;
@@ -374,12 +374,12 @@ class DX12Device : public rd::IDevice {
   GPU_Desc_Heap *sampler_desc_heap = NULL;
 
   struct Frame_Context {
-    UINT64                         fence_value = 0;
+    UINT64                         fence_value = (u64)-1;
     ComPtr<ID3D12CommandAllocator> cmd_allocs[MAX_THREADS];
     u32                            sc_image_id = 0;
   } frame_contexts[NUM_BACK_BUFFERS]{};
-  u32 cur_ctx_id = 0;
-
+  u32  cur_ctx_id = 0;
+  bool in_frame   = false;
   // Multi-threading
   std::mutex       mutex;
   std::atomic<i32> single_thread_guard;
@@ -446,7 +446,11 @@ class DX12Device : public rd::IDevice {
     }
   }
   void wait_for_next_frame() {
-    if (sc.fence->GetCompletedValue() >= frame_contexts[cur_ctx_id].fence_value) return;
+    // First use
+    if (frame_contexts[cur_ctx_id].fence_value == (u64)-1) return;
+    u64 cur_value = sc.fence->GetCompletedValue();
+    if (cur_value > frame_contexts[cur_ctx_id].fence_value) //
+      return;
     sc.fence->SetEventOnCompletion(frame_contexts[cur_ctx_id].fence_value, sc.fence_event);
     WaitForSingleObject(sc.fence_event, INFINITE);
   }
@@ -454,7 +458,7 @@ class DX12Device : public rd::IDevice {
   public:
   void deferred_release_desc_range(D3D12_DESCRIPTOR_HEAP_TYPE type, u32 offset, u32 size) {
     SCOPED_LOCK;
-    deferred_desc_range_release.push({type, offset, size, 3});
+    deferred_desc_range_release.push({type, offset, size, 6});
   }
   ID3D12Resource *       get_resource(ID id) { return resource_table.load(id); }
   DX12Binding_Signature *get_signature(ID id) { return signature_table.load(id); }
@@ -464,6 +468,7 @@ class DX12Device : public rd::IDevice {
 
   ComPtr<ID3D12Device2>             get_device() { return device; }
   ComPtr<ID3D12GraphicsCommandList> alloc_graphics_cmd() {
+    ASSERT_DEBUG(in_frame);
     ComPtr<ID3D12GraphicsCommandList> out;
     DX_ASSERT_OK(device->CreateCommandList(
         0, D3D12_COMMAND_LIST_TYPE_DIRECT,
@@ -482,14 +487,43 @@ class DX12Device : public rd::IDevice {
   GPU_Desc_Heap *get_rtv_desc_heap() { return rtv_desc_heap; }
   GPU_Desc_Heap *get_dsv_desc_heap() { return dsv_desc_heap; }
   DX12Device(void *hdl) {
-    single_thread_guard = false;
+#ifdef DEBUG_BUILD
     {
       ComPtr<ID3D12Debug> debugInterface;
       DX_ASSERT_OK(D3D12GetDebugInterface(IID_PPV_ARGS(&debugInterface)));
       debugInterface->EnableDebugLayer();
     }
+#endif
+    single_thread_guard            = false;
     D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_12_0;
     DX_ASSERT_OK(D3D12CreateDevice(NULL, featureLevel, IID_PPV_ARGS(&device)));
+#ifdef DEBUG_BUILD
+    {
+      ComPtr<ID3D12InfoQueue> d3dInfoQueue;
+      DX_ASSERT_OK(device.As(&d3dInfoQueue));
+      d3dInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, TRUE);
+      d3dInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, TRUE);
+      d3dInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, TRUE);
+      {
+        D3D12_MESSAGE_SEVERITY Severities[] = {D3D12_MESSAGE_SEVERITY_INFO};
+
+        D3D12_MESSAGE_ID list[] = {
+            D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE,
+            D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE,
+            D3D12_MESSAGE_ID_MAP_INVALID_NULLRANGE,
+            D3D12_MESSAGE_ID_UNMAP_INVALID_NULLRANGE,
+        };
+
+        D3D12_INFO_QUEUE_FILTER filter = {};
+        filter.DenyList.NumSeverities  = ARRAYSIZE(Severities);
+        filter.DenyList.pSeverityList  = Severities;
+        filter.DenyList.NumIDs         = ARRAYSIZE(list);
+        filter.DenyList.pIDList        = list;
+
+        DX_ASSERT_OK(d3dInfoQueue->PushStorageFilter(&filter));
+      }
+    }
+#endif
     dsv_desc_heap     = new GPU_Desc_Heap(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 2048,
                                       D3D12_DESCRIPTOR_HEAP_FLAG_NONE);
     rtv_desc_heap     = new GPU_Desc_Heap(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 2048,
@@ -583,6 +617,10 @@ class DX12Device : public rd::IDevice {
     desc.Flags            = D3D12_RESOURCE_FLAG_NONE;
     if (info.usage_bits & (u32)rd::Image_Usage_Bits::USAGE_UAV)
       desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    if (info.usage_bits & (u32)rd::Image_Usage_Bits::USAGE_RT)
+      desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    if (info.usage_bits & (u32)rd::Image_Usage_Bits::USAGE_DT)
+      desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
     desc.Format             = to_dx(info.format);
     desc.Height             = 1;
     desc.Layout             = D3D12_TEXTURE_LAYOUT_UNKNOWN;
@@ -750,7 +788,7 @@ class DX12Device : public rd::IDevice {
   } // namespace
   void release_resource(Resource_ID id) override {
     SCOPED_LOCK;
-    deferred_release.push({id, 3});
+    deferred_release.push({id, 6});
     // if (id.type == (u32)Resource_Type::BUFFER) {
     //  // get_resource(id.id)->Release();
     //
@@ -906,7 +944,7 @@ class DX12Device : public rd::IDevice {
   }
   void start_frame() override {
     ASSERT_SINGLE_THREAD_SCOPE; // not a reentrant scope.
-
+    in_frame = true;
     // Handle buffer resizal
     if (sc.enabled) {
       DXGI_SWAP_CHAIN_DESC desc{};
@@ -932,14 +970,14 @@ class DX12Device : public rd::IDevice {
         update_sc_images();
       }
     }
-    cur_ctx_id = (cur_ctx_id + 1) % NUM_BACK_BUFFERS;
+
     // Now wait to make sure the frame context is free to use
     wait_for_next_frame();
 
     // Deferred release iteration.
     deferred_desc_range_release_iteration();
     deferred_resource_release_iteration();
-
+    // fprintf(stdout, "%i\n", cur_ctx_id);
     ito(MAX_THREADS) frame_contexts[cur_ctx_id].cmd_allocs[i]->Reset();
     // Prepare the swap chain image for consumption.
     if (sc.enabled) {
@@ -960,6 +998,7 @@ class DX12Device : public rd::IDevice {
     }
   }
   void end_frame() override {
+    in_frame = false;
     ASSERT_SINGLE_THREAD_SCOPE; // not a reentrant scope.
     // Prepare the swapchain image for presentation.
     if (sc.enabled) {
@@ -977,10 +1016,11 @@ class DX12Device : public rd::IDevice {
         cmd_queue->ExecuteCommandLists(1, (ID3D12CommandList **)cmd.GetAddressOf());*/
       sc.sc->Present(0, 0);
     }
-    u64 fence_value = sc.last_fence_signaled_value + 1;
-    cmd_queue->Signal(sc.fence.Get(), fence_value);
+    u64 fence_value                        = sc.last_fence_signaled_value + 1;
     frame_contexts[cur_ctx_id].fence_value = fence_value;
     sc.last_fence_signaled_value           = fence_value;
+    cmd_queue->Signal(sc.fence.Get(), frame_contexts[cur_ctx_id].fence_value);
+    cur_ctx_id = (cur_ctx_id + 1) % NUM_BACK_BUFFERS;
   }
 };
 
@@ -1428,7 +1468,7 @@ class FrameBuffer {
         dev_ctx->get_device()->CreateRenderTargetView(res, NULL, get_rtv_handle(i));
       }
     }
-    if (info.depth_target.image.is_valid()) {
+    if (info.depth_target.enabled) {
       dsv_offset          = dev_ctx->get_dsv_desc_heap()->allocate(1);
       ID3D12Resource *res = dev_ctx->get_resource(info.depth_target.image.id);
       // Initialize DSV
@@ -1438,14 +1478,14 @@ class FrameBuffer {
   void bind(ComPtr<ID3D12GraphicsCommandList> cmd, RenderPass *pass) {
     InlineArray<D3D12_CPU_DESCRIPTOR_HANDLE, 8> rtvs{};
     ito(info.rts.size) rtvs.push(get_rtv_handle(i));
-    if (dsv_offset >= 0) {
+    if (info.depth_target.enabled) {
       D3D12_CPU_DESCRIPTOR_HANDLE dsv = get_dsv_handle();
       cmd->OMSetRenderTargets(rtvs.size, rtvs.size ? rtvs.elems : NULL, FALSE, &dsv);
     } else {
       cmd->OMSetRenderTargets(rtvs.size, rtvs.size ? rtvs.elems : NULL, FALSE, NULL);
     }
     ito(info.rts.size) {
-      ASSERT_ALWAYS(info.rts[i].format == rd::Format::NATIVE);
+      // ASSERT_ALWAYS(info.rts[i].format == rd::Format::NATIVE);
       ASSERT_ALWAYS(info.rts[i].layer == 0);
       ASSERT_ALWAYS(info.rts[i].level == 0);
       D3D12_RESOURCE_BARRIER bar{};
@@ -1462,8 +1502,8 @@ class FrameBuffer {
                                    (float *)&pass->get_info().rts[i].clear_color.r, 0, NULL);
       }
     }
-    if (info.depth_target.image.is_valid()) {
-      ASSERT_ALWAYS(info.depth_target.format == rd::Format::NATIVE);
+    if (info.depth_target.enabled) {
+      // ASSERT_ALWAYS(info.depth_target.format == rd::Format::NATIVE);
       ASSERT_ALWAYS(info.depth_target.layer == 0);
       ASSERT_ALWAYS(info.depth_target.level == 0);
       D3D12_RESOURCE_BARRIER bar{};
@@ -1491,7 +1531,7 @@ class FrameBuffer {
       bar.Transition.StateAfter  = D3D12_RESOURCE_STATE_COMMON;
       cmd->ResourceBarrier(1, &bar);
     }
-    if (dsv_offset >= 0) {
+    if (info.depth_target.enabled) {
       D3D12_RESOURCE_BARRIER bar{};
       bar.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
       bar.Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
@@ -1688,10 +1728,10 @@ class DX12Context : public rd::ICtx {
                    rd::Clear_Value const &cv) override {
     TRAP;
   }
-  void update_buffer(Resource_ID buf_id, size_t offset, void const *data,
-                     size_t data_size) override {
-    TRAP;
-  }
+  // void update_buffer(Resource_ID buf_id, size_t offset, void const *data,
+  //                   size_t data_size) override {
+  //
+  //}
   void copy_buffer_to_image(Resource_ID buf_id, size_t buffer_offset, Resource_ID img_id,
                             rd::Image_Copy const &dst_info) override {
     u64                                textureMemorySize             = 0;

@@ -3436,11 +3436,11 @@ class Vk_Ctx : public rd::ICtx {
     r.levelCount     = range.num_levels;
     vkCmdClearColorImage(cmd, img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &_cv, 1, &r);
   }
-  void update_buffer(Resource_ID buf_id, size_t offset, void const *data,
-                     size_t data_size) override {
-    Buffer buf = dev_ctx->buffers.read(buf_id.id);
-    vkCmdUpdateBuffer(cmd, buf.buffer, offset, data_size, data);
-  }
+  //void update_buffer(Resource_ID buf_id, size_t offset, void const *data,
+  //                   size_t data_size) override {
+  //  Buffer buf = dev_ctx->buffers.read(buf_id.id);
+  //  vkCmdUpdateBuffer(cmd, buf.buffer, offset, data_size, data);
+  //}
   // void RS_set_line_width(float width) override { vkCmdSetLineWidth(cmd, width); }
   // void RS_set_depth_bias(float b) override { vkCmdSetDepthBias(cmd, b, 0.0f, 0.0f); }
 }; // namespace

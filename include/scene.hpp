@@ -1943,7 +1943,7 @@ struct Camera {
     float tanHalfFovy = std::tan(fov * 0.5f);
 
     proj[0][0] = 1.0f / (aspect * tanHalfFovy);
-    proj[1][1] = -1.0f / (tanHalfFovy);
+    proj[1][1] = 1.0f / (tanHalfFovy);
     proj[2][2] = 0.0f;
     proj[2][3] = -1.0f;
     proj[3][2] = znear;
@@ -2203,12 +2203,10 @@ class GfxSurface {
     factory->release_resource(buffer);
     delete this;
   }
-  void draw(rd::ICtx *ctx, u32 *attribute_to_location) {
-    TRAP;
-    /*ito(attributes.size) {
+  void setup_attributes(rd::Graphics_Pipeline_State &state, u32 *attribute_to_location) {
+    ito(attributes.size) {
       Attribute attr = attributes[i];
-      ctx->IA_set_vertex_buffer(i, buffer, attribute_offsets[i], attr.stride,
-                                rd::Input_Rate::VERTEX);
+      state.IA_set_vertex_binding(i, attr.stride, rd::Input_Rate::VERTEX);
       rd::Attribute_Info info;
       MEMZERO(info);
       info.binding  = i;
@@ -2216,14 +2214,24 @@ class GfxSurface {
       info.location = attribute_to_location[(u32)attr.type];
       info.offset   = 0;
       info.type     = attr.type;
-      ctx->IA_set_attribute(info);
+      state.IA_set_attribute(info);
     }
-    ctx->IA_set_index_buffer(buffer, index_offset, index_type);
+  }
+
+  void draw(rd::ICtx *ctx, rd::Graphics_Pipeline_State const &gfx_state) {
+    jto(gfx_state.num_attributes) {
+      ito(attributes.size) {
+        if (gfx_state.attributes[j].type == attributes[i].type) {
+          ctx->bind_vertex_buffer(gfx_state.attributes[j].binding, buffer, attribute_offsets[i]);
+        }
+      }
+    }
+    ctx->bind_index_buffer(buffer, index_offset, index_type);
     u32 vertex_cursor = 0;
     u32 index_cursor  = 0;
     ctx->draw_indexed(surface->mesh.num_indices, 1, index_cursor, 0, vertex_cursor);
     index_cursor += surface->mesh.num_indices;
-    vertex_cursor += surface->mesh.num_vertices;*/
+    vertex_cursor += surface->mesh.num_vertices;
   }
 };
 

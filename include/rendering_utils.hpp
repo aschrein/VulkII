@@ -148,7 +148,6 @@ class IGUIApp {
     Ptr2              ptrs{(void *)hwnd, (void *)connection};
     handle = (void *)&ptrs;
 #endif
-    rd::IDevice *factory = NULL;
     if (impl == rd::Impl_t::VULKAN) {
       factory = rd::create_vulkan(handle);
     } else if (impl == rd::Impl_t::DX12) {
@@ -157,8 +156,9 @@ class IGUIApp {
       TRAP;
     }
     if (factory == NULL) return;
+
     factory->start_frame();
-    factory->end_frame();
+    on_init();
 
     constexpr u32 MAX_FRAMES = 0x10;
     u32           NUM_FRAMES = factory->get_num_swapchain_images();
@@ -392,13 +392,12 @@ float4 main(in PSInput input) : SV_TARGET0 {
       render_pass = factory->create_render_pass(info);
       pso         = factory->create_graphics_pso(signature, render_pass, gfx_state);
     }
+    factory->end_frame();
     // static InlineArray<SDL_Event, 0x100> sdl_event_queue;
     // static std::mutex                    sdl_event_mutex;
     // static std::atomic<int>              sdl_event_cnt;
     while (true) {
       ImGui::SetCurrentContext(imgui_ctx);
-      image_bindings.reset();
-      io.Fonts->TexID = (ImTextureID)bind_texture(font_texture, 0, 0, rd::Format::NATIVE);
 
       SDL_Event event{};
       {
@@ -475,10 +474,10 @@ float4 main(in PSInput input) : SV_TARGET0 {
         info.rts.push(rt0);
         frame_buffers[frame_id] = factory->create_frame_buffer(render_pass, info);
       }
-      rd::ICtx *ctx = factory->start_render_pass(render_pass, frame_buffers[frame_id]);
-      ctx->image_barrier(font_texture, rd::Image_Access::SAMPLED);
-      ctx->start_render_pass();
       on_frame();
+      rd::ICtx *ctx = factory->start_render_pass(render_pass, frame_buffers[frame_id]);
+      image_bindings.reset();
+      io.Fonts->TexID      = (ImTextureID)bind_texture(font_texture, 0, 0, rd::Format::NATIVE);
       auto         sc_info = factory->get_swapchain_image_info();
       static float angle   = 0.0f;
       angle += 1.0e-3f;
@@ -566,7 +565,10 @@ float4 main(in PSInput input) : SV_TARGET0 {
         ImVec2 clip_scale        = draw_data->FramebufferScale;
         int    global_vtx_offset = 0;
         int    global_idx_offset = 0;
-
+        ito(image_bindings.size) {
+          ctx->image_barrier(image_bindings[i].id, rd::Image_Access::SAMPLED);
+        }
+        ctx->start_render_pass();
         ctx->bind_graphics_pso(pso);
         if (sizeof(ImDrawIdx) == 2)
           ctx->bind_index_buffer(index_buffer, 0, rd::Index_t::UINT16);
@@ -623,8 +625,9 @@ float4 main(in PSInput input) : SV_TARGET0 {
           global_idx_offset += cmd_list->IdxBuffer.Size;
           global_vtx_offset += cmd_list->VtxBuffer.Size;
         }
+        ctx->end_render_pass();
       }
-      ctx->end_render_pass();
+
       factory->end_render_pass(ctx);
       factory->end_frame();
       frame_id = (frame_id + 1) % NUM_FRAMES;
@@ -663,12 +666,12 @@ static ImVec2 get_window_size() {
   }
   return wsize;
 }
-#if 0
-static void init_buffer(rd::IFactory *factory, Resource_ID buf, void const *src, size_t size) {
-  rd::Imm_Ctx *          ctx = factory->start_compute_pass();
+
+static void init_buffer(rd::IDevice *factory, Resource_ID buf, void const *src, size_t size) {
+  rd::ICtx *             ctx = factory->start_compute_pass();
   rd::Buffer_Create_Info info;
   MEMZERO(info);
-  info.mem_bits       = (u32)rd::Memory_Bits::HOST_VISIBLE;
+  info.memory_type    = rd::Memory_Type::CPU_WRITE_GPU_READ;
   info.usage_bits     = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
   info.size           = size;
   Resource_ID staging = factory->create_buffer(info);
@@ -680,11 +683,14 @@ static void init_buffer(rd::IFactory *factory, Resource_ID buf, void const *src,
   factory->release_resource(staging);
 }
 
-template <typename T> static Resource_ID create_uniform(rd::IFactory *factory, T const &src) {
+#if 0
+
+
+template <typename T> static Resource_ID create_uniform(rd::IDevice *factory, T const &src) {
 
   rd::Buffer_Create_Info info;
   MEMZERO(info);
-  info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+  info.memory_type   = rd::Memory_Type::CPU_WRITE_GPU_READ;
   info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER;
   info.size       = sizeof(T);
   Resource_ID out = factory->create_buffer(info);
@@ -694,7 +700,7 @@ template <typename T> static Resource_ID create_uniform(rd::IFactory *factory, T
   return out;
 }
 
-static Resource_ID get_or_create_image(rd::IFactory *factory, rd::Image_Create_Info const &ci,
+static Resource_ID get_or_create_image(rd::IDevice *factory, rd::Image_Create_Info const &ci,
                                        Resource_ID old) {
   bool create = false;
   if (old.is_null()) create = true;
@@ -714,7 +720,7 @@ struct TimeStamp_Pool {
   InlineArray<Resource_ID, 0x10> timestamps;
   double                         duration;
   void                           init() { timestamps.init(); }
-  void                           insert(rd::IFactory *factory, rd::Imm_Ctx *ctx) {
+  void                           insert(rd::IDevice *factory, rd::Imm_Ctx *ctx) {
     if (timestamps.size == 0x10) {
       ito(0x10) { factory->release_resource(timestamps[i]); }
       timestamps[0]   = ctx->insert_timestamp();
@@ -723,7 +729,7 @@ struct TimeStamp_Pool {
       timestamps.push(ctx->insert_timestamp());
     }
   }
-  void update(rd::IFactory *factory) {
+  void update(rd::IDevice *factory) {
     if (timestamps.size < 2) return;
     u32 cnt = 0;
     ito(timestamps.size / 2) {
@@ -746,7 +752,7 @@ struct TimeStamp_Pool {
     }
     timestamps.size -= cnt * 2;
   }
-  void release(rd::IFactory *factory) {
+  void release(rd::IDevice *factory) {
     ito(0x10) { factory->release_resource(timestamps[i]); }
   }
 };
@@ -1028,76 +1034,71 @@ void main(uint3 tid : SV_DispatchThreadID) {
   }
 };
 #endif
-#if 0
+#if 1
 struct Raw_Mesh_3p16i_Wrapper {
   Resource_ID vertex_buffer;
   Resource_ID index_buffer;
   u32         num_indices;
   u32         num_vertices;
 
-  void release(rd::IFactory *rm) {
+  void release(rd::IDevice *rm) {
     rm->release_resource(vertex_buffer);
     rm->release_resource(index_buffer);
     MEMZERO(*this);
   }
-  void init(rd::IFactory *rm, float3 const *positions, u16 const *indices, u32 num_indices,
+  void init(rd::IDevice *rm, float3 const *positions, u16 const *indices, u32 num_indices,
             u32 num_vertices) {
     this->num_indices  = num_indices;
     this->num_vertices = num_vertices;
     {
       rd::Buffer_Create_Info buf_info;
       MEMZERO(buf_info);
-      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
-      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
-      buf_info.size       = u32(sizeof(float3) * num_vertices);
-      vertex_buffer       = rm->create_buffer(buf_info);
-      memcpy(rm->map_buffer(vertex_buffer), &positions[0], sizeof(float3) * num_vertices);
-      rm->unmap_buffer(vertex_buffer);
+      buf_info.memory_type = rd::Memory_Type::GPU_LOCAL;
+      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
+      buf_info.size        = u32(sizeof(float3) * num_vertices);
+      vertex_buffer        = rm->create_buffer(buf_info);
+      init_buffer(rm, vertex_buffer, &positions[0], sizeof(float3) * num_vertices);
     }
     {
       rd::Buffer_Create_Info buf_info;
       MEMZERO(buf_info);
-      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
-      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER;
-      buf_info.size       = u32(sizeof(u16) * num_indices);
-      index_buffer        = rm->create_buffer(buf_info);
-      memcpy(rm->map_buffer(index_buffer), &indices[0], sizeof(u16) * num_indices);
-      rm->unmap_buffer(index_buffer);
+      buf_info.memory_type = rd::Memory_Type::GPU_LOCAL;
+      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER;
+      buf_info.size        = u32(sizeof(u16) * num_indices);
+      index_buffer         = rm->create_buffer(buf_info);
+      init_buffer(rm, index_buffer, &indices[0], sizeof(u16) * num_indices);
     }
   }
-  void init(rd::IFactory *rm, Raw_Mesh_3p16i const &model) {
+  void init(rd::IDevice *rm, Raw_Mesh_3p16i const &model) {
     num_indices  = model.indices.size * 3;
     num_vertices = model.positions.size;
     {
       rd::Buffer_Create_Info buf_info;
       MEMZERO(buf_info);
-      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
-      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
-      buf_info.size       = u32(sizeof(float3) * model.positions.size);
-      vertex_buffer       = rm->create_buffer(buf_info);
-      memcpy(rm->map_buffer(vertex_buffer), &model.positions[0],
-             sizeof(float3) * model.positions.size);
-      rm->unmap_buffer(vertex_buffer);
+      buf_info.memory_type = rd::Memory_Type::GPU_LOCAL;
+      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
+      buf_info.size        = u32(sizeof(float3) * model.positions.size);
+      vertex_buffer        = rm->create_buffer(buf_info);
+      init_buffer(rm, vertex_buffer, &model.positions[0], sizeof(float3) * model.positions.size);
     }
     {
       rd::Buffer_Create_Info buf_info;
       MEMZERO(buf_info);
-      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
-      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER;
-      buf_info.size       = u32(sizeof(u16_face) * model.indices.size);
-      index_buffer        = rm->create_buffer(buf_info);
-      memcpy(rm->map_buffer(index_buffer), &model.indices[0],
-             sizeof(u16_face) * model.indices.size);
-      rm->unmap_buffer(index_buffer);
+      buf_info.memory_type = rd::Memory_Type::GPU_LOCAL;
+      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER;
+      buf_info.size        = u32(sizeof(u16_face) * model.indices.size);
+      index_buffer         = rm->create_buffer(buf_info);
+      init_buffer(rm, index_buffer, &model.indices[0], sizeof(u16_face) * model.indices.size);
     }
   }
-  void draw(rd::Imm_Ctx *ctx, u32 instances = 1, u32 first_instance = 0) {
-    ctx->IA_set_vertex_buffer(0, vertex_buffer, 0, 12, rd::Input_Rate::VERTEX);
-    ctx->IA_set_index_buffer(index_buffer, 0, rd::Index_t::UINT16);
+  void draw(rd::ICtx *ctx, u32 instances = 1, u32 first_instance = 0) {
+    ctx->bind_vertex_buffer(0, vertex_buffer, 0);
+    ctx->bind_index_buffer(index_buffer, 0, rd::Index_t::UINT16);
     ctx->draw_indexed(num_indices, instances, 0, first_instance, 0);
   }
 };
-
+#endif
+#if 0
 class Gizmo_Layer;
 
 class Gizmo_Layer {
@@ -1184,12 +1185,12 @@ protected:
   Resource_ID font_sampler = {};
   Resource_ID font_texture = {};
 
-  rd::IFactory *rm = NULL;
-  Camera        g_camera;
-  bool          update_mouse_ray = true;
-  Ray           mouse_ray;
-  float2        mouse_cursor;
-  float2        resolution;
+  rd::IDevice *rm = NULL;
+  Camera       g_camera;
+  bool         update_mouse_ray = true;
+  Ray          mouse_ray;
+  float2       mouse_cursor;
+  float2       resolution;
   enum Mode {
     NONE = 0,
     CAMERA_DRAG,
@@ -1207,7 +1208,7 @@ protected:
   bool               keys[0x100]      = {};
   bool               last_keys[0x100] = {};
 
-  void init(rd::IFactory *rm) {
+  void init(rd::IDevice *rm) {
     this->rm = rm;
     timer.init();
     g_camera.init();
@@ -1297,8 +1298,8 @@ float4 main(in PSInput input) : SV_TARGET0 {
         {stref_s("VERTEX"), {}},
         {stref_s("PIXEL"), {}},
     };
-    gizmo_vs = rm->create_shader_raw(rd::Stage_t::VERTEX, shader, &defines[0], 1);
-    gizmo_ps = rm->create_shader_raw(rd::Stage_t::PIXEL, shader, &defines[1], 1);
+    gizmo_vs                       = rm->create_shader(rd::Stage_t::VERTEX, shader, &defines[0], 1);
+    gizmo_ps                       = rm->create_shader(rd::Stage_t::PIXEL, shader, &defines[1], 1);
     static string_ref shader_lines = stref_s(R"(
 struct PushConstants
 {
@@ -1337,17 +1338,16 @@ float4 main(in PSInput input) : SV_TARGET0 {
 }
 #endif
 )");
-    gizmo_lines_vs = rm->create_shader_raw(rd::Stage_t::VERTEX, shader_lines, &defines[0], 1);
-    gizmo_lines_ps = rm->create_shader_raw(rd::Stage_t::PIXEL, shader_lines, &defines[1], 1);
+    gizmo_lines_vs = rm->create_shader(rd::Stage_t::VERTEX, shader_lines, &defines[0], 1);
+    gizmo_lines_ps = rm->create_shader(rd::Stage_t::PIXEL, shader_lines, &defines[1], 1);
     {
       rd::Image_Create_Info info;
       MEMZERO(info);
-      info.width    = simplefont_bitmap_width;
-      info.height   = simplefont_bitmap_height;
-      info.depth    = 1;
-      info.layers   = 1;
-      info.levels   = 1;
-      info.mem_bits = (u32)rd::Memory_Bits::DEVICE_LOCAL;
+      info.width  = simplefont_bitmap_width;
+      info.height = simplefont_bitmap_height;
+      info.depth  = 1;
+      info.layers = 1;
+      info.levels = 1;
       info.usage_bits =
           (u32)rd::Image_Usage_Bits::USAGE_SAMPLED | (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
       info.format  = rd::Format::R8_UNORM;
@@ -1359,11 +1359,11 @@ float4 main(in PSInput input) : SV_TARGET0 {
       {
         rd::Buffer_Create_Info buf_info;
         MEMZERO(buf_info);
-        buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
-        buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
-        buf_info.size       = simplefont_bitmap_width * simplefont_bitmap_height;
-        staging_buf         = rm->create_buffer(buf_info);
-        u8 *ptr             = (u8 *)rm->map_buffer(staging_buf);
+        buf_info.memory_type = rd::Memory_Type::CPU_WRITE_GPU_READ;
+        buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
+        buf_info.size        = simplefont_bitmap_width * simplefont_bitmap_height;
+        staging_buf          = rm->create_buffer(buf_info);
+        u8 *ptr              = (u8 *)rm->map_buffer(staging_buf);
         // memcpy(ptr, &simplefont_bitmap[0], buf_info.size);
         yto(simplefont_bitmap_height) {
           xto(simplefont_bitmap_width) {
@@ -1372,8 +1372,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
         }
         rm->unmap_buffer(staging_buf);
         auto ctx = rm->start_compute_pass();
-        ctx->image_barrier(font_texture, (u32)rd::Access_Bits::MEMORY_WRITE,
-                           rd::Image_Layout::TRANSFER_DST_OPTIMAL);
+        ctx->image_barrier(font_texture, rd::Image_Access::TRANSFER_DST);
         ctx->copy_buffer_to_image(staging_buf, 0, font_texture, rd::Image_Copy::top_level());
         rm->end_compute_pass(ctx);
       }
@@ -1429,8 +1428,8 @@ float4 main(in PSInput input) : SV_TARGET0 {
 }
 #endif
 )";
-    font_vs = rm->create_shader_raw(rd::Stage_t::VERTEX, stref_s(font_shader), &defines[0], 1);
-    font_ps = rm->create_shader_raw(rd::Stage_t::PIXEL, stref_s(font_shader), &defines[1], 1);
+    font_vs = rm->create_shader(rd::Stage_t::VERTEX, stref_s(font_shader), &defines[0], 1);
+    font_ps = rm->create_shader(rd::Stage_t::PIXEL, stref_s(font_shader), &defines[1], 1);
 
     rd::Sampler_Create_Info info;
     MEMZERO(info);
@@ -1461,7 +1460,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
   }
 
   public:
-  static Gizmo_Layer *create(rd::IFactory *rm) {
+  static Gizmo_Layer *create(rd::IDevice *rm) {
     Gizmo_Layer *gl = new Gizmo_Layer;
     gl->init(rm);
     return gl;
@@ -1770,7 +1769,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
     sphere_draw_cmds.reset();
     line_segments.reset();
   }
-  void render(rd::IFactory *f, rd::Imm_Ctx *ctx, u32 width, u32 height) {
+  void render(rd::IDevice *f, rd::ICtx *ctx, u32 width, u32 height) {
     defer(char_storage.reset());
     float4x4 viewproj = g_camera.viewproj();
     if (hovered_gizmo) {
@@ -1801,7 +1800,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
       u32                    num_cones       = cone_draw_cmds.size;
       rd::Buffer_Create_Info buf_info;
       MEMZERO(buf_info);
-      buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.memory_type   = rd::Memory_Type::CPU_WRITE_GPU_READ;
       buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
       buf_info.size = (cylinder_draw_cmds.size + sphere_draw_cmds.size + cone_draw_cmds.size) *
                       sizeof(Gizmo_Instance_Data_CPU);
@@ -2031,14 +2030,14 @@ float4 main(in PSInput input) : SV_TARGET0 {
 
 template <typename T> class GPUBuffer {
   private:
-  rd::IFactory *factory;
-  Array<T>      cpu_array;
-  Resource_ID   gpu_buffer;
-  Resource_ID   cpu_buffer;
-  size_t        gpu_buffer_size;
+  rd::IDevice *factory;
+  Array<T>     cpu_array;
+  Resource_ID  gpu_buffer;
+  Resource_ID  cpu_buffer;
+  size_t       gpu_buffer_size;
 
   public:
-  void init(rd::IFactory *factory) {
+  void init(rd::IDevice *factory) {
     this->factory = factory;
     cpu_array.init();
     gpu_buffer.reset();
@@ -2071,7 +2070,7 @@ template <typename T> class GPUBuffer {
       {
         rd::Buffer_Create_Info info;
         MEMZERO(info);
-        info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+        info.memory_type   = rd::Memory_Type::CPU_WRITE_GPU_READ;
         info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
         info.size       = cpu_array.size * sizeof(T);
         cpu_array       = factory->create_buffer(info);
