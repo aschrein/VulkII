@@ -72,7 +72,7 @@ dev->end_frame();
 
 Which results in the following capture:
 
-![alt text](readme/shot1.png)
+![alt text](readme/shot1.PNG)
 
 ## Screenshots
-![alt text](readme/shot0.png)
+![alt text](readme/shot0.PNG)
