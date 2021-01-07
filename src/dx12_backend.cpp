@@ -76,7 +76,7 @@ D3D12_PRIMITIVE_TOPOLOGY to_dx(rd::Primitive op) {
 }
 D3D12_BLEND to_dx(rd::Blend_Factor factor) {
   switch (factor) {
-    // clang-format off
+  // clang-format off
     case rd::Blend_Factor::ZERO                     : return D3D12_BLEND_ZERO;
     case rd::Blend_Factor::ONE                      : return D3D12_BLEND_ONE;
     case rd::Blend_Factor::SRC_COLOR                : return D3D12_BLEND_SRC_COLOR;
@@ -96,6 +96,15 @@ D3D12_BLEND to_dx(rd::Blend_Factor factor) {
     TRAP;
   }
   }
+}
+DXGI_FORMAT to_dx(rd::Index_t format) {
+  // clang-format off
+  switch (format) {
+  case rd::Index_t::UINT16     : return DXGI_FORMAT_R16_UINT      ;
+  case rd::Index_t::UINT32     : return DXGI_FORMAT_R32_UINT      ;
+  default: UNIMPLEMENTED;
+  }
+  // clang-format on
 }
 DXGI_FORMAT to_dx(rd::Format format) {
   // clang-format off
@@ -334,8 +343,9 @@ struct DX12Binding_Signature {
 };
 class RenderPass;
 struct GraphicsPSOWrapper {
-  ID3D12PipelineState *  pso      = NULL;
-  D3D_PRIMITIVE_TOPOLOGY topology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
+  ID3D12PipelineState *       pso = NULL;
+  rd::Graphics_Pipeline_State state{};
+  D3D_PRIMITIVE_TOPOLOGY      topology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
 };
 class DX12Device : public rd::IDevice {
   static constexpr u32 NUM_BACK_BUFFERS = 3;
@@ -875,7 +885,7 @@ class DX12Device : public rd::IDevice {
     SCOPED_LOCK;
     TRAP;
   }
-  rd::Impl_t getImplType() override { TRAP; }
+  rd::Impl_t getImplType() override { return rd::Impl_t::DX12; }
   void       release() override {
     ASSERT_SINGLE_THREAD_SCOPE; // not a reentrant scope.
     wait_idle();
@@ -1071,8 +1081,9 @@ DX12Binding_Signature::create(DX12Device *                         dev_ctx,
     D3D12_ROOT_SIGNATURE_DESC desc = {};
     desc.NumParameters             = out->num_params;
     desc.pParameters               = &params[0];
-    desc.Flags                     = D3D12_ROOT_SIGNATURE_FLAG_NONE;
-    ID3DBlob *blob                 = NULL;
+    desc.Flags                     = D3D12_ROOT_SIGNATURE_FLAG_NONE |
+                 D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    ID3DBlob *blob = NULL;
     DX_ASSERT_OK(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, NULL));
     DX_ASSERT_OK(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
                                              IID_PPV_ARGS(&out->root_signature)));
@@ -1580,10 +1591,29 @@ class DX12Context : public rd::ICtx {
   }
   void draw_indexed(u32 indices, u32 instances, u32 first_index, u32 first_instance,
                     i32 vertex_offset) override {
-    TRAP;
+    ASSERT_DEBUG(cur_binding);
+    cur_binding->bind(cmd, type);
+    cur_binding->flush_push_constants(cmd, type);
+    cmd->DrawIndexedInstanced(indices, instances, first_index, vertex_offset, first_instance);
   }
-  void bind_index_buffer(Resource_ID id, u32 offset, rd::Index_t format) override { TRAP; }
-  void bind_vertex_buffer(u32 index, Resource_ID buffer, size_t offset) override { TRAP; }
+  void bind_index_buffer(Resource_ID buffer, size_t offset, rd::Index_t format,
+                         size_t size) override {
+    ID3D12Resource *        res = dev_ctx->get_resource(buffer.id);
+    D3D12_INDEX_BUFFER_VIEW view{};
+    view.BufferLocation = res->GetGPUVirtualAddress() + offset;
+    view.Format         = to_dx(format);
+    view.SizeInBytes    = size;
+    cmd->IASetIndexBuffer(&view);
+  }
+  void bind_vertex_buffer(u32 index, Resource_ID buffer, size_t stride, size_t offset,
+                          size_t size) override {
+    ID3D12Resource *         res = dev_ctx->get_resource(buffer.id);
+    D3D12_VERTEX_BUFFER_VIEW view{};
+    view.BufferLocation = res->GetGPUVirtualAddress() + offset;
+    view.SizeInBytes    = size;
+    view.StrideInBytes  = stride;
+    cmd->IASetVertexBuffers(index, 1, &view);
+  }
   void draw(u32 vertices, u32 instances, u32 first_vertex, u32 first_instance) override {
     ASSERT_DEBUG(cur_binding);
     cur_binding->bind(cmd, type);
@@ -1819,11 +1849,11 @@ Resource_ID DX12Device::create_graphics_pso(Resource_ID signature, Resource_ID r
     D3D12_INPUT_ELEMENT_DESC desc{};
     desc.AlignedByteOffset = state.attributes[i].offset;
     desc.Format            = to_dx(state.attributes[i].format);
-    desc.InputSlot         = state.attributes[i].location;
+    desc.InputSlot         = state.attributes[i].binding;
     desc.InputSlotClass    = binding.inputRate == rd::Input_Rate::VERTEX
                               ? D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA
                               : D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA;
-    desc.InstanceDataStepRate = 1;
+    desc.InstanceDataStepRate = binding.inputRate == rd::Input_Rate::VERTEX ? 0 : 1;
     switch (state.attributes[i].type) {
     case rd::Attriute_t::POSITION: {
       desc.SemanticIndex = 0;
@@ -1879,6 +1909,7 @@ Resource_ID DX12Device::create_graphics_pso(Resource_ID signature, Resource_ID r
   ID3D12PipelineState *pso = NULL;
   DX_ASSERT_OK(device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pso)));
   GraphicsPSOWrapper *wrapper = new GraphicsPSOWrapper;
+  wrapper->state              = state;
   wrapper->topology           = to_dx(state.topology);
   wrapper->pso                = pso;
   return {graphics_pso_table.push(wrapper), (u32)Resource_Type::GRAPHICS_PSO};
@@ -1961,7 +1992,7 @@ void DX12Device::deferred_resource_release_iteration() {
         auto pso = graphics_pso_table.load(item.first.id);
         pso->pso->Release();
         delete pso;
-        compute_pso_table.free(item.first.id);
+        graphics_pso_table.free(item.first.id);
       } else if (item.first.type == (u32)Resource_Type::SIGNATURE) {
         auto sig = signature_table.load(item.first.id);
         sig->release();

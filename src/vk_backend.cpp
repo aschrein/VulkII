@@ -1307,10 +1307,9 @@ struct Graphics_Pipeline_Wrapper : public Slot {
       info.pRasterizationState                              = &rs_create_info;
 
       VkDynamicState dynamic_states[] = {
-          VK_DYNAMIC_STATE_VIEWPORT,
-          VK_DYNAMIC_STATE_SCISSOR,
-        /*  VK_DYNAMIC_STATE_DEPTH_BIAS,
-          VK_DYNAMIC_STATE_LINE_WIDTH,*/
+          VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
+          /*  VK_DYNAMIC_STATE_DEPTH_BIAS,
+            VK_DYNAMIC_STATE_LINE_WIDTH,*/
       };
       VkPipelineDynamicStateCreateInfo dy_create_info;
       MEMZERO(dy_create_info);
@@ -1662,6 +1661,7 @@ struct VkDeviceContext {
       (void)alignment;
       ito(items.size) { // look for a suitable memory chunk
         Mem_Chunk &chunk = items[i];
+        if (!chunk.is_alive()) continue;
         if ((chunk.prop_flags & prop_flags) == prop_flags &&
             (chunk.memory_type_bits & memory_type_bits) == memory_type_bits) {
           if (chunk.has_space(alignment, size)) {
@@ -1671,19 +1671,19 @@ struct VkDeviceContext {
       }
       // if failed create a new one
       Mem_Chunk new_chunk{};
-      u32       alloc_size = 1 << 16;
+      u32       alloc_size = 1 << 26;
       if (alloc_size < size) {
         alloc_size = (size + alloc_size - 1) & ~(alloc_size - 1);
       }
       new_chunk.init(dev_ctx->device, alloc_size, _find_mem_type(memory_type_bits, prop_flags),
                      prop_flags, memory_type_bits);
-      ito(items.size) { // look for a free memory chunk slot
-        Mem_Chunk &chunk = items[i];
-        if (chunk.is_empty()) {
-          chunk = std::move(new_chunk);
-          return ID{i + 1};
-        }
-      }
+      // ito(items.size) { // look for a free memory chunk slot
+      //  Mem_Chunk &chunk = items[i];
+      //  if (chunk.is_empty()) {
+      //    chunk = std::move(new_chunk);
+      //    return ID{i + 1};
+      //  }
+      //}
       ASSERT_DEBUG(new_chunk.has_space(alignment, size));
       return push(new_chunk);
     }
@@ -1700,8 +1700,9 @@ struct VkDeviceContext {
     void release_unreferenced() {
       ito(items.size) {
         Mem_Chunk &chunk = items[i];
-        if (chunk.is_referenced() == false) {
-          chunk.release(dev_ctx->device);
+        if (chunk.is_alive() && chunk.is_referenced() == false) {
+          remove({i + 1}, 0);
+          // chunk.release(dev_ctx->device);
         }
       }
     }
@@ -1724,7 +1725,9 @@ struct VkDeviceContext {
     void                        release_item(Buffer &buf) {
       vkDestroyBuffer(dev_ctx->device, buf.buffer, NULL);
       dev_ctx->mem_chunks.acquire(buf.mem_chunk_id,
-                                  [=](Mem_Chunk &mem_chunk) { mem_chunk.rem_reference(); });
+                                  [=](Mem_Chunk &mem_chunk) { //
+                                    mem_chunk.rem_reference();
+                                  });
       buf.release();
       MEMZERO(buf);
     }
@@ -1741,7 +1744,9 @@ struct VkDeviceContext {
         // True in case of swap chain images
         vkDestroyImage(dev_ctx->device, img.image, NULL);
         dev_ctx->mem_chunks.acquire(img.mem_chunk_id,
-                                    [=](Mem_Chunk &mem_chunk) { mem_chunk.rem_reference(); });
+                                    [=](Mem_Chunk &mem_chunk) { //
+                                      mem_chunk.rem_reference();
+                                    });
       }
       img.release();
       MEMZERO(img);
@@ -2034,6 +2039,7 @@ struct VkDeviceContext {
     new_buf.mem_chunk_id = chunk_index;
     mem_chunks.acquire(chunk_index, [&](Mem_Chunk &chunk) {
       new_buf.mem_offset = chunk.alloc(reqs.alignment, reqs.size);
+      // chunk.add_reference();
       vkBindBufferMemory(device, new_buf.buffer, chunk.mem, new_buf.mem_offset);
     });
     return {buffers.push(new_buf), (i32)Resource_Type::BUFFER};
@@ -2292,6 +2298,7 @@ struct VkDeviceContext {
     new_image.mem_chunk_id = chunk_index;
     mem_chunks.acquire(chunk_index, [&](Mem_Chunk &chunk) {
       new_image.mem_offset = chunk.alloc(reqs.alignment, reqs.size);
+      // chunk.add_reference();
       vkBindImageMemory(device, new_image.image, chunk.mem, new_image.mem_offset);
     });
 
@@ -3059,7 +3066,6 @@ class Vk_Ctx : public rd::ICtx {
   template <typename K, typename V> using Table = Hash_Table<K, V, Default_Allocator, 64>;
   Table<Resource_ID, BufferLaoutTracker> buffer_layouts;
   Table<Resource_ID, ImageLayoutTracker> image_layouts;
-  Pool<u8>                               tmp_pool;
 
   VkImageLayout _get_image_layout(Resource_ID img_id) {
     if (!image_layouts.contains(img_id)) {
@@ -3227,7 +3233,6 @@ class Vk_Ctx : public rd::ICtx {
     image_layouts.reset();
     cmd_id         = dev_ctx->create_command_buffer();
     cmd            = dev_ctx->cmd_buffers.read(cmd_id.id).cmd;
-    tmp_pool       = Pool<u8>::create(1 << 20);
     this->cur_pass = pass_id;
     VkCommandBufferBeginInfo begin_info;
     MEMZERO(begin_info);
@@ -3269,18 +3274,18 @@ class Vk_Ctx : public rd::ICtx {
     return finish_sem;
   }
   void release() {
-    tmp_pool.release();
     dev_ctx->release_resource(cmd_id);
     delete this;
   }
   // CTX
-  void bind_vertex_buffer(u32 index, Resource_ID buffer, size_t offset) override {
+  void bind_vertex_buffer(u32 index, Resource_ID buffer, size_t stride, size_t offset,
+                          size_t size) override {
     Buffer buf = dev_ctx->buffers.read(buffer.id);
     vkCmdBindVertexBuffers(cmd, index, 1, &buf.buffer, &offset);
   }
-  void bind_index_buffer(Resource_ID id, u32 offset, rd::Index_t format) override {
+  void bind_index_buffer(Resource_ID id, size_t offset, rd::Index_t format, size_t size) override {
     Buffer      buf = dev_ctx->buffers.read(id.id);
-    VkIndexType type;
+    VkIndexType type{};
     switch (format) {
     case rd::Index_t::UINT32: type = VK_INDEX_TYPE_UINT32; break;
     case rd::Index_t::UINT16: type = VK_INDEX_TYPE_UINT16; break;
@@ -3307,9 +3312,9 @@ class Vk_Ctx : public rd::ICtx {
     ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
     VkViewport viewports[1];
     viewports[0].x        = x;
-    viewports[0].y        = y;
+    viewports[0].y        = y + height;
     viewports[0].width    = width;
-    viewports[0].height   = height;
+    viewports[0].height   = -height;
     viewports[0].minDepth = mindepth;
     viewports[0].maxDepth = maxdepth;
     vkCmdSetViewport(cmd, 0, 1, &viewports[0]);
@@ -3371,14 +3376,12 @@ class Vk_Ctx : public rd::ICtx {
     vkCmdDispatch(cmd, dim_x, dim_y, dim_z);
   }
   virtual void image_barrier(Resource_ID image_id, rd::Image_Access access) override {
-    ASSERT_ALWAYS(type == rd::Pass_t::COMPUTE);
     VkAccessFlags bits{};
     VkImageLayout layout{};
     to_vk(access, bits, layout);
     _image_barrier(cmd, image_id, bits, layout);
   }
   virtual void buffer_barrier(Resource_ID buf_id, rd::Buffer_Access access) override {
-    ASSERT_ALWAYS(type == rd::Pass_t::COMPUTE);
     _buffer_barrier(cmd, buf_id, to_vk(access));
   }
   void fill_buffer(Resource_ID id, size_t offset, size_t size, u32 value) override {
@@ -3406,8 +3409,8 @@ class Vk_Ctx : public rd::ICtx {
     Buffer buf = dev_ctx->buffers.read(buf_id.id);
     vkCmdUpdateBuffer(cmd, buf.buffer, offset, data_size, data);
   }
-  //void RS_set_line_width(float width) override { vkCmdSetLineWidth(cmd, width); }
-  //void RS_set_depth_bias(float b) override { vkCmdSetDepthBias(cmd, b, 0.0f, 0.0f); }
+  // void RS_set_line_width(float width) override { vkCmdSetLineWidth(cmd, width); }
+  // void RS_set_depth_bias(float b) override { vkCmdSetDepthBias(cmd, b, 0.0f, 0.0f); }
 }; // namespace
 
 class VkFactory : public rd::IDevice {
@@ -3986,7 +3989,7 @@ void VK_Binding_Table::bind_UAV_texture(u32 space, u32 binding, u32 index, Resou
 }
 void VK_Binding_Table::release() {
   // ito(sets.size) dev_ctx->desc_pool.free(sets[i]);
-  ito(set_ids.size) dev_ctx->sets.remove(set_ids[i], 3);
+  ito(set_ids.size) dev_ctx->sets.remove(set_ids[i], 6);
   delete this;
 }
 void VK_Binding_Signature::release(VkDeviceContext *dev_ctx) {

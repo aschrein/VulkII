@@ -108,5 +108,19 @@ int main(int argc, char *argv[]) {
     }
     ASSERT_DEBUG(ual.get_free_space() == N);
   }
+  {
+    static constexpr u32 N = 10000000;
+    Util_Allocator       ual(N);
+    ASSERT_DEBUG(ual.get_num_nodes() == 1);
+    ual.alloc(N / 2);
+    i32 offset = ual.alloc(1);
+    ual.free(0, N / 2);
+    ual.free(offset, 1);
+    ASSERT_DEBUG(ual.get_num_nodes() == 1);
+    ASSERT_DEBUG(ual.alloc(N) == 0);
+    ASSERT_DEBUG(ual.get_num_nodes() == 0);
+    ASSERT_DEBUG(ual.get_free_space() == 0);
+    ASSERT_DEBUG(get_tl()->allocated == 0);
+  }
   return 0;
 }

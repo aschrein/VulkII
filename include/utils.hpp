@@ -1724,6 +1724,12 @@ class Util_Allocator {
     });
     return offset;
   }
+  u32 get_num_nodes() {
+    if (free_root == NULL) return 0;
+    u32 size = 0;
+    free_root->traverse_keys([&](Alloc_Key const &key) { size += 1; });
+    return size;
+  }
   u32 get_free_space() {
     if (free_root == NULL) return 0;
     u32 size = 0;
@@ -1735,26 +1741,36 @@ class Util_Allocator {
       free_root = BinNode_t::create({offset, size});
       return;
     }
-    BinNode_t *ub = free_root->upper_bound({offset, 0});
-#ifdef DEBUG_BUILD
-    BinNode_t *lb = free_root->lower_bound({offset, 0});
-    if (lb) {
-      ASSERT_DEBUG(lb->key.offset + lb->key.size <= offset);
-    }
-#endif
-    if (ub) {
-      ASSERT_DEBUG(ub->key.offset > offset);
-      if (ub->key.offset == offset + size) {
-        u32 new_size = ub->key.size + size;
-        free_root    = free_root->remove(ub->key);
-        if (free_root == NULL) {
-          free_root = BinNode_t::create({offset, new_size});
-        } else
-          free_root = free_root->put({offset, new_size});
-        return;
+    u32 new_offset = offset;
+    u32 new_size   = size;
+    // Try merging the lower bound node
+    if (free_root) {
+      BinNode_t *lb = free_root->lower_bound({offset, 0});
+      if (lb) {
+        ASSERT_DEBUG(lb->key.offset + lb->key.size <= new_offset);
+        if (lb->key.offset + lb->key.size == new_offset) {
+          new_offset = lb->key.offset;
+          new_size   = lb->key.size + new_size;
+          free_root  = free_root->remove(lb->key);
+        }
       }
     }
-    free_root = free_root->put({offset, size});
+    // Try merging the upper bound node
+    if (free_root) {
+      BinNode_t *ub = free_root->upper_bound({offset, 0});
+      if (ub) {
+        ASSERT_DEBUG(ub->key.offset > new_offset);
+        if (ub->key.offset == new_offset + new_size) {
+          new_size  = ub->key.size + new_size;
+          free_root = free_root->remove(ub->key);
+        }
+      }
+    }
+    // Insert new node
+    if (free_root == NULL) {
+      free_root = BinNode_t::create({new_offset, new_size});
+    } else
+      free_root = free_root->put({new_offset, new_size});
   }
 };
 
