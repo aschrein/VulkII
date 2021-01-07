@@ -193,16 +193,17 @@ D3D12_TEXTURE_ADDRESS_MODE to_dx(rd::Address_Mode mode) {
   }
 }
 
-D3D12_RESOURCE_STATES get_default_state(ID3D12Resource *res) {
-  D3D12_HEAP_PROPERTIES hp{};
-  D3D12_HEAP_FLAGS      hf{};
-  DX_ASSERT_OK(res->GetHeapProperties(&hp, &hf));
-  if (hp.Type == D3D12_HEAP_TYPE_READBACK) return D3D12_RESOURCE_STATE_COPY_DEST;
-  if (hp.Type == D3D12_HEAP_TYPE_UPLOAD) return D3D12_RESOURCE_STATE_GENERIC_READ;
-  if (res->GetDesc().Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
-    return D3D12_RESOURCE_STATE_COMMON;
-  return D3D12_RESOURCE_STATE_COMMON;
-}
+// D3D12_RESOURCE_STATES get_default_state(ID3D12Resource *res) {
+//  D3D12_HEAP_PROPERTIES hp{};
+//  D3D12_HEAP_FLAGS      hf{};
+//  DX_ASSERT_OK(res->GetHeapProperties(&hp, &hf));
+//  if (hp.Type == D3D12_HEAP_TYPE_READBACK) //
+//    return D3D12_RESOURCE_STATE_COPY_DEST;
+//  if (hp.Type == D3D12_HEAP_TYPE_UPLOAD) return D3D12_RESOURCE_STATE_GENERIC_READ;
+//  if (res->GetDesc().Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
+//    return D3D12_RESOURCE_STATE_COMMON;
+//  return D3D12_RESOURCE_STATE_COMMON;
+//}
 
 D3D12_COMPARISON_FUNC to_dx(rd::Cmp mode) {
   switch (mode) {
@@ -349,6 +350,10 @@ struct GraphicsPSOWrapper {
   rd::Graphics_Pipeline_State state{};
   D3D_PRIMITIVE_TOPOLOGY      topology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
 };
+struct ResourceWrapper {
+  ID3D12Resource *      res           = NULL;
+  D3D12_RESOURCE_STATES default_state = D3D12_RESOURCE_STATES::D3D12_RESOURCE_STATE_COMMON;
+};
 class DX12Device : public rd::IDevice {
   static constexpr u32 NUM_BACK_BUFFERS = 3;
   static constexpr u32 MAX_THREADS      = 0x100;
@@ -391,7 +396,7 @@ class DX12Device : public rd::IDevice {
 
   void _release_st_lock() { single_thread_guard.exchange(-1); }
 
-  Resource_Array<ID3D12Resource *>        resource_table;
+  Resource_Array<ResourceWrapper *>       resource_table;
   Resource_Array<DX12Binding_Signature *> signature_table;
   Resource_Array<IDxcBlob *>              shader_table;
   Resource_Array<ID3D12PipelineState *>   compute_pso_table;
@@ -437,12 +442,14 @@ class DX12Device : public rd::IDevice {
     ASSERT_SINGLE_THREAD_SCOPE;
     ito(NUM_BACK_BUFFERS) {
       if (sc.images[i].is_valid()) {
-        resource_table.load(sc.images[i])->Release();
+        ResourceWrapper *wr = resource_table.load(sc.images[i]);
+        wr->res->Release();
+        delete wr;
         resource_table.free(sc.images[i]);
       }
       ID3D12Resource *res = NULL;
       sc.sc->GetBuffer(i, IID_PPV_ARGS(&res));
-      sc.images[i] = resource_table.push(res);
+      sc.images[i] = resource_table.push(new ResourceWrapper{res, D3D12_RESOURCE_STATE_COMMON});
     }
   }
   void wait_for_next_frame() {
@@ -460,7 +467,7 @@ class DX12Device : public rd::IDevice {
     SCOPED_LOCK;
     deferred_desc_range_release.push({type, offset, size, 6});
   }
-  ID3D12Resource *       get_resource(ID id) { return resource_table.load(id); }
+  ResourceWrapper *      get_resource(ID id) { return resource_table.load(id); }
   DX12Binding_Signature *get_signature(ID id) { return signature_table.load(id); }
   ID3D12PipelineState *  get_compute_pso(ID id) { return compute_pso_table.load(id); }
   GraphicsPSOWrapper *   get_graphics_pso(ID id) { return graphics_pso_table.load(id); }
@@ -512,6 +519,7 @@ class DX12Device : public rd::IDevice {
             D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE,
             D3D12_MESSAGE_ID_MAP_INVALID_NULLRANGE,
             D3D12_MESSAGE_ID_UNMAP_INVALID_NULLRANGE,
+            D3D12_MESSAGE_ID_UNMAP_RANGE_NOT_EMPTY,
         };
 
         D3D12_INFO_QUEUE_FILTER filter = {};
@@ -632,7 +640,7 @@ class DX12Device : public rd::IDevice {
     auto state              = D3D12_RESOURCE_STATE_COMMON;
     DX_ASSERT_OK(
         device->CreateCommittedResource(&prop, flags, &desc, state, NULL, IID_PPV_ARGS(&buf)));
-    return {resource_table.push(buf), (u32)Resource_Type::TEXTURE};
+    return {resource_table.push(new ResourceWrapper{buf, state}), (u32)Resource_Type::TEXTURE};
   }
   Resource_ID create_buffer(rd::Buffer_Create_Info info) override {
     ID3D12Resource *      buf   = NULL;
@@ -663,12 +671,12 @@ class DX12Device : public rd::IDevice {
       SCOPED_LOCK;
       DX_ASSERT_OK(
           device->CreateCommittedResource(&prop, flags, &desc, state, NULL, IID_PPV_ARGS(&buf)));
-      ASSERT_DEBUG(get_default_state(buf) == state);
+      // ASSERT_DEBUG(get_default_state(buf) == state);
     }
     /*if (state != D3D12_RESOURCE_STATE_COMMON) {
       sync_transition_barrier(buf, state, D3D12_RESOURCE_STATE_COMMON);
     }*/
-    return {resource_table.push(buf), (u32)Resource_Type::BUFFER};
+    return {resource_table.push(new ResourceWrapper{buf, state}), (u32)Resource_Type::BUFFER};
   }
   Resource_ID create_shader(rd::Stage_t type, string_ref text,
                             Pair<string_ref, string_ref> *defines, size_t num_defines) override {
@@ -822,7 +830,7 @@ class DX12Device : public rd::IDevice {
   rd::Image2D_Info get_swapchain_image_info() override {
     SCOPED_LOCK;
     rd::Image2D_Info info{};
-    ID3D12Resource * res  = get_resource(sc.images[frame_contexts[cur_ctx_id].sc_image_id]);
+    ID3D12Resource * res  = get_resource(sc.images[frame_contexts[cur_ctx_id].sc_image_id])->res;
     auto             desc = res->GetDesc();
     info.height           = desc.Height;
     info.layers           = desc.DepthOrArraySize;
@@ -834,7 +842,7 @@ class DX12Device : public rd::IDevice {
   rd::Image_Info get_image_info(Resource_ID res_id) override {
     SCOPED_LOCK;
     rd::Image_Info  info{};
-    ID3D12Resource *res  = get_resource(res_id.id);
+    ID3D12Resource *res  = get_resource(res_id.id)->res;
     auto            desc = res->GetDesc();
     info.depth           = desc.DepthOrArraySize;
     info.height          = desc.Height;
@@ -847,7 +855,7 @@ class DX12Device : public rd::IDevice {
   }
   void *map_buffer(Resource_ID id) override {
     // SCOPED_LOCK;
-    ID3D12Resource *res = get_resource(id.id);
+    ID3D12Resource *res = get_resource(id.id)->res;
     D3D12_RANGE     rr{};
     rr.Begin                 = 0;
     rr.End                   = 0;
@@ -865,7 +873,7 @@ class DX12Device : public rd::IDevice {
   }
   void unmap_buffer(Resource_ID id) override {
     // SCOPED_LOCK;
-    ID3D12Resource *res = get_resource(id.id);
+    ID3D12Resource *res = get_resource(id.id)->res;
     D3D12_RANGE     rr{};
     rr.Begin                 = 0;
     rr.End                   = 0;
@@ -957,7 +965,9 @@ class DX12Device : public rd::IDevice {
         wait_idle();
         ito(NUM_BACK_BUFFERS) {
           if (sc.images[i].is_valid()) {
-            resource_table.load(sc.images[i])->Release();
+            auto wr = resource_table.load(sc.images[i]);
+            wr->res->Release();
+            delete wr;
             resource_table.free(sc.images[i]);
           }
           sc.images[i] = {};
@@ -1244,7 +1254,7 @@ class DX12Binding_Table : public rd::IBinding_Table {
   // u32  get_push_constants_size() { return push_constants_size; }
   void bind_cbuffer(u32 space, u32 binding, Resource_ID buf_id, size_t offset,
                     size_t size) override {
-    ID3D12Resource *res = dev_ctx->get_resource(buf_id.id);
+    ID3D12Resource *res = dev_ctx->get_resource(buf_id.id)->res;
     u32             binding_offset =
         signature->space_descs[space].bindings[binding].OffsetInDescriptorsFromTableStart;
     D3D12_CONSTANT_BUFFER_VIEW_DESC desc{};
@@ -1266,7 +1276,7 @@ class DX12Binding_Table : public rd::IBinding_Table {
   }
   void bind_UAV_buffer(u32 space, u32 binding, Resource_ID buf_id, size_t offset,
                        size_t size) override {
-    ID3D12Resource *res = dev_ctx->get_resource(buf_id.id);
+    ID3D12Resource *res = dev_ctx->get_resource(buf_id.id)->res;
 #ifdef DEBUG_BUILD
     {
       D3D12_RESOURCE_DESC desc = res->GetDesc();
@@ -1296,7 +1306,7 @@ class DX12Binding_Table : public rd::IBinding_Table {
   }
   void bind_texture(u32 space, u32 binding, u32 index, Resource_ID image_id,
                     rd::Image_Subresource const &_range, rd::Format format) override {
-    ID3D12Resource *res = dev_ctx->get_resource(image_id.id);
+    ID3D12Resource *res = dev_ctx->get_resource(image_id.id)->res;
     u32             binding_offset =
         signature->space_descs[space].bindings[binding].OffsetInDescriptorsFromTableStart + index;
     D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
@@ -1355,7 +1365,7 @@ class DX12Binding_Table : public rd::IBinding_Table {
   }
   void bind_UAV_texture(u32 space, u32 binding, u32 index, Resource_ID image_id,
                         rd::Image_Subresource const &_range, rd::Format format) override {
-    ID3D12Resource *res = dev_ctx->get_resource(image_id.id);
+    ID3D12Resource *res = dev_ctx->get_resource(image_id.id)->res;
 #ifdef DEBUG_BUILD
     {
       D3D12_RESOURCE_DESC desc = res->GetDesc();
@@ -1463,14 +1473,14 @@ class FrameBuffer {
     if (info.rts.size) {
       rtv_offset = dev_ctx->get_rtv_desc_heap()->allocate(info.rts.size);
       ito(info.rts.size) {
-        ID3D12Resource *res = dev_ctx->get_resource(info.rts[i].image.id);
+        ID3D12Resource *res = dev_ctx->get_resource(info.rts[i].image.id)->res;
         // Initialize RTVs
         dev_ctx->get_device()->CreateRenderTargetView(res, NULL, get_rtv_handle(i));
       }
     }
     if (info.depth_target.enabled) {
       dsv_offset          = dev_ctx->get_dsv_desc_heap()->allocate(1);
-      ID3D12Resource *res = dev_ctx->get_resource(info.depth_target.image.id);
+      ID3D12Resource *res = dev_ctx->get_resource(info.depth_target.image.id)->res;
       // Initialize DSV
       dev_ctx->get_device()->CreateDepthStencilView(res, NULL, get_dsv_handle());
     }
@@ -1491,7 +1501,7 @@ class FrameBuffer {
       D3D12_RESOURCE_BARRIER bar{};
       bar.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
       bar.Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-      bar.Transition.pResource   = dev_ctx->get_resource(info.rts[i].image.id);
+      bar.Transition.pResource   = dev_ctx->get_resource(info.rts[i].image.id)->res;
       bar.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
       bar.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
       bar.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
@@ -1509,7 +1519,7 @@ class FrameBuffer {
       D3D12_RESOURCE_BARRIER bar{};
       bar.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
       bar.Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-      bar.Transition.pResource   = dev_ctx->get_resource(info.depth_target.image.id);
+      bar.Transition.pResource   = dev_ctx->get_resource(info.depth_target.image.id)->res;
       bar.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
       bar.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
       bar.Transition.StateAfter  = D3D12_RESOURCE_STATE_DEPTH_WRITE;
@@ -1525,7 +1535,7 @@ class FrameBuffer {
       D3D12_RESOURCE_BARRIER bar{};
       bar.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
       bar.Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-      bar.Transition.pResource   = dev_ctx->get_resource(info.rts[i].image.id);
+      bar.Transition.pResource   = dev_ctx->get_resource(info.rts[i].image.id)->res;
       bar.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
       bar.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
       bar.Transition.StateAfter  = D3D12_RESOURCE_STATE_COMMON;
@@ -1535,7 +1545,7 @@ class FrameBuffer {
       D3D12_RESOURCE_BARRIER bar{};
       bar.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
       bar.Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-      bar.Transition.pResource   = dev_ctx->get_resource(info.depth_target.image.id);
+      bar.Transition.pResource   = dev_ctx->get_resource(info.depth_target.image.id)->res;
       bar.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
       bar.Transition.StateBefore = D3D12_RESOURCE_STATE_DEPTH_WRITE;
       bar.Transition.StateAfter  = D3D12_RESOURCE_STATE_COMMON;
@@ -1567,11 +1577,11 @@ class DX12Context : public rd::ICtx {
   // Synchronization
   void _image_barrier(Resource_ID image_id, D3D12_RESOURCE_STATES new_state) {
     InlineArray<D3D12_RESOURCE_BARRIER, 0x10> bars{};
-    ID3D12Resource *                          res  = dev_ctx->get_resource(image_id.id);
+    ID3D12Resource *                          res  = dev_ctx->get_resource(image_id.id)->res;
     auto                                      desc = res->GetDesc();
     if (resource_state_tracker.contains(image_id)) {
     } else {
-      resource_state_tracker.insert(image_id, get_default_state(res));
+      resource_state_tracker.insert(image_id, dev_ctx->get_resource(image_id.id)->default_state);
     }
     D3D12_RESOURCE_STATES StateBefore    = resource_state_tracker.get(image_id);
     D3D12_RESOURCE_STATES StateAfter     = new_state;
@@ -1589,7 +1599,7 @@ class DX12Context : public rd::ICtx {
     bar.Transition.StateAfter  = StateAfter;
     if (bar.Transition.StateAfter == bar.Transition.StateBefore) {
       bar.Type          = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-      bar.UAV.pResource = dev_ctx->get_resource(image_id.id);
+      bar.UAV.pResource = dev_ctx->get_resource(image_id.id)->res;
     }
     bars.push(bar);
     //}
@@ -1599,18 +1609,18 @@ class DX12Context : public rd::ICtx {
     D3D12_RESOURCE_BARRIER bar{};
     bar.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     bar.Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    bar.Transition.pResource   = dev_ctx->get_resource(buf_id.id);
+    bar.Transition.pResource   = dev_ctx->get_resource(buf_id.id)->res;
     bar.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     if (resource_state_tracker.contains(buf_id)) {
     } else {
-      resource_state_tracker.insert(buf_id, get_default_state(bar.Transition.pResource));
+      resource_state_tracker.insert(buf_id, dev_ctx->get_resource(buf_id.id)->default_state);
     }
     bar.Transition.StateBefore         = resource_state_tracker.get(buf_id);
     bar.Transition.StateAfter          = new_state;
     resource_state_tracker.get(buf_id) = bar.Transition.StateAfter;
     if (bar.Transition.StateAfter == bar.Transition.StateBefore) {
       bar.Type          = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-      bar.UAV.pResource = dev_ctx->get_resource(buf_id.id);
+      bar.UAV.pResource = dev_ctx->get_resource(buf_id.id)->res;
     }
     cmd->ResourceBarrier(1, &bar);
   }
@@ -1619,9 +1629,9 @@ class DX12Context : public rd::ICtx {
   void release() {
     resource_state_tracker.iter_pairs([=](Resource_ID res, D3D12_RESOURCE_STATES state) {
       if (res.type == (u32)Resource_Type::BUFFER) {
-        _buffer_barrier(res, get_default_state(dev_ctx->get_resource(res.id)));
+        _buffer_barrier(res, dev_ctx->get_resource(res.id)->default_state);
       } else if (res.type == (u32)Resource_Type::TEXTURE) {
-        _image_barrier(res, get_default_state(dev_ctx->get_resource(res.id)));
+        _image_barrier(res, dev_ctx->get_resource(res.id)->default_state);
       } else {
         TRAP;
       }
@@ -1666,7 +1676,7 @@ class DX12Context : public rd::ICtx {
   }
   void bind_index_buffer(Resource_ID buffer, size_t offset, rd::Index_t format) override {
     ASSERT_DEBUG(gpso);
-    ID3D12Resource *        res = dev_ctx->get_resource(buffer.id);
+    ID3D12Resource *        res = dev_ctx->get_resource(buffer.id)->res;
     D3D12_INDEX_BUFFER_VIEW view{};
     view.BufferLocation = res->GetGPUVirtualAddress() + offset;
     view.Format         = to_dx(format);
@@ -1675,7 +1685,7 @@ class DX12Context : public rd::ICtx {
   }
   void bind_vertex_buffer(u32 index, Resource_ID buffer, size_t offset) override {
     ASSERT_DEBUG(gpso);
-    ID3D12Resource *         res = dev_ctx->get_resource(buffer.id);
+    ID3D12Resource *         res = dev_ctx->get_resource(buffer.id)->res;
     D3D12_VERTEX_BUFFER_VIEW view{};
     view.BufferLocation = res->GetGPUVirtualAddress() + offset;
     view.SizeInBytes    = res->GetDesc().Width - offset;
@@ -1739,13 +1749,13 @@ class DX12Context : public rd::ICtx {
     u32                                numRows[MAX_TEXTURE_SUBRESOURCE_COUNT];
     u64                                rowSizesInBytes[MAX_TEXTURE_SUBRESOURCE_COUNT];
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT layouts[MAX_TEXTURE_SUBRESOURCE_COUNT];
-    ID3D12Resource *                   tex  = dev_ctx->get_resource(img_id.id);
+    ID3D12Resource *                   tex  = dev_ctx->get_resource(img_id.id)->res;
     D3D12_RESOURCE_DESC                desc = tex->GetDesc();
     u64 numSubResources                     = (u64)desc.MipLevels * (u64)desc.DepthOrArraySize;
     dev_ctx->get_device()->GetCopyableFootprints(&desc, 0, (u32)numSubResources, 0, layouts,
                                                  numRows, rowSizesInBytes, &textureMemorySize);
     D3D12_TEXTURE_COPY_LOCATION src{};
-    src.pResource              = dev_ctx->get_resource(buf_id.id);
+    src.pResource              = dev_ctx->get_resource(buf_id.id)->res;
     src.Type                   = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     src.PlacedFootprint        = layouts[dst_info.layer * desc.MipLevels + dst_info.level];
     src.PlacedFootprint.Offset = buffer_offset;
@@ -1775,13 +1785,13 @@ class DX12Context : public rd::ICtx {
     u32                                numRows[MAX_TEXTURE_SUBRESOURCE_COUNT];
     u64                                rowSizesInBytes[MAX_TEXTURE_SUBRESOURCE_COUNT];
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT layouts[MAX_TEXTURE_SUBRESOURCE_COUNT];
-    ID3D12Resource *                   tex  = dev_ctx->get_resource(img_id.id);
+    ID3D12Resource *                   tex  = dev_ctx->get_resource(img_id.id)->res;
     D3D12_RESOURCE_DESC                desc = tex->GetDesc();
     u64 numSubResources                     = (u64)desc.MipLevels * (u64)desc.DepthOrArraySize;
     dev_ctx->get_device()->GetCopyableFootprints(&desc, 0, (u32)numSubResources, 0, layouts,
                                                  numRows, rowSizesInBytes, &textureMemorySize);
     D3D12_TEXTURE_COPY_LOCATION dst{};
-    dst.pResource              = dev_ctx->get_resource(buf_id.id);
+    dst.pResource              = dev_ctx->get_resource(buf_id.id)->res;
     dst.Type                   = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     dst.PlacedFootprint        = layouts[dst_info.layer * desc.MipLevels + dst_info.level];
     dst.PlacedFootprint.Offset = buffer_offset;
@@ -1832,8 +1842,8 @@ class DX12Context : public rd::ICtx {
   }
   void copy_buffer(Resource_ID src_buf_id, size_t src_offset, Resource_ID dst_buf_id,
                    size_t dst_offset, u32 size) override {
-    ID3D12Resource *src = dev_ctx->get_resource(src_buf_id.id);
-    ID3D12Resource *dst = dev_ctx->get_resource(dst_buf_id.id);
+    ID3D12Resource *src = dev_ctx->get_resource(src_buf_id.id)->res;
+    ID3D12Resource *dst = dev_ctx->get_resource(dst_buf_id.id)->res;
     cmd->CopyBufferRegion(dst, dst_offset, src, src_offset, size);
   }
   // Synchronization
@@ -2050,8 +2060,9 @@ void DX12Device::deferred_resource_release_iteration() {
     if (item.second == 0) {
       if (item.first.type == (u32)Resource_Type::BUFFER ||
           item.first.type == (u32)Resource_Type::TEXTURE) {
-        ID3D12Resource *res = resource_table.load(item.first.id);
-        res->Release();
+        auto wr = resource_table.load(item.first.id);
+        wr->res->Release();
+        delete wr;
         resource_table.free(item.first.id);
       } else if (item.first.type == (u32)Resource_Type::RENDER_PASS) {
         auto render_pass = renderpass_table.load(item.first.id);

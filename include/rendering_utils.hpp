@@ -989,6 +989,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     default: TRAP;
     }
     rd::ICtx *ctx = factory->start_compute_pass();
+    ctx->buffer_barrier(gpu_buffer, rd::Buffer_Access::TRANSFER_DST);
     ctx->copy_buffer(staging_buffer, 0, gpu_buffer, 0, image->get_size_in_bytes());
     rd::IBinding_Table *table = factory->create_binding_table(signature);
     defer(table->release());
