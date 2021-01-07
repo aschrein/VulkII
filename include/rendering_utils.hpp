@@ -5,6 +5,7 @@
 #include "scene.hpp"
 #include "simplefont.h"
 #include "utils.hpp"
+#include <mutex>
 
 #ifdef __linux__
 #  include <SDL2/SDL.h>
@@ -46,8 +47,6 @@ static void setup_default_state(rd::Graphics_Pipeline_State &state, u32 num_rts 
   ms_state.num_samples = 1;
   state.MS_set_state(ms_state);
 }
-#if 0
-
 
 struct ImGui_ID {
   Resource_ID     id;
@@ -65,20 +64,7 @@ struct ImGui_ID {
 
 class IGUIApp {
   protected:
-  Resource_ID vs{};
-  Resource_ID ps{};
-  u32         width{0}, height{0};
-  Resource_ID sampler{};
-  Resource_ID vertex_buffer{};
-  Resource_ID index_buffer{};
-
-  Resource_ID font_texture{};
-  Resource_ID staging_buffer{};
-
   InlineArray<ImGui_ID, 0x100> image_bindings{};
-
-  unsigned char *font_pixels = NULL;
-  int            font_width = 0, font_height = 0;
 
   i32          last_m_x          = 0;
   i32          last_m_y          = 0;
@@ -87,10 +73,6 @@ class IGUIApp {
   bool         imgui_initialized = false;
   rd::IDevice *factory           = NULL;
   SDL_Window * window            = NULL;
-
-  Resource_ID render_pass{};
-  Resource_ID gfx_pso{};
-  Resource_ID gfx_signature{};
 
   virtual void on_gui() {}
   virtual void on_init() {}
@@ -140,23 +122,24 @@ class IGUIApp {
       }
     }
   }
-  void _start(rd::Impl_t impl_t) {
-    static int init = [] { return SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS); }();
-    window = SDL_CreateWindow("VulkII", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 512, 512,
-                              SDL_WINDOW_RESIZABLE);
-    defer({
-      release();
-      // SDL_Quit();
-    });
-
+  void _start(rd::Impl_t impl) {
+    static int  init   = [] { return SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS); }();
+    SDL_Window *window = NULL;
+    {
+      static std::mutex           mutex;
+      std::lock_guard<std::mutex> _locke(mutex);
+      window = SDL_CreateWindow(impl == rd::Impl_t::VULKAN ? "VulkII on Vulkan" : "VulkII on DX12",
+                                SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 512, 512,
+                                SDL_WINDOW_RESIZABLE);
+    }
     void *handle = NULL;
-#  ifdef WIN32
+#ifdef WIN32
     SDL_SysWMinfo wmInfo;
     SDL_VERSION(&wmInfo.version);
     SDL_GetWindowWMInfo(window, &wmInfo);
     HWND hwnd = wmInfo.info.win.window;
     handle    = (void *)hwnd;
-#  else
+#else
     SDL_SysWMinfo wmInfo;
     SDL_VERSION(&wmInfo.version);
     SDL_GetWindowWMInfo(window, &wmInfo);
@@ -164,127 +147,55 @@ class IGUIApp {
     xcb_connection_t *connection = XGetXCBConnection(wmInfo.info.x11.display);
     Ptr2              ptrs{(void *)hwnd, (void *)connection};
     handle = (void *)&ptrs;
-#  endif
-    if (impl_t == rd::Impl_t::VULKAN) {
+#endif
+    rd::IDevice *factory = NULL;
+    if (impl == rd::Impl_t::VULKAN) {
       factory = rd::create_vulkan(handle);
-    } else if (impl_t == rd::Impl_t::DX12) {
-      TRAP;
-      // factory = rd::create_vulkan(NULL);
+    } else if (impl == rd::Impl_t::DX12) {
+      factory = rd::create_dx12(handle);
     } else {
       TRAP;
     }
+    if (factory == NULL) return;
     factory->start_frame();
-    imgui_initialized = true;
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-    ImGuiIO &io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-    ImGui::StyleColorsDark();
-    if (factory->getImplType() == rd::Impl_t::VULKAN) {
-      ImGui_ImplSDL2_InitForVulkan(window);
-    } else if (factory->getImplType() == rd::Impl_t::DX12) {
-      ImGui_ImplSDL2_InitForD3D(window);
-    } else {
-      TRAP;
-    }
-
-    io.Fonts->GetTexDataAsRGBA32(&font_pixels, &font_width, &font_height);
-
-    rd::Image_Create_Info info;
-    MEMZERO(info);
-    info.format      = rd::Format::RGBA8_UNORM;
-    info.width       = font_width;
-    info.height      = font_height;
-    info.depth       = 1;
-    info.layers      = 1;
-    info.levels      = 1;
-    info.memory_type = rd::Memory_Type::GPU_LOCAL;
-    info.usage_bits =
-        (u32)rd::Image_Usage_Bits::USAGE_SAMPLED | (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST;
-    font_texture    = factory->create_image(info);
-    io.Fonts->TexID = bind_texture(font_texture, 0, 0, rd::Format::RGBA8_UNORM);
-
-    rd::Buffer_Create_Info buf_info;
-    MEMZERO(buf_info);
-    buf_info.memory_type = rd::Memory_Type::CPU_WRITE_GPU_READ;
-    buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
-    buf_info.size        = font_width * font_height * 4;
-    staging_buffer       = factory->create_buffer(buf_info);
-
-    on_init();
     factory->end_frame();
-    while (true) {
-      SDL_Event event;
-      while (SDL_PollEvent(&event)) {
-        ImGui_ImplSDL2_ProcessEvent(&event);
-        if (event.type == SDL_QUIT) {
-          exit(0);
-        }
-        switch (event.type) {
-        case SDL_WINDOWEVENT:
-          if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
-          }
-          break;
-        }
-      }
-      factory->start_frame();
-      frame();
-      factory->end_frame();
-    }
-  }
-  ImTextureID bind_texture(Resource_ID id, u32 layer, u32 level, rd::Format format) {
-    ImGui_ID iid;
-    MEMZERO(iid);
-    iid.id         = id;
-    iid.base_layer = layer;
-    iid.base_level = level;
-    iid.format     = format;
-    image_bindings.push(iid);
-    return (ImTextureID)(size_t)(image_bindings.size - 1);
-  }
-  void frame() {
-    on_frame();
-    rd::Image2D_Info scinfo = factory->get_swapchain_image_info();
-    if (width != scinfo.width || height != scinfo.height) {
-      width  = scinfo.width;
-      height = scinfo.height;
-      timer.update();
-      rd::Clear_Color cl;
-      MEMZERO(cl);
-      cl.clear = true;
 
-      rd::Render_Pass_Create_Info info;
-      MEMZERO(info);
-      rd::RT_View rt0;
-      MEMZERO(rt0);
-      rt0.image             = factory->get_swapchain_image();
-      rt0.format            = rd::Format::NATIVE;
-      rt0.clear_color.clear = true;
-      info.rts.push(rt0);
+    constexpr u32 MAX_FRAMES = 0x10;
+    u32           NUM_FRAMES = factory->get_num_swapchain_images();
+    Resource_ID   frame_buffers[MAX_FRAMES]{};
+    Resource_ID   render_pass{};
+    Resource_ID   pso{};
+    defer({
+      ito(NUM_FRAMES) {
+        if (frame_buffers[i].is_valid()) factory->release_resource(frame_buffers[i]);
+      }
       if (render_pass.is_valid()) factory->release_resource(render_pass);
-      render_pass = factory->create_render_pass(info);
-    }
-    rd::ICtx *ctx = factory->start_render_pass(render_pass);
+      if (pso.is_valid()) factory->release_resource(pso);
+    });
+    u32  frame_id = 0;
+    u32  width = 0, height = 0;
+    u32  window_id    = SDL_GetWindowID(window);
+    bool focus_events = false;
     struct PushConstants {
       float2 uScale;
       float2 uTranslate;
       u32    control_flags;
     };
-    static string_ref            shader    = stref_s(R"(
+    static string_ref imgui_shader = stref_s(R"(
 struct PushConstants
 {
   float2 uScale;
   float2 uTranslate; 
   u32    control_flags;
 };
-[[vk::push_constant]] ConstantBuffer<PushConstants> pc : register(b0, space0);
+[[vk::push_constant]] ConstantBuffer<PushConstants> pc : DX12_PUSH_CONSTANTS_REGISTER;
 
 #define CONTROL_DEPTH_ENABLE 1
 #define CONTROL_AMPLIFY 2
 #define is_control(flag) (pc.control_flags & flag) != 0
 
 [[vk::binding(0, 0)]] Texture2D<float4>   sTexture          : register(t0, space0);
-[[vk::binding(1, 0)]] SamplerState        sSampler          : register(s2, space0);
+[[vk::binding(1, 0)]] SamplerState        sSampler          : register(s1, space0);
 
 struct PSInput {
   [[vk::location(0)]] float4 pos   : SV_POSITION;
@@ -305,6 +216,7 @@ PSInput main(in VSInput input) {
   output.Color = input.aColor;
   output.UV    = input.aUV;
   output.pos   = float4(input.aPos * pc.uScale + pc.uTranslate, 0.0f, 1.0f);
+  output.pos.y *= -1.0f;
   return output;
 }
 #endif
@@ -326,14 +238,28 @@ float4 main(in PSInput input) : SV_TARGET0 {
 }
 #endif
 )");
+    Resource_ID       signature    = [=] {
+      rd::Binding_Space_Create_Info set_info{};
+      set_info.bindings.push({rd::Binding_t::TEXTURE, 1});
+      set_info.bindings.push({rd::Binding_t::SAMPLER, 1});
+      rd::Binding_Table_Create_Info table_info{};
+      table_info.spaces.push(set_info);
+      table_info.push_constants_size = sizeof(PushConstants);
+      return factory->create_signature(table_info);
+    }();
+    defer(factory->release_resource(signature));
     Pair<string_ref, string_ref> defines[] = {
         {stref_s("VERTEX"), {}},
         {stref_s("PIXEL"), {}},
     };
-    if (vs.is_null()) vs = factory->create_shader(rd::Stage_t::VERTEX, shader, &defines[0], 1);
-    if (ps.is_null()) ps = factory->create_shader(rd::Stage_t::PIXEL, shader, &defines[1], 1);
+    Resource_ID vs = factory->create_shader(rd::Stage_t::VERTEX, imgui_shader, &defines[0], 1);
+    Resource_ID ps = factory->create_shader(rd::Stage_t::PIXEL, imgui_shader, &defines[1], 1);
+    defer({
+      factory->release_resource(vs);
+      factory->release_resource(ps);
+    });
 
-    if (sampler.is_null()) {
+    Resource_ID sampler = [=] {
       rd::Sampler_Create_Info info;
       MEMZERO(info);
       info.address_mode_u = rd::Address_Mode::CLAMP_TO_EDGE;
@@ -343,91 +269,69 @@ float4 main(in PSInput input) : SV_TARGET0 {
       info.min_filter     = rd::Filter::NEAREST;
       info.mip_mode       = rd::Filter::NEAREST;
       info.anisotropy     = false;
-      info.max_anisotropy = 16.0f;
-      sampler             = factory->create_sampler(info);
-    }
-
-    if (!imgui_initialized) {
-    }
-
-    ImGui_ImplSDL2_NewFrame(window);
-    ImGui::NewFrame();
-    ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDocking;
-    ImGuiViewport *  viewport     = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(viewport->Pos);
-    ImGui::SetNextWindowSize(viewport->Size);
-    ImGui::SetNextWindowViewport(viewport->ID);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-    window_flags |= ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
-                    ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove;
-    window_flags |= ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus;
-    window_flags |= ImGuiWindowFlags_NoBackground;
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 1.0f);
-    ImGui::SetNextWindowBgAlpha(-1.0f);
-    ImGui::Begin("DockSpace", nullptr, window_flags);
-    ImGui::PopStyleVar(4);
-    ImGuiID dockspace_id = ImGui::GetID("MyDockSpace");
-    ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_PassthruCentralNode);
-    ImGui::End();
-
-    static bool show_demo_window = true;
-    ImGui::ShowDemoWindow(&show_demo_window);
-    on_gui();
-    ImGui::Render();
-
-    draw_data = ImGui::GetDrawData();
+      return factory->create_sampler(info);
+    }();
+    IMGUI_CHECKVERSION();
+    ImGuiContext *imgui_ctx = ImGui::CreateContext();
+    ImGui::SetCurrentContext(imgui_ctx);
+    ImGuiIO &io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    ImGui::StyleColorsDark();
     {
+      static std::mutex           mutex;
+      std::lock_guard<std::mutex> _locke(mutex);
+      if (factory->getImplType() == rd::Impl_t::VULKAN) {
+        ImGui_ImplSDL2_InitForVulkan(window);
+      } else if (factory->getImplType() == rd::Impl_t::DX12) {
+        ImGui_ImplSDL2_InitForD3D(window);
+      } else {
+        TRAP;
+      }
+    }
+    Resource_ID font_texture = [&] {
+      static std::mutex           mutex;
+      std::lock_guard<std::mutex> _locke(mutex);
+      unsigned char *             font_pixels = NULL;
+      int                         font_width = 0, font_height = 0;
+      io.Fonts->GetTexDataAsRGBA32(&font_pixels, &font_width, &font_height);
+
+      rd::Image_Create_Info info;
+      MEMZERO(info);
+      info.format = rd::Format::RGBA8_UNORM;
+      info.width  = font_width;
+      info.height = font_height;
+      info.depth  = 1;
+      info.layers = 1;
+      info.levels = 1;
+      info.usage_bits =
+          (u32)rd::Image_Usage_Bits::USAGE_SAMPLED | (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST;
+      Resource_ID font_texture = factory->create_image(info);
+      io.Fonts->TexID          = (ImTextureID)bind_texture(font_texture, 0, 0, rd::Format::NATIVE);
+
       rd::Buffer_Create_Info buf_info;
       MEMZERO(buf_info);
       buf_info.memory_type = rd::Memory_Type::CPU_WRITE_GPU_READ;
-      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
-      buf_info.size        = (draw_data->TotalVtxCount + 1) * sizeof(ImDrawVert);
-      vertex_buffer        = factory->create_buffer(buf_info);
-    }
-    {
-      rd::Buffer_Create_Info buf_info;
-      MEMZERO(buf_info);
-      buf_info.memory_type = rd::Memory_Type::CPU_WRITE_GPU_READ;
-      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER;
-      buf_info.size        = (draw_data->TotalIdxCount + 1) * sizeof(ImDrawIdx);
-      index_buffer         = factory->create_buffer(buf_info);
-    }
-    {
-      {
-        ImDrawVert *vtx_dst = (ImDrawVert *)factory->map_buffer(vertex_buffer);
+      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
+      u32 pitch = rd::IDevice::align_up(font_width * 4, rd::IDevice::TEXTURE_DATA_PITCH_ALIGNMENT);
+      buf_info.size              = font_height * pitch;
+      Resource_ID staging_buffer = factory->create_buffer(buf_info);
+      factory->release_resource(staging_buffer);
 
-        ito(draw_data->CmdListsCount) {
-
-          const ImDrawList *cmd_list = draw_data->CmdLists[i];
-          memcpy(vtx_dst, cmd_list->VtxBuffer.Data, cmd_list->VtxBuffer.Size * sizeof(ImDrawVert));
-
-          vtx_dst += cmd_list->VtxBuffer.Size;
+      u8 *dst = (u8 *)factory->map_buffer(staging_buffer);
+      yto(font_height) {
+        xto(font_width) {
+          memcpy(dst + pitch * y, font_pixels + font_width * 4 * y, font_width * 4);
         }
-        factory->unmap_buffer(vertex_buffer);
       }
-      {
-        ImDrawIdx *idx_dst = (ImDrawIdx *)factory->map_buffer(index_buffer);
-        ito(draw_data->CmdListsCount) {
-
-          const ImDrawList *cmd_list = draw_data->CmdLists[i];
-
-          memcpy(idx_dst, cmd_list->IdxBuffer.Data, cmd_list->IdxBuffer.Size * sizeof(ImDrawIdx));
-          idx_dst += cmd_list->IdxBuffer.Size;
-        }
-        factory->unmap_buffer(index_buffer);
-      }
-    }
-    if (font_pixels != NULL) {
-      void *dst = factory->map_buffer(staging_buffer);
-      memcpy(dst, font_pixels, font_width * font_height * 4);
       factory->unmap_buffer(staging_buffer);
-      ctx->copy_buffer_to_image(staging_buffer, 0, font_texture, rd::Image_Copy::top_level());
+      rd::ICtx *ctx = factory->start_compute_pass();
+      ctx->image_barrier(font_texture, rd::Image_Access::TRANSFER_DST);
+      ctx->copy_buffer_to_image(staging_buffer, 0, font_texture, rd::Image_Copy::top_level(pitch));
+      factory->end_compute_pass(ctx);
       font_pixels = NULL;
-    }
-
-    if (gfx_pso.is_null()) {
+      return font_texture;
+    }();
+    {
       rd::Graphics_Pipeline_State gfx_state{};
       setup_default_state(gfx_state);
       rd::Blend_State bs;
@@ -475,102 +379,269 @@ float4 main(in PSInput input) : SV_TARGET0 {
         info.type     = rd::Attriute_t::TEXCOORD1;
         gfx_state.IA_set_attribute(info);
       }
-      gfx_signature = [this] {
-        rd::Binding_Space_Create_Info set_info{};
-        set_info.bindings.push({0, rd::Binding_t::TEXTURE, 1});
-        set_info.bindings.push({1, rd::Binding_t::SAMPLER, 1});
-        rd::Binding_Table_Create_Info table_info{};
-        table_info.spaces.push(set_info);
-        table_info.push_constants_size = sizeof(PushConstants);
-        return factory->create_signature(table_info);
-      }();
-      gfx_pso = factory->create_graphics_pso(gfx_signature, render_pass, gfx_state);
+      gfx_state.IA_set_vertex_binding(0, sizeof(ImDrawVert), rd::Input_Rate::VERTEX);
+      rd::Render_Pass_Create_Info info{};
+      rd::RT_Ref                  rt0{};
+      rt0.format            = factory->get_swapchain_image_info().format;
+      rt0.clear_color.clear = true;
+      rt0.clear_color.r     = 0.0f;
+      rt0.clear_color.g     = 0.0f;
+      rt0.clear_color.b     = 0.0f;
+      rt0.clear_color.a     = 0.0f;
+      info.rts.push(rt0);
+      render_pass = factory->create_render_pass(info);
+      pso         = factory->create_graphics_pso(signature, render_pass, gfx_state);
     }
+    // static InlineArray<SDL_Event, 0x100> sdl_event_queue;
+    // static std::mutex                    sdl_event_mutex;
+    // static std::atomic<int>              sdl_event_cnt;
+    while (true) {
+      ImGui::SetCurrentContext(imgui_ctx);
+      image_bindings.reset();
+      io.Fonts->TexID = (ImTextureID)bind_texture(font_texture, 0, 0, rd::Format::NATIVE);
 
-    ctx->set_viewport(0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f);
-    ctx->bind_sampler(0, 1, sampler);
-    ImVec2 clip_off          = draw_data->DisplayPos;
-    ImVec2 clip_scale        = draw_data->FramebufferScale;
-    int    global_vtx_offset = 0;
-    int    global_idx_offset = 0;
-
-    {
-      float scale[2];
-      scale[0] = 2.0f / draw_data->DisplaySize.x;
-      scale[1] = 2.0f / draw_data->DisplaySize.y;
-      float translate[2];
-      translate[0] = -1.0f - draw_data->DisplayPos.x * scale[0];
-      translate[1] = -1.0f - draw_data->DisplayPos.y * scale[1];
-      ctx->push_constants(scale, 0, 8);
-      ctx->push_constants(translate, 8, 8);
-      u32 control = 0;
-      ctx->push_constants(&control, 16, 4);
-    }
-    if (sizeof(ImDrawIdx) == 2)
-      ctx->IA_set_index_buffer(index_buffer, 0, rd::Index_t::UINT16);
-    else
-      ctx->IA_set_index_buffer(index_buffer, 0, rd::Index_t::UINT32);
-    ctx->IA_set_vertex_buffer(0, vertex_buffer, 0, sizeof(ImDrawVert), rd::Input_Rate::VERTEX);
-    u32 control = 0;
-    ctx->push_constants(&control, 16, 4);
-    for (int n = 0; n < draw_data->CmdListsCount; n++) {
-      const ImDrawList *cmd_list = draw_data->CmdLists[n];
-      for (int cmd_i = 0; cmd_i < cmd_list->CmdBuffer.Size; cmd_i++) {
-        const ImDrawCmd *pcmd = &cmd_list->CmdBuffer[cmd_i];
-        ImVec4           clip_rect;
-        clip_rect.x  = (pcmd->ClipRect.x - clip_off.x) * clip_scale.x;
-        clip_rect.y  = (pcmd->ClipRect.y - clip_off.y) * clip_scale.y;
-        clip_rect.z  = (pcmd->ClipRect.z - clip_off.x) * clip_scale.x;
-        clip_rect.w  = (pcmd->ClipRect.w - clip_off.y) * clip_scale.y;
-        ImGui_ID img = image_bindings[(size_t)pcmd->TextureId];
-        if (img.format == rd::Format::D32_FLOAT) {
-          control = 1;
+      SDL_Event event{};
+      {
+        // std::lock_guard<std::mutex> _locke(sdl_event_mutex);
+        while (SDL_PollEvent(&event)) {
+          // SDL_Event event = sdl_event_queue[i];
+          if (focus_events) {
+            ImGui_ImplSDL2_ProcessEvent(&event);
+            if (event.type == SDL_QUIT) {
+            }
+          }
+          if (event.type == SDL_WINDOWEVENT) {
+            if (event.window.windowID != window_id) continue;
+            if (event.window.event == SDL_WINDOWEVENT_CLOSE) {
+              return;
+            } else if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED ||
+                       event.window.event == SDL_WINDOWEVENT_ENTER) {
+              focus_events = true;
+            } else if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST ||
+                       event.window.event == SDL_WINDOWEVENT_LEAVE) {
+              focus_events = false;
+            } else if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
+            }
+          }
+          // sdl_event_queue.push(event);
+          // sdl_event_cnt = 2;
         }
-        if (img.format == rd::Format::R32_UINT) {
-          control    = 2;
-          img.format = rd::Format::RGBA8_UNORM;
-        }
-        if (control != 0) {
-          ctx->push_constants(&control, 16, 4);
-        }
-        rd::Image_Subresource range;
-        range.layer      = img.base_layer;
-        range.level      = img.base_level;
-        range.num_layers = 1;
-        range.num_levels = 1;
-        ctx->bind_image(0, 0, 0, img.id, range, img.format);
-        ctx->set_scissor(clip_rect.x, clip_rect.y, clip_rect.z - clip_rect.x,
-                         clip_rect.w - clip_rect.y);
-        ctx->draw_indexed(pcmd->ElemCount, 1, pcmd->IdxOffset + global_idx_offset, 0,
-                          pcmd->VtxOffset + global_vtx_offset);
-        if (control != 0) {
-          control = 0;
-          ctx->push_constants(&control, 16, 4);
+        /* if (int val = sdl_event_cnt.fetch_add(-1) > 0) {
+           defer({
+             if (val == 1) {
+               sdl_event_queue.size = 0;
+             }
+           });
+           ito(sdl_event_queue.size) {
+             SDL_Event event = sdl_event_queue[i];
+             if (focus_events) {
+               ImGui_ImplSDL2_ProcessEvent(&event);
+               if (event.type == SDL_QUIT) {
+               }
+             }
+             if (event.type == SDL_WINDOWEVENT) {
+               if (event.window.windowID != window_id) continue;
+               if (event.window.event == SDL_WINDOWEVENT_CLOSE) {
+                 return;
+               } else if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED ||
+                          event.window.event == SDL_WINDOWEVENT_ENTER) {
+                 focus_events = true;
+               } else if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST ||
+                          event.window.event == SDL_WINDOWEVENT_LEAVE) {
+                 focus_events = false;
+               } else if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
+               }
+             }
+           }
+         }*/
+      }
+      factory->start_frame();
+      rd::Image2D_Info scinfo = factory->get_swapchain_image_info();
+      if (width != scinfo.width || height != scinfo.height) {
+        width  = scinfo.width;
+        height = scinfo.height;
+        ito(NUM_FRAMES) {
+          if (frame_buffers[i].is_valid()) {
+            factory->release_resource(frame_buffers[i]);
+            frame_buffers[i] = {};
+          };
         }
       }
-      global_idx_offset += cmd_list->IdxBuffer.Size;
-      global_vtx_offset += cmd_list->VtxBuffer.Size;
-    }
+      if (frame_buffers[frame_id].is_null()) {
+        rd::Frame_Buffer_Create_Info info{};
+        rd::RT_View                  rt0{};
+        rt0.image  = factory->get_swapchain_image();
+        rt0.format = rd::Format::NATIVE;
+        info.rts.push(rt0);
+        frame_buffers[frame_id] = factory->create_frame_buffer(render_pass, info);
+      }
+      rd::ICtx *ctx = factory->start_render_pass(render_pass, frame_buffers[frame_id]);
+      ctx->image_barrier(font_texture, rd::Image_Access::SAMPLED);
+      ctx->start_render_pass();
+      on_frame();
+      auto         sc_info = factory->get_swapchain_image_info();
+      static float angle   = 0.0f;
+      angle += 1.0e-3f;
+      // ctx->set_scissor(0, 0, sc_info.width, sc_info.height);
+      ctx->set_viewport(0.0f, 0.0f, (f32)sc_info.width, (f32)sc_info.height, 0.0f, 1.0f);
+      // ImGui Pass
+      {
+        ImGui_ImplSDL2_NewFrame(window);
+        ImGui::NewFrame();
+        ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDocking;
+        ImGuiViewport *  viewport     = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(viewport->Pos);
+        ImGui::SetNextWindowSize(viewport->Size);
+        ImGui::SetNextWindowViewport(viewport->ID);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        window_flags |= ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+                        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove;
+        window_flags |= ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus;
+        window_flags |= ImGuiWindowFlags_NoBackground;
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 1.0f);
+        ImGui::SetNextWindowBgAlpha(-1.0f);
+        ImGui::Begin("DockSpace", nullptr, window_flags);
+        ImGui::PopStyleVar(4);
+        ImGuiID dockspace_id = ImGui::GetID("MyDockSpace");
+        ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_PassthruCentralNode);
+        on_gui();
+        ImGui::End();
 
-    ImGuiIO &io = ImGui::GetIO();
-    factory->release_resource(vertex_buffer);
-    factory->release_resource(index_buffer);
-    if (staging_buffer.is_null() == false) {
-      factory->release_resource(staging_buffer);
+        // static bool show_demo_window = true;
+        // ImGui::ShowDemoWindow(&show_demo_window);
+
+        ImGui::Render();
+      }
+      ImDrawData *draw_data = ImGui::GetDrawData();
+      // Render IMGUI
+      {
+        Resource_ID vertex_buffer = [=] {
+          rd::Buffer_Create_Info buf_info;
+          MEMZERO(buf_info);
+          buf_info.memory_type = rd::Memory_Type::CPU_WRITE_GPU_READ;
+          buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
+          buf_info.size        = (draw_data->TotalVtxCount + 1) * sizeof(ImDrawVert);
+          return factory->create_buffer(buf_info);
+        }();
+        factory->release_resource(vertex_buffer);
+        Resource_ID index_buffer = [=] {
+          rd::Buffer_Create_Info buf_info;
+          MEMZERO(buf_info);
+          buf_info.memory_type = rd::Memory_Type::CPU_WRITE_GPU_READ;
+          buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER;
+          buf_info.size        = (draw_data->TotalIdxCount + 1) * sizeof(ImDrawIdx);
+          return factory->create_buffer(buf_info);
+        }();
+        factory->release_resource(index_buffer);
+        {
+          {
+            ImDrawVert *vtx_dst = (ImDrawVert *)factory->map_buffer(vertex_buffer);
+
+            ito(draw_data->CmdListsCount) {
+
+              const ImDrawList *cmd_list = draw_data->CmdLists[i];
+              memcpy(vtx_dst, cmd_list->VtxBuffer.Data,
+                     cmd_list->VtxBuffer.Size * sizeof(ImDrawVert));
+
+              vtx_dst += cmd_list->VtxBuffer.Size;
+            }
+            factory->unmap_buffer(vertex_buffer);
+          }
+          {
+            ImDrawIdx *idx_dst = (ImDrawIdx *)factory->map_buffer(index_buffer);
+            ito(draw_data->CmdListsCount) {
+
+              const ImDrawList *cmd_list = draw_data->CmdLists[i];
+
+              memcpy(idx_dst, cmd_list->IdxBuffer.Data,
+                     cmd_list->IdxBuffer.Size * sizeof(ImDrawIdx));
+              idx_dst += cmd_list->IdxBuffer.Size;
+            }
+            factory->unmap_buffer(index_buffer);
+          }
+        }
+        ImVec2 clip_off          = draw_data->DisplayPos;
+        ImVec2 clip_scale        = draw_data->FramebufferScale;
+        int    global_vtx_offset = 0;
+        int    global_idx_offset = 0;
+
+        ctx->bind_graphics_pso(pso);
+        if (sizeof(ImDrawIdx) == 2)
+          ctx->bind_index_buffer(index_buffer, 0, rd::Index_t::UINT16);
+        else
+          ctx->bind_index_buffer(index_buffer, 0, rd::Index_t::UINT32);
+        ctx->bind_vertex_buffer(0, vertex_buffer, 0);
+
+        u32 control = 0;
+        for (int n = 0; n < draw_data->CmdListsCount; n++) {
+          const ImDrawList *cmd_list = draw_data->CmdLists[n];
+          for (int cmd_i = 0; cmd_i < cmd_list->CmdBuffer.Size; cmd_i++) {
+            const ImDrawCmd *pcmd = &cmd_list->CmdBuffer[cmd_i];
+            ImVec4           clip_rect;
+            clip_rect.x  = (pcmd->ClipRect.x - clip_off.x) * clip_scale.x;
+            clip_rect.y  = (pcmd->ClipRect.y - clip_off.y) * clip_scale.y;
+            clip_rect.z  = (pcmd->ClipRect.z - clip_off.x) * clip_scale.x;
+            clip_rect.w  = (pcmd->ClipRect.w - clip_off.y) * clip_scale.y;
+            ImGui_ID img = image_bindings[(size_t)pcmd->TextureId];
+            if (img.format == rd::Format::D32_FLOAT) {
+              control = 1;
+            }
+            if (img.format == rd::Format::R32_UINT) {
+              control    = 2;
+              img.format = rd::Format::RGBA8_UNORM;
+            }
+
+            rd::IBinding_Table *table = factory->create_binding_table(signature);
+            defer(table->release());
+            {
+              float scale[2];
+              scale[0] = 2.0f / draw_data->DisplaySize.x;
+              scale[1] = 2.0f / draw_data->DisplaySize.y;
+              float translate[2];
+              translate[0] = -1.0f - draw_data->DisplayPos.x * scale[0];
+              translate[1] = -1.0f - draw_data->DisplayPos.y * scale[1];
+              table->push_constants(scale, 0, 8);
+              table->push_constants(translate, 8, 8);
+              table->push_constants(&control, 16, 4);
+            }
+            rd::Image_Subresource range{};
+            range.layer      = img.base_layer;
+            range.level      = img.base_level;
+            range.num_layers = 1;
+            range.num_levels = 1;
+            table->bind_sampler(0, 1, sampler);
+            table->bind_texture(0, 0, 0, img.id, range, rd::Format::NATIVE);
+            ctx->bind_table(table);
+
+            ctx->set_scissor(clip_rect.x, clip_rect.y, clip_rect.z - clip_rect.x,
+                             clip_rect.w - clip_rect.y);
+            ctx->draw_indexed(pcmd->ElemCount, 1, pcmd->IdxOffset + global_idx_offset, 0,
+                              pcmd->VtxOffset + global_vtx_offset);
+          }
+          global_idx_offset += cmd_list->IdxBuffer.Size;
+          global_vtx_offset += cmd_list->VtxBuffer.Size;
+        }
+      }
+      ctx->end_render_pass();
+      factory->end_render_pass(ctx);
+      factory->end_frame();
+      frame_id = (frame_id + 1) % NUM_FRAMES;
     }
-    vertex_buffer.reset();
-    index_buffer.reset();
-    staging_buffer.reset();
-    image_bindings.size = 1;
-    factory->end_render_pass(ctx);
-  }
-  void release() {
     on_release();
     ImGui_ImplSDL2_Shutdown();
-    ImGui::DestroyContext();
-    factory->release_resource(vs);
-    factory->release_resource(ps);
-    factory->release();
+    ImGui::DestroyContext(imgui_ctx);
+  }
+  ImTextureID bind_texture(Resource_ID id, u32 layer, u32 level, rd::Format format) {
+    ImGui_ID iid;
+    MEMZERO(iid);
+    iid.id         = id;
+    iid.base_layer = layer;
+    iid.base_level = level;
+    iid.format     = format;
+    image_bindings.push(iid);
+    return (ImTextureID)(size_t)(image_bindings.size - 1);
   }
   ~IGUIApp() = default;
   IGUIApp()  = default;
@@ -592,7 +663,7 @@ static ImVec2 get_window_size() {
   }
   return wsize;
 }
-
+#if 0
 static void init_buffer(rd::IFactory *factory, Resource_ID buf, void const *src, size_t size) {
   rd::Imm_Ctx *          ctx = factory->start_compute_pass();
   rd::Buffer_Create_Info info;
@@ -902,7 +973,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     MEMZERO(pc);
     pc.op = filter;
     switch (image->format) {
-    // clang-format off
+      // clang-format off
       case rd::Format::RGBA8_SRGBA:  {  pc.format = 0; } break;
       case rd::Format::RGBA8_UNORM:  {  pc.format = 1; } break;
       case rd::Format::RGB32_FLOAT:  {  pc.format = 2; } break;

@@ -15,65 +15,25 @@
 
 #if 0
 struct RenderingContext {
-  rd::IDevice *factory     = NULL;
-  Config *      config      = NULL;
-  Scene *       scene       = NULL;
-  Gizmo_Layer * gizmo_layer = NULL;
+  rd::IDevice *factory = NULL;
+  Config *     config  = NULL;
+  Scene *      scene   = NULL;
+  // Gizmo_Layer * gizmo_layer = NULL;
 };
 class GBufferPass {
   public:
+  Resource_ID signature{};
+  Resource_ID pso{};
+  Resource_ID pass{};
   Resource_ID normal_rt{};
   Resource_ID depth_rt{};
   Resource_ID gbuffer_vs{};
   Resource_ID gbuffer_ps{};
+  u32         width  = 0;
+  u32         height = 0;
 
   void render_once(rd::ICtx *ctx, Scene *scene, float4x4 viewproj, float4x4 world) {
-    ctx->push_constants(&viewproj, 0, sizeof(float4x4));
-    setup_default_state(ctx, 1);
-    rd::DS_State ds_state;
-    rd::RS_State rs_state;
-    MEMZERO(ds_state);
-    ds_state.cmp_op             = rd::Cmp::GE;
-    ds_state.enable_depth_test  = true;
-    ds_state.enable_depth_write = true;
-    ctx->DS_set_state(ds_state);
 
-    ctx->VS_set_shader(gbuffer_vs);
-    ctx->PS_set_shader(gbuffer_ps);
-    static u32 attribute_to_location[] = {
-        0xffffffffu, 0, 1, 2, 3, 4, 5, 6, 7, 8,
-    };
-    // if (rctx.config->get_bool("render_scene")) {
-    MEMZERO(ds_state);
-    ds_state.cmp_op             = rd::Cmp::GE;
-    ds_state.enable_depth_test  = true;
-    ds_state.enable_depth_write = true;
-    ctx->DS_set_state(ds_state);
-
-    MEMZERO(rs_state);
-    rs_state.polygon_mode = rd::Polygon_Mode::FILL;
-    rs_state.front_face   = rd::Front_Face::CCW;
-    rs_state.cull_mode    = rd::Cull_Mode::BACK;
-    ctx->RS_set_state(rs_state);
-
-    scene->traverse([&](Node *node) {
-      if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
-        GfxSufraceComponent *gs    = mn->getComponent<GfxSufraceComponent>();
-        float4x4             model = world * mn->get_transform();
-        ctx->push_constants(&model, 64, sizeof(model));
-        ito(gs->getNumSurfaces()) {
-          GfxSurface *s = gs->getSurface(i);
-          s->draw(ctx, attribute_to_location);
-        }
-      }
-    });
-    //}
-    MEMZERO(rs_state);
-    rs_state.polygon_mode = rd::Polygon_Mode::LINE;
-    rs_state.front_face   = rd::Front_Face::CCW;
-    rs_state.cull_mode    = rd::Cull_Mode::BACK;
-    ctx->RS_set_state(rs_state);
-    ctx->RS_set_depth_bias(0.1f);
     /* if (rctx.config->get_bool("render_scene_wireframe")) {
        ctx->PS_set_shader(rctx.factory->create_shader_raw(rd::Stage_t::PIXEL, stref_s(R"(
  struct PSInput {
@@ -100,23 +60,176 @@ class GBufferPass {
        });
      }*/
   }
-  std::vector<std::thread>    threads;
-  std::condition_variable     work_finish_cv;
-  std::mutex                  work_finish_mutex;
-  std::condition_variable     work_start_cv;
-  std::mutex                  work_start_mutex;
-  std::atomic<bool>           working;
-  std::atomic<int>            new_work;
-  std::atomic<bool>           one_time_wake[0x100];
+
   rd::Render_Pass_Create_Info info{};
 
   public:
-  TimeStamp_Pool timestamps = {};
+  // TimeStamp_Pool timestamps = {};
+  struct PushConstants {
+    float4x4 viewproj;
+    float4x4 world_transform;
+  };
+  void init(RenderingContext rctx) {
+    gbuffer_vs            = rctx.factory->create_shader(rd::Stage_t::VERTEX, stref_s(R"(
+struct PushConstants
+{
+  float4x4 viewproj;
+  float4x4 world_transform;
+};
+[[vk::binding(0, 0)]] ConstantBuffer<PushConstants> pc : DX12_PUSH_CONSTANTS_REGISTER;
 
-  void init() {}
+struct PSInput {
+  [[vk::location(0)]] float4 pos     : SV_POSITION;
+  [[vk::location(1)]] float3 normal  : TEXCOORD0;
+  [[vk::location(2)]] float2 uv      : TEXCOORD1;
+};
+
+struct VSInput {
+  [[vk::location(0)]] float3 pos     : POSITION;
+  [[vk::location(1)]] float3 normal  : TEXCOORD0;
+  [[vk::location(4)]] float2 uv      : TEXCOORD1;
+};
+
+PSInput main(in VSInput input) {
+  PSInput output;
+  output.normal = mul(pc.world_transform, float4(input.normal.xyz, 0.0f)).xyz;
+  output.uv     = input.uv;
+  output.pos    = mul(pc.viewproj, mul(pc.world_transform, float4(input.pos, 1.0f)));
+  return output;
+}
+)"),
+                                             NULL, 0);
+    gbuffer_ps            = rctx.factory->create_shader(rd::Stage_t::PIXEL, stref_s(R"(
+struct PSInput {
+  [[vk::location(0)]] float4 pos     : SV_POSITION;
+  [[vk::location(1)]] float3 normal  : TEXCOORD0;
+  [[vk::location(2)]] float2 uv      : TEXCOORD1;
+};
+
+float4 main(in PSInput input) : SV_TARGET0 {
+  return float4_splat(
+          abs(
+              dot(
+                input.normal,
+                normalize(float3(1.0, 1.0, 1.0))
+              )
+            )
+         );
+}
+)"),
+                                             NULL, 0);
+    Resource_ID signature = [=] {
+      rd::Binding_Space_Create_Info set_info{};
+      rd::Binding_Table_Create_Info table_info{};
+      table_info.spaces.push(set_info);
+      table_info.push_constants_size = sizeof(PushConstants);
+      return rctx.factory->create_signature(table_info);
+    }();
+  }
+  void remake_pass(RenderingContext rctx) {
+    if (pass.is_valid()) rctx.factory->release_resource(pass);
+    if (pso.is_valid()) rctx.factory->release_resource(pso);
+    if (normal_rt.is_valid()) rctx.factory->release_resource(normal_rt);
+    if (depth_rt.is_valid()) rctx.factory->release_resource(depth_rt);
+    normal_rt = [=] {
+      rd::Image_Create_Info rt0_info{};
+      rt0_info.format     = rd::Format::RGBA32_FLOAT;
+      rt0_info.width      = width;
+      rt0_info.height     = height;
+      rt0_info.depth      = 1;
+      rt0_info.layers     = 1;
+      rt0_info.levels     = 1;
+      rt0_info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_RT |      //
+                            (u32)rd::Image_Usage_Bits::USAGE_SAMPLED | //
+                            (u32)rd::Image_Usage_Bits::USAGE_UAV;
+      return rctx.factory->create_image(rt0_info);
+    }();
+    depth_rt = [=] {
+      rd::Image_Create_Info rt0_info{};
+      rt0_info.format     = rd::Format::D32_FLOAT;
+      rt0_info.width      = width;
+      rt0_info.height     = height;
+      rt0_info.depth      = 1;
+      rt0_info.layers     = 1;
+      rt0_info.levels     = 1;
+      rt0_info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_DT;
+      return rctx.factory->create_image(rt0_info);
+    }();
+    pass = [=] {
+      rd::Render_Pass_Create_Info info{};
+      rd::RT_View                 rt0{};
+      rt0.image             = normal_rt;
+      rt0.format            = rd::Format::NATIVE;
+      rt0.clear_color.clear = true;
+      rt0.clear_color.r     = 0.0f;
+      rt0.clear_color.g     = 0.0f;
+      rt0.clear_color.b     = 0.0f;
+      rt0.clear_color.a     = 0.0f;
+      info.rts.push(rt0);
+
+      info.depth_target.image             = depth_rt;
+      info.depth_target.clear_depth.clear = true;
+      info.depth_target.format            = rd::Format::NATIVE;
+      return rctx.factory->create_render_pass(info);
+    }();
+    pso = [=] {
+      rd::Graphics_Pipeline_State gfx_state{};
+      setup_default_state(gfx_state);
+      rd::DS_State ds_state{};
+      rd::RS_State rs_state{};
+      ds_state.cmp_op             = rd::Cmp::GE;
+      ds_state.enable_depth_test  = true;
+      ds_state.enable_depth_write = true;
+      gfx_state.DS_set_state(ds_state);
+      rd::Blend_State bs{};
+      bs.enabled        = true;
+      bs.alpha_blend_op = rd::Blend_OP::ADD;
+      bs.color_blend_op = rd::Blend_OP::ADD;
+      bs.dst_alpha      = rd::Blend_Factor::ONE_MINUS_SRC_ALPHA;
+      bs.src_alpha      = rd::Blend_Factor::SRC_ALPHA;
+      bs.dst_color      = rd::Blend_Factor::ONE_MINUS_SRC_ALPHA;
+      bs.src_color      = rd::Blend_Factor::SRC_ALPHA;
+      bs.color_write_mask =
+          (u32)rd::Color_Component_Bit::R_BIT | (u32)rd::Color_Component_Bit::G_BIT |
+          (u32)rd::Color_Component_Bit::B_BIT | (u32)rd::Color_Component_Bit::A_BIT;
+      gfx_state.OM_set_blend_state(0, bs);
+      gfx_state.VS_set_shader(gbuffer_vs);
+      gfx_state.PS_set_shader(gbuffer_ps);
+      {
+        rd::Attribute_Info info{};
+        info.binding  = 0;
+        info.format   = rd::Format::RG32_FLOAT;
+        info.location = 0;
+        info.offset   = 0;
+        info.type     = rd::Attriute_t::POSITION;
+        gfx_state.IA_set_attribute(info);
+      }
+      {
+        rd::Attribute_Info info{};
+        info.binding  = 0;
+        info.format   = rd::Format::RG32_FLOAT;
+        info.location = 1;
+        info.offset   = 8;
+        info.type     = rd::Attriute_t::TEXCOORD0;
+        gfx_state.IA_set_attribute(info);
+      }
+      {
+        rd::Attribute_Info info{};
+        info.binding  = 0;
+        info.format   = rd::Format::RGBA8_UNORM;
+        info.location = 2;
+        info.offset   = 16;
+        info.type     = rd::Attriute_t::TEXCOORD1;
+        gfx_state.IA_set_attribute(info);
+      }
+      gfx_state.IA_set_vertex_binding(0, sizeof(ImDrawVert), rd::Input_Rate::VERTEX);
+      return rctx.factory->create_graphics_pso(signature, pass, gfx_state);
+    }();
+  }
   void render(RenderingContext rctx) {
-    timestamps.update(rctx.factory);
-    // float4x4 bvh_visualizer_offset = glm::translate(float4x4(1.0f), float3(-10.0f, 0.0f, 0.0f));
+    // timestamps.update(rctx.factory);
+    // float4x4 bvh_visualizer_offset = glm::translate(float4x4(1.0f), float3(-10.0f, 0.0f,
+    // 0.0f));
     rctx.scene->traverse([&](Node *node) {
       if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
         if (mn->getComponent<GfxSufraceComponent>() == NULL) {
@@ -131,57 +244,7 @@ class GBufferPass {
 
     u32 width  = rctx.config->get_u32("g_buffer_width");
     u32 height = rctx.config->get_u32("g_buffer_height");
-    {
-      rd::Image_Create_Info rt0_info;
 
-      MEMZERO(rt0_info);
-      rt0_info.format     = rd::Format::RGBA32_FLOAT;
-      rt0_info.width      = width;
-      rt0_info.height     = height;
-      rt0_info.depth      = 1;
-      rt0_info.layers     = 1;
-      rt0_info.levels     = 1;
-      rt0_info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
-      rt0_info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_RT |      //
-                            (u32)rd::Image_Usage_Bits::USAGE_SAMPLED | //
-                            (u32)rd::Image_Usage_Bits::USAGE_UAV;
-      normal_rt = get_or_create_image(rctx.factory, rt0_info, normal_rt);
-    }
-    {
-      rd::Image_Create_Info rt0_info;
-
-      MEMZERO(rt0_info);
-      rt0_info.format     = rd::Format::D32_FLOAT;
-      rt0_info.width      = width;
-      rt0_info.height     = height;
-      rt0_info.depth      = 1;
-      rt0_info.layers     = 1;
-      rt0_info.levels     = 1;
-      rt0_info.mem_bits   = (u32)rd::Memory_Bits::DEVICE_LOCAL;
-      rt0_info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_DT;
-      depth_rt            = get_or_create_image(rctx.factory, rt0_info, depth_rt);
-    }
-    // Clear Images
-    {
-      rd::Render_Pass_Create_Info info{};
-      info.width  = width;
-      info.height = height;
-      rd::RT_View rt0{};
-      rt0.image             = normal_rt;
-      rt0.format            = rd::Format::NATIVE;
-      rt0.clear_color.clear = true;
-      rt0.clear_color.r     = 0.0f;
-      rt0.clear_color.g     = 0.0f;
-      rt0.clear_color.b     = 0.0f;
-      rt0.clear_color.a     = 1.0f;
-      info.rts.push(rt0);
-
-      info.depth_target.image             = depth_rt;
-      info.depth_target.clear_depth.clear = true;
-      info.depth_target.format            = rd::Format::NATIVE;
-      auto ctx                            = rctx.factory->start_render_pass(info);
-      rctx.factory->end_render_pass(ctx);
-    }
     {
       MEMZERO(info);
       info.width  = width;
@@ -212,179 +275,145 @@ class GBufferPass {
                                           float3{0.0f, 0.0f, 1.0f});
         }
       }
-
-      if (gbuffer_vs.is_null()) {
-        gbuffer_vs = rctx.factory->create_shader_raw(rd::Stage_t::VERTEX, stref_s(R"(
-struct PushConstants
-{
-  float4x4 viewproj;
-  float4x4 world_transform;
-};
-[[vk::binding(0, 0)]] ConstantBuffer<PushConstants> pc : register(b0, space0);
-//[[vk::push_constant]] ConstantBuffer<PushConstants> pc : register(b0, space0);
-
-struct PSInput {
-  [[vk::location(0)]] float4 pos     : SV_POSITION;
-  [[vk::location(1)]] float3 normal  : TEXCOORD0;
-  [[vk::location(2)]] float2 uv      : TEXCOORD1;
-};
-
-struct VSInput {
-  [[vk::location(0)]] float3 pos     : POSITION;
-  [[vk::location(1)]] float3 normal  : TEXCOORD0;
-  [[vk::location(4)]] float2 uv      : TEXCOORD1;
-};
-
-PSInput main(in VSInput input) {
-  PSInput output;
-  output.normal = mul(pc.world_transform, float4(input.normal.xyz, 0.0f)).xyz;
-  output.uv     = input.uv;
-  output.pos    = mul(pc.viewproj, mul(pc.world_transform, float4(input.pos, 1.0f)));
-  return output;
-}
-)"),
-                                                     NULL, 0);
-      }
-      if (gbuffer_ps.is_null()) {
-        gbuffer_ps = rctx.factory->create_shader_raw(rd::Stage_t::PIXEL, stref_s(R"(
-struct PSInput {
-  [[vk::location(0)]] float4 pos     : SV_POSITION;
-  [[vk::location(1)]] float3 normal  : TEXCOORD0;
-  [[vk::location(2)]] float2 uv      : TEXCOORD1;
-};
-
-float4 main(in PSInput input) : SV_TARGET0 {
-  return float4_splat(
-          abs(
-              dot(
-                input.normal,
-                normalize(float3(1.0, 1.0, 1.0))
-              )
-            )
-         );
-}
-)"),
-                                                     NULL, 0);
-      }
-      //{
-      //  int          i   = 0;
-      //  rd::ICtx *ctx = rctx.factory->start_render_pass(info);
-
-      //  float4x4 viewproj = rctx.gizmo_layer->get_camera().viewproj();
-      //  // timestamps.insert(rctx.factory, ctx);
-      //  ctx->set_viewport(0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f);
-      //  ctx->set_scissor(0, 0, width, height);
-      //  float    dx    = 1.0f;
-      //  float4x4 model = float4x4(    //
-      //      1.0f, 0.0f, 0.0f, dx * i, //
-      //      0.0f, 1.0f, 0.0f, 0.0f,   //
-      //      0.0f, 0.0f, 1.0f, 0.0f,   //
-      //      0.0f, 0.0f, 0.0f, 1.0f    //
-      //  );
-      //  render_once(ctx, rctx.scene, viewproj, model);
-      //  if (i == 0) {
-      //    rctx.gizmo_layer->render(rctx.factory, ctx, width, height);
-      //  }
-      //  rctx.factory->end_render_pass(ctx);
-      //}
-      //fprintf(stdout, "[START FRAME]\n");
-      //fflush(stdout);
-      if (threads.size() == 0) {
-        working = true;
-        ito(2) {
-          int _thread_id = i;
-          threads.emplace_back(std::thread([this, rctx, _thread_id] {
-            int thread_id = _thread_id;
-            while (working) {
-              u32 width  = rctx.config->get_u32("g_buffer_width");
-              u32 height = rctx.config->get_u32("g_buffer_height");
-
-              std::unique_lock<std::mutex> lk(work_start_mutex);
-              work_start_cv.wait(lk, [&] { return one_time_wake[thread_id] && new_work != 0; });
-              one_time_wake[thread_id] = false;
-              //fprintf(stdout, "[START RECORDING] thread %i\n", thread_id);
-              //fflush(stdout);
-              // if (thread_id == 0) {
-              struct PushConstants {
-                float4x4 viewproj;
-                float4x4 world_transform;
-              } pc;
-
-              rd::Buffer_Create_Info buf_info;
-              MEMZERO(buf_info);
-              buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
-              buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER |
-                                    (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
-              buf_info.size        = sizeof(PushConstants);
-              Resource_ID cbuffer  = rctx.factory->create_buffer(buf_info);
-              float4x4    viewproj = rctx.gizmo_layer->get_camera().viewproj();
-              rctx.factory->release_resource(cbuffer);
-
-              rd::ICtx *ctx = rctx.factory->start_render_pass(info);
-
-              // timestamps.insert(rctx.factory, ctx);
-              ctx->set_viewport(0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f);
-              ctx->set_scissor(0, 0, width, height);
-              float    dx        = 1.0f;
-              float4x4 model     = float4x4(            //
-                  1.0f, 0.0f, 0.0f, dx * thread_id, //
-                  0.0f, 1.0f, 0.0f, 0.0f,           //
-                  0.0f, 0.0f, 1.0f, 0.0f,           //
-                  0.0f, 0.0f, 0.0f, 1.0f            //
-              );
-              pc.viewproj        = viewproj;
-              pc.world_transform = transpose(model);
-              ctx->update_buffer(cbuffer, 0, &pc, sizeof(PushConstants));
-              ctx->bind_uniform_buffer(0, 0, cbuffer, 0, sizeof(pc));
-              render_once(ctx, rctx.scene, viewproj, transpose(model));
-              if (thread_id == 0) {
-                rctx.gizmo_layer->render(rctx.factory, ctx, width, height);
-              }
-              rctx.factory->end_render_pass(ctx);
-              //}
-              //fprintf(stdout, "[END RECORDING] thread %i\n", thread_id);
-              //fflush(stdout);
-              if (--new_work == 0) {
-                work_finish_cv.notify_one();
-              }
-            }
-          }));
-          // timestamps.insert(rctx.factory, ctx);
-        }
-      }
-      ito(0x100) one_time_wake[i] = true;
-      new_work                    = threads.size();
-      work_start_cv.notify_all();
-      std::unique_lock<std::mutex> lk(work_finish_mutex);
-      work_finish_cv.wait(lk, [&] { return new_work == 0; });
-      new_work = 0;
-      rctx.gizmo_layer->reset();
-      //fprintf(stdout, "[END FRAME]\n");
-      //fflush(stdout);
-      // for (auto &th : threads) th.join();
-      // threads.clear();
     }
-  }
-  void release(rd::IDevice *factory) { factory->release_resource(normal_rt); }
-};
+    //{
+    //  int          i   = 0;
+    //  rd::ICtx *ctx = rctx.factory->start_render_pass(info);
 
+    //  float4x4 viewproj = rctx.gizmo_layer->get_camera().viewproj();
+    //  // timestamps.insert(rctx.factory, ctx);
+    //  ctx->set_viewport(0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f);
+    //  ctx->set_scissor(0, 0, width, height);
+    //  float    dx    = 1.0f;
+    //  float4x4 model = float4x4(    //
+    //      1.0f, 0.0f, 0.0f, dx * i, //
+    //      0.0f, 1.0f, 0.0f, 0.0f,   //
+    //      0.0f, 0.0f, 1.0f, 0.0f,   //
+    //      0.0f, 0.0f, 0.0f, 1.0f    //
+    //  );
+    //  render_once(ctx, rctx.scene, viewproj, model);
+    //  if (i == 0) {
+    //    rctx.gizmo_layer->render(rctx.factory, ctx, width, height);
+    //  }
+    //  rctx.factory->end_render_pass(ctx);
+    //}
+    // fprintf(stdout, "[START FRAME]\n");
+    // fflush(stdout);
+
+    ito(2) {
+      int _thread_id = i;
+      {
+        int thread_id = _thread_id;
+        u32 width     = rctx.config->get_u32("g_buffer_width");
+        u32 height    = rctx.config->get_u32("g_buffer_height");
+
+        struct PushConstants {
+          float4x4 viewproj;
+          float4x4 world_transform;
+        } pc;
+
+        rd::Buffer_Create_Info buf_info;
+        MEMZERO(buf_info);
+        buf_info.mem_bits   = (u32)rd::Memory_Bits::HOST_VISIBLE;
+        buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER |
+                              (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
+        buf_info.size        = sizeof(PushConstants);
+        Resource_ID cbuffer  = rctx.factory->create_buffer(buf_info);
+        float4x4    viewproj = rctx.gizmo_layer->get_camera().viewproj();
+        rctx.factory->release_resource(cbuffer);
+
+        rd::ICtx *ctx = rctx.factory->start_render_pass(info);
+
+        // timestamps.insert(rctx.factory, ctx);
+        ctx->set_viewport(0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f);
+        ctx->set_scissor(0, 0, width, height);
+        float    dx        = 1.0f;
+        float4x4 model     = float4x4(            //
+            1.0f, 0.0f, 0.0f, dx * thread_id, //
+            0.0f, 1.0f, 0.0f, 0.0f,           //
+            0.0f, 0.0f, 1.0f, 0.0f,           //
+            0.0f, 0.0f, 0.0f, 1.0f            //
+        );
+        pc.viewproj        = viewproj;
+        pc.world_transform = transpose(model);
+        ctx->update_buffer(cbuffer, 0, &pc, sizeof(PushConstants));
+        ctx->bind_uniform_buffer(0, 0, cbuffer, 0, sizeof(pc));
+        ctx->push_constants(&viewproj, 0, sizeof(float4x4));
+        setup_default_state(ctx, 1);
+
+        ctx->VS_set_shader(gbuffer_vs);
+        ctx->PS_set_shader(gbuffer_ps);
+        static u32 attribute_to_location[] = {
+            0xffffffffu, 0, 1, 2, 3, 4, 5, 6, 7, 8,
+        };
+        // if (rctx.config->get_bool("render_scene")) {
+        MEMZERO(ds_state);
+        ds_state.cmp_op             = rd::Cmp::GE;
+        ds_state.enable_depth_test  = true;
+        ds_state.enable_depth_write = true;
+        ctx->DS_set_state(ds_state);
+
+        MEMZERO(rs_state);
+        rs_state.polygon_mode = rd::Polygon_Mode::FILL;
+        rs_state.front_face   = rd::Front_Face::CCW;
+        rs_state.cull_mode    = rd::Cull_Mode::BACK;
+        ctx->RS_set_state(rs_state);
+
+        scene->traverse([&](Node *node) {
+          if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
+            GfxSufraceComponent *gs    = mn->getComponent<GfxSufraceComponent>();
+            float4x4             model = world * mn->get_transform();
+            ctx->push_constants(&model, 64, sizeof(model));
+            ito(gs->getNumSurfaces()) {
+              GfxSurface *s = gs->getSurface(i);
+              s->draw(ctx, attribute_to_location);
+            }
+          }
+        });
+        //}
+        MEMZERO(rs_state);
+        rs_state.polygon_mode = rd::Polygon_Mode::LINE;
+        rs_state.front_face   = rd::Front_Face::CCW;
+        rs_state.cull_mode    = rd::Cull_Mode::BACK;
+        ctx->RS_set_state(rs_state);
+
+        rctx.gizmo_layer->render(rctx.factory, ctx, width, height);
+
+        rctx.factory->end_render_pass(ctx);
+      }
+      // timestamps.insert(rctx.factory, ctx);
+    }
+
+    // rctx.gizmo_layer->reset();
+    // fprintf(stdout, "[END FRAME]\n");
+    // fflush(stdout);
+    // for (auto &th : threads) th.join();
+    // threads.clear();
+  }
+} void release(rd::IDevice *factory) {
+  factory->release_resource(normal_rt);
+}
+}
+;
+#endif
+#if 1
 class Event_Consumer : public IGUIApp {
   public:
-  GBufferPass      gbuffer_pass;
-  RenderingContext rctx{};
-  void             init_traverse(List *l) {
+  // GBufferPass      gbuffer_pass;
+  // RenderingContext rctx{};
+  void init_traverse(List *l) {
     if (l == NULL) return;
     if (l->child) {
       init_traverse(l->child);
       init_traverse(l->next);
     } else {
-      if (l->cmp_symbol("camera")) {
-        rctx.gizmo_layer->get_camera().traverse(l->next);
-      } else if (l->cmp_symbol("config")) {
-        rctx.config->traverse(l->next);
-      } else if (l->cmp_symbol("scene")) {
-        rctx.scene->restore(l);
-      }
+      /* if (l->cmp_symbol("camera")) {
+         rctx.gizmo_layer->get_camera().traverse(l->next);
+       } else if (l->cmp_symbol("config")) {
+         rctx.config->traverse(l->next);
+       } else if (l->cmp_symbol("scene")) {
+         rctx.scene->restore(l);
+       }*/
     }
   }
   void on_gui() override { //
@@ -399,45 +428,45 @@ class Event_Consumer : public IGUIApp {
       String_Builder sb;
       sb.init();
       defer(sb.release());
-      rctx.scene->save(sb);
+      // rctx.scene->save(sb);
       TMP_STORAGE_SCOPE;
       List *cur = List::parse(sb.get_str(), Tmp_List_Allocator());
       if (cur) {
         int id = 0;
         on_gui_traverse_nodes(cur, id);
-        rctx.scene->restore(cur);
+        // rctx.scene->restore(cur);
       }
     }
     ImGui::End();
 
     ImGui::Begin("Config");
-    rctx.config->on_imgui();
-    ImGui::Text("%fms", gbuffer_pass.timestamps.duration);
+    // rctx.config->on_imgui();
+    // ImGui::Text("%fms", gbuffer_pass.timestamps.duration);
     ImGui::End();
 
     ImGui::Begin("main viewport");
-    rctx.gizmo_layer->per_imgui_window();
+    // rctx.gizmo_layer->per_imgui_window();
     auto wsize = get_window_size();
-    ImGui::Image(bind_texture(gbuffer_pass.normal_rt, 0, 0, rd::Format::NATIVE),
-                 ImVec2(wsize.x, wsize.y));
-    { Ray ray = rctx.gizmo_layer->getMouseRay(); }
+    // ImGui::Image(bind_texture(gbuffer_pass.normal_rt, 0, 0, rd::Format::NATIVE),
+    // ImVec2(wsize.x, wsize.y));
+    //{ Ray ray = rctx.gizmo_layer->getMouseRay(); }
     ImGui::End();
   }
   void on_init() override { //
-    rctx.factory = this->factory;
+    // rctx.factory = this->factory;
     TMP_STORAGE_SCOPE;
-    rctx.gizmo_layer = Gizmo_Layer::create(factory);
+    // rctx.gizmo_layer = Gizmo_Layer::create(factory);
     // new XYZDragGizmo(gizmo_layer, &pos);
-    rctx.scene  = Scene::create();
-    rctx.config = new Config;
-    rctx.config->init(stref_s(R"(
-(
- (add u32  g_buffer_width 512 (min 4) (max 1024))
- (add u32  g_buffer_height 512 (min 4) (max 1024))
-)
-)"));
-    rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/light/scene.gltf"));
-    rctx.scene->update();
+    /* rctx.scene  = Scene::create();
+     rctx.config = new Config;
+     rctx.config->init(stref_s(R"(
+ (
+  (add u32  g_buffer_width 512 (min 4) (max 1024))
+  (add u32  g_buffer_height 512 (min 4) (max 1024))
+ )
+ )"));
+     rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/light/scene.gltf"));
+     rctx.scene->update();*/
     char *state = read_file_tmp("scene_state");
 
     if (state != NULL) {
@@ -446,29 +475,29 @@ class Event_Consumer : public IGUIApp {
       init_traverse(cur);
     }
 
-    gbuffer_pass.init();
+    // gbuffer_pass.init();
   }
   void on_release() override { //
     // thread_pool.release();
     FILE *scene_dump = fopen("scene_state", "wb");
     fprintf(scene_dump, "(\n");
     defer(fclose(scene_dump));
-    rctx.gizmo_layer->get_camera().dump(scene_dump);
-    rctx.config->dump(scene_dump);
+    // rctx.gizmo_layer->get_camera().dump(scene_dump);
+    // rctx.config->dump(scene_dump);
     {
       String_Builder sb;
       sb.init();
-      rctx.scene->save(sb);
+      // rctx.scene->save(sb);
       fwrite(sb.get_str().ptr, 1, sb.get_str().len, scene_dump);
       sb.release();
     }
     fprintf(scene_dump, ")\n");
-    rctx.gizmo_layer->release();
-    rctx.scene->release();
-    delete rctx.config;
+    // rctx.gizmo_layer->release();
+    // rctx.scene->release();
+    // delete rctx.config;
   }
   void on_frame() override { //
-    rctx.scene->traverse([&](Node *node) {
+    /*rctx.scene->traverse([&](Node *node) {
       if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
         if (mn->getComponent<GizmoComponent>() == NULL) {
           GizmoComponent::create(rctx.gizmo_layer, mn);
@@ -476,13 +505,14 @@ class Event_Consumer : public IGUIApp {
       }
     });
     rctx.scene->get_root()->update();
-    gbuffer_pass.render(rctx);
+    gbuffer_pass.render(rctx);*/
   }
 };
 #endif
 int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
+#if 0
   static int init = [] { return SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS); }();
 
   auto window_loop = [](rd::Impl_t impl) {
@@ -495,13 +525,13 @@ int main(int argc, char *argv[]) {
                                 SDL_WINDOW_RESIZABLE);
     }
     void *handle = NULL;
-#ifdef WIN32
+#  ifdef WIN32
     SDL_SysWMinfo wmInfo;
     SDL_VERSION(&wmInfo.version);
     SDL_GetWindowWMInfo(window, &wmInfo);
     HWND hwnd = wmInfo.info.win.window;
     handle    = (void *)hwnd;
-#else
+#  else
     SDL_SysWMinfo wmInfo;
     SDL_VERSION(&wmInfo.version);
     SDL_GetWindowWMInfo(window, &wmInfo);
@@ -509,7 +539,7 @@ int main(int argc, char *argv[]) {
     xcb_connection_t *connection = XGetXCBConnection(wmInfo.info.x11.display);
     Ptr2              ptrs{(void *)hwnd, (void *)connection};
     handle = (void *)&ptrs;
-#endif
+#  endif
     rd::IDevice *factory = NULL;
     if (impl == rd::Impl_t::VULKAN) {
       factory = rd::create_vulkan(handle);
@@ -730,16 +760,16 @@ float4 main(in PSInput input) : SV_TARGET0 {
       font_pixels = NULL;
       return font_texture;
     }();
-    //static InlineArray<SDL_Event, 0x100> sdl_event_queue;
-    //static std::mutex                    sdl_event_mutex;
-    //static std::atomic<int>              sdl_event_cnt;
+    // static InlineArray<SDL_Event, 0x100> sdl_event_queue;
+    // static std::mutex                    sdl_event_mutex;
+    // static std::atomic<int>              sdl_event_cnt;
     while (true) {
       ImGui::SetCurrentContext(imgui_ctx);
       SDL_Event event{};
       {
-        //std::lock_guard<std::mutex> _locke(sdl_event_mutex);
+        // std::lock_guard<std::mutex> _locke(sdl_event_mutex);
         while (SDL_PollEvent(&event)) {
-          //SDL_Event event = sdl_event_queue[i];
+          // SDL_Event event = sdl_event_queue[i];
           if (focus_events) {
             ImGui_ImplSDL2_ProcessEvent(&event);
             if (event.type == SDL_QUIT) {
@@ -758,37 +788,37 @@ float4 main(in PSInput input) : SV_TARGET0 {
             } else if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
             }
           }
-          //sdl_event_queue.push(event);
-          //sdl_event_cnt = 2;
+          // sdl_event_queue.push(event);
+          // sdl_event_cnt = 2;
         }
-       /* if (int val = sdl_event_cnt.fetch_add(-1) > 0) {
-          defer({
-            if (val == 1) {
-              sdl_event_queue.size = 0;
-            }
-          });
-          ito(sdl_event_queue.size) {
-            SDL_Event event = sdl_event_queue[i];
-            if (focus_events) {
-              ImGui_ImplSDL2_ProcessEvent(&event);
-              if (event.type == SDL_QUIT) {
-              }
-            }
-            if (event.type == SDL_WINDOWEVENT) {
-              if (event.window.windowID != window_id) continue;
-              if (event.window.event == SDL_WINDOWEVENT_CLOSE) {
-                return;
-              } else if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED ||
-                         event.window.event == SDL_WINDOWEVENT_ENTER) {
-                focus_events = true;
-              } else if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST ||
-                         event.window.event == SDL_WINDOWEVENT_LEAVE) {
-                focus_events = false;
-              } else if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
-              }
-            }
-          }
-        }*/
+        /* if (int val = sdl_event_cnt.fetch_add(-1) > 0) {
+           defer({
+             if (val == 1) {
+               sdl_event_queue.size = 0;
+             }
+           });
+           ito(sdl_event_queue.size) {
+             SDL_Event event = sdl_event_queue[i];
+             if (focus_events) {
+               ImGui_ImplSDL2_ProcessEvent(&event);
+               if (event.type == SDL_QUIT) {
+               }
+             }
+             if (event.type == SDL_WINDOWEVENT) {
+               if (event.window.windowID != window_id) continue;
+               if (event.window.event == SDL_WINDOWEVENT_CLOSE) {
+                 return;
+               } else if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED ||
+                          event.window.event == SDL_WINDOWEVENT_ENTER) {
+                 focus_events = true;
+               } else if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST ||
+                          event.window.event == SDL_WINDOWEVENT_LEAVE) {
+                 focus_events = false;
+               } else if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
+               }
+             }
+           }
+         }*/
       }
       factory->start_frame();
       rd::Image2D_Info scinfo = factory->get_swapchain_image_info();
@@ -813,53 +843,6 @@ float4 main(in PSInput input) : SV_TARGET0 {
         rt0.clear_color.g     = 1.0f;
         info.rts.push(rt0);
         render_passes[frame_id] = factory->create_render_pass(info);
-        // rd::Graphics_Pipeline_State gfx_state{};
-        // setup_default_state(gfx_state);
-        // rd::Blend_State bs;
-        // MEMZERO(bs);
-        // bs.enabled        = true;
-        // bs.alpha_blend_op = rd::Blend_OP::ADD;
-        // bs.color_blend_op = rd::Blend_OP::ADD;
-        // bs.dst_alpha      = rd::Blend_Factor::ONE_MINUS_SRC_ALPHA;
-        // bs.src_alpha      = rd::Blend_Factor::SRC_ALPHA;
-        // bs.dst_color      = rd::Blend_Factor::ONE_MINUS_SRC_ALPHA;
-        // bs.src_color      = rd::Blend_Factor::SRC_ALPHA;
-        // bs.color_write_mask =
-        //    (u32)rd::Color_Component_Bit::R_BIT | (u32)rd::Color_Component_Bit::G_BIT |
-        //    (u32)rd::Color_Component_Bit::B_BIT | (u32)rd::Color_Component_Bit::A_BIT;
-        // gfx_state.OM_set_blend_state(0, bs);
-        // gfx_state.VS_set_shader(vs);
-        // gfx_state.PS_set_shader(ps);
-        /* {
-           rd::Attribute_Info info;
-           MEMZERO(info);
-           info.binding  = 0;
-           info.format   = rd::Format::RG32_FLOAT;
-           info.location = 0;
-           info.offset   = 0;
-           info.type     = rd::Attriute_t::POSITION;
-           gfx_state.IA_set_attribute(info);
-         }
-         {
-           rd::Attribute_Info info;
-           MEMZERO(info);
-           info.binding  = 0;
-           info.format   = rd::Format::RG32_FLOAT;
-           info.location = 1;
-           info.offset   = 8;
-           info.type     = rd::Attriute_t::TEXCOORD0;
-           gfx_state.IA_set_attribute(info);
-         }
-         {
-           rd::Attribute_Info info;
-           MEMZERO(info);
-           info.binding  = 0;
-           info.format   = rd::Format::RGBA8_UNORM;
-           info.location = 2;
-           info.offset   = 16;
-           info.type     = rd::Attriute_t::TEXCOORD1;
-           gfx_state.IA_set_attribute(info);
-         }*/
         rd::Graphics_Pipeline_State gfx_state{};
         setup_default_state(gfx_state);
         rd::Blend_State bs;
@@ -1001,14 +984,13 @@ float4 main(in PSInput input) : SV_TARGET0 {
         int    global_vtx_offset = 0;
         int    global_idx_offset = 0;
 
+        ctx->bind_graphics_pso(psos[frame_id]);
         if (sizeof(ImDrawIdx) == 2)
-          ctx->bind_index_buffer(index_buffer, 0, rd::Index_t::UINT16,
-                                 (draw_data->TotalIdxCount + 1) * sizeof(ImDrawIdx));
+          ctx->bind_index_buffer(index_buffer, 0, rd::Index_t::UINT16);
         else
-          ctx->bind_index_buffer(index_buffer, 0, rd::Index_t::UINT32,
-                                 (draw_data->TotalIdxCount + 1) * sizeof(ImDrawIdx));
-        ctx->bind_vertex_buffer(0, vertex_buffer, sizeof(ImDrawVert), 0,
-                                (draw_data->TotalVtxCount + 1) * sizeof(ImDrawVert));
+          ctx->bind_index_buffer(index_buffer, 0, rd::Index_t::UINT32);
+        ctx->bind_vertex_buffer(0, vertex_buffer, 0);
+
         u32 control = 0;
         for (int n = 0; n < draw_data->CmdListsCount; n++) {
           const ImDrawList *cmd_list = draw_data->CmdLists[n];
@@ -1058,7 +1040,6 @@ float4 main(in PSInput input) : SV_TARGET0 {
 
             ctx->set_scissor(clip_rect.x, clip_rect.y, clip_rect.z - clip_rect.x,
                              clip_rect.w - clip_rect.y);
-            ctx->bind_graphics_pso(psos[frame_id]);
             ctx->draw_indexed(pcmd->ElemCount, 1, pcmd->IdxOffset + global_idx_offset, 0,
                               pcmd->VtxOffset + global_vtx_offset);
           }
@@ -1076,10 +1057,11 @@ float4 main(in PSInput input) : SV_TARGET0 {
     ImGui_ImplSDL2_Shutdown();
     ImGui::DestroyContext(imgui_ctx);
   };
-  std::thread vulkan_thread = std::thread([window_loop] { window_loop(rd::Impl_t::VULKAN); });
-  std::thread dx12_thread   = std::thread([window_loop] { window_loop(rd::Impl_t::DX12); });
-  vulkan_thread.join();
+  // std::thread vulkan_thread = std::thread([window_loop] { window_loop(rd::Impl_t::VULKAN); });
+  std::thread dx12_thread = std::thread([window_loop] { window_loop(rd::Impl_t::DX12); });
+  // vulkan_thread.join();
   dx12_thread.join();
-  // IGUIApp::start<Event_Consumer>(rd::Impl_t::VULKAN);
+#endif
+  IGUIApp::start<Event_Consumer>(rd::Impl_t::VULKAN);
   return 0;
 }

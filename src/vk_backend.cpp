@@ -89,6 +89,7 @@ enum class Resource_Type : u32 {
   SHADER,
   SAMPLER,
   PASS,
+  FRAME_BUFFER,
   BUFFER_VIEW,
   IMAGE_VIEW,
   FENCE,
@@ -377,6 +378,7 @@ VkFormat to_vk(rd::Format format) {
   case rd::Format::RGBA8_UINT      : return VK_FORMAT_R8G8B8A8_UINT       ;
 
   case rd::Format::BGRA8_SRGBA     : return VK_FORMAT_B8G8R8A8_SRGB       ;
+  case rd::Format::BGRA8_UNORM     : return VK_FORMAT_B8G8R8A8_UNORM;
 
   //case rd::Format::RGB8_UNORM      : return VK_FORMAT_R8G8B8_UNORM        ;
   //case rd::Format::RGB8_SNORM      : return VK_FORMAT_R8G8B8_SNORM        ;
@@ -671,26 +673,36 @@ struct Shader_Info : public Slot {
 };
 
 struct Render_Pass : public Slot {
-  string                       name;
   VkRenderPass                 pass;
-  VkFramebuffer                fb;
-  u32                          width, height;
-  InlineArray<ID, 8>           rts_views;
-  ID                           depth_target_view;
   InlineArray<VkClearValue, 9> clear_values;
   rd::Render_Pass_Create_Info  create_info;
   void                         init() {
     memset(this, 0, sizeof(*this));
-    rts_views.init();
     clear_values.init();
+    create_info.reset();
+  }
+  void release(VkDevice device) {
+    create_info.reset();
+    clear_values.release();
+    vkDestroyRenderPass(device, pass, NULL);
+    memset(this, 0, sizeof(*this));
+  }
+};
+
+struct Frame_Buffer : public Slot {
+  VkFramebuffer                fb;
+  u32                          width, height;
+  InlineArray<ID, 8>           rts_views;
+  ID                           depth_target_view;
+  rd::Frame_Buffer_Create_Info create_info;
+  void                         init() {
+    memset(this, 0, sizeof(*this));
+    rts_views.init();
     create_info.reset();
   }
   void release(VkDevice device) {
     rts_views.release();
     create_info.reset();
-    clear_values.release();
-    name.release();
-    vkDestroyRenderPass(device, pass, NULL);
     vkDestroyFramebuffer(device, fb, NULL);
     memset(this, 0, sizeof(*this));
   }
@@ -1800,6 +1812,16 @@ struct VkDeviceContext {
       Resource_Array::init();
     }
   } render_passes;
+  struct Frame_Buffer_Array : Resource_Array<Frame_Buffer, Frame_Buffer_Array> {
+    static constexpr char const NAME[]  = "Frame_Buffer_Array";
+    VkDeviceContext *           dev_ctx = NULL;
+    void                        release_item(Frame_Buffer &item) { item.release(dev_ctx->device); }
+    void                        init(VkDeviceContext *dev_ctx) {
+      this->dev_ctx = dev_ctx;
+      Resource_Array::init();
+    }
+  } frame_buffers;
+
   struct Pipe_Array : Resource_Array<Graphics_Pipeline_Wrapper, Pipe_Array> {
     static constexpr char const NAME[]  = "Pipe_Array";
     VkDeviceContext *           dev_ctx = NULL;
@@ -1919,6 +1941,7 @@ struct VkDeviceContext {
     buffer_views.init(this);
     image_views.init(this);
     render_passes.init(this);
+    frame_buffers.init(this);
     sets.init(this);
     pipelines.init(this);
     compute_pipelines.init(this);
@@ -1941,6 +1964,7 @@ struct VkDeviceContext {
     buffer_views.release();
     image_views.release();
     render_passes.release();
+    frame_buffers.release();
     sets.release();
     pipelines.release();
     fences.release();
@@ -2406,7 +2430,11 @@ struct VkDeviceContext {
 
   void release_resource(Resource_ID res_id) {
     std::lock_guard<std::mutex> _lock(mutex2);
-    if (res_id.type == (u32)Resource_Type::PASS) {
+    if (res_id.type == (u32)Resource_Type::FRAME_BUFFER) {
+      // Render_Pass pass = render_passes.read(res_id.id);
+      frame_buffers.remove(res_id.id, 3);
+      // if (pass_cache.contains(pass.create_info)) pass_cache.remove(pass.create_info);
+    } else if (res_id.type == (u32)Resource_Type::PASS) {
       // Render_Pass pass = render_passes.read(res_id.id);
       render_passes.remove(res_id.id, 3);
       // if (pass_cache.contains(pass.create_info)) pass_cache.remove(pass.create_info);
@@ -2904,6 +2932,7 @@ struct VkDeviceContext {
     buffer_views.tick();
     image_views.tick();
     render_passes.tick();
+    frame_buffers.tick();
     sets.tick();
     pipelines.tick();
     signatures.tick();
@@ -3061,6 +3090,7 @@ class Vk_Ctx : public rd::ICtx {
   Resource_ID       cmd_id{};
   VkCommandBuffer   cmd{};
   ID                cur_pass{};
+  ID                cur_fb{};
   VK_Binding_Table *binding_table = NULL;
 
   template <typename K, typename V> using Table = Hash_Table<K, V, Default_Allocator, 64>;
@@ -3187,13 +3217,14 @@ class Vk_Ctx : public rd::ICtx {
 
   public:
   void start_render_pass() override {
-    Render_Pass pass = dev_ctx->render_passes.read(cur_pass);
+    Render_Pass  pass = dev_ctx->render_passes.read(cur_pass);
+    Frame_Buffer fb   = dev_ctx->frame_buffers.read(cur_fb);
     ito(pass.create_info.rts.size) {
-      _image_barrier(cmd, pass.create_info.rts[i].image, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+      _image_barrier(cmd, fb.create_info.rts[i].image, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     }
-    if (pass.depth_target_view.is_null() == false) {
-      _image_barrier(cmd, pass.create_info.depth_target.image,
+    if (fb.depth_target_view.is_null() == false) {
+      _image_barrier(cmd, fb.create_info.depth_target.image,
                      VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                      VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     }
@@ -3201,8 +3232,8 @@ class Vk_Ctx : public rd::ICtx {
     MEMZERO(binfo);
     binfo.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     binfo.clearValueCount = 0;
-    binfo.framebuffer     = pass.fb;
-    binfo.renderArea      = VkRect2D{{0, 0}, {pass.width, pass.height}};
+    binfo.framebuffer     = fb.fb;
+    binfo.renderArea      = VkRect2D{{0, 0}, {fb.width, fb.height}};
     binfo.renderPass      = pass.pass;
     binfo.pClearValues    = &pass.clear_values[0];
     binfo.clearValueCount = pass.clear_values.size;
@@ -3210,12 +3241,13 @@ class Vk_Ctx : public rd::ICtx {
   }
   void end_render_pass() override {
     vkCmdEndRenderPass(cmd);
-    Render_Pass pass = dev_ctx->render_passes.read(cur_pass);
+    Render_Pass  pass = dev_ctx->render_passes.read(cur_pass);
+    Frame_Buffer fb   = dev_ctx->frame_buffers.read(cur_fb);
     ito(pass.create_info.rts.size) {
-      _image_barrier(cmd, pass.create_info.rts[i].image, 0, VK_IMAGE_LAYOUT_GENERAL);
+      _image_barrier(cmd, fb.create_info.rts[i].image, 0, VK_IMAGE_LAYOUT_GENERAL);
     }
-    if (pass.depth_target_view.is_null() == false) {
-      _image_barrier(cmd, pass.create_info.depth_target.image, 0, VK_IMAGE_LAYOUT_GENERAL);
+    if (fb.depth_target_view.is_null() == false) {
+      _image_barrier(cmd, fb.create_info.depth_target.image, 0, VK_IMAGE_LAYOUT_GENERAL);
     }
   }
 
@@ -3226,7 +3258,7 @@ class Vk_Ctx : public rd::ICtx {
     // clear_state();
   }
 
-  void init(rd::Pass_t type, VkDeviceContext *dev_ctx, ID pass_id) {
+  void init(rd::Pass_t type, VkDeviceContext *dev_ctx, ID pass_id, ID frame_buffer_id) {
     this->type    = type;
     this->dev_ctx = dev_ctx;
     buffer_layouts.reset();
@@ -3234,6 +3266,7 @@ class Vk_Ctx : public rd::ICtx {
     cmd_id         = dev_ctx->create_command_buffer();
     cmd            = dev_ctx->cmd_buffers.read(cmd_id.id).cmd;
     this->cur_pass = pass_id;
+    this->cur_fb   = frame_buffer_id;
     VkCommandBufferBeginInfo begin_info;
     MEMZERO(begin_info);
     begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -3278,12 +3311,11 @@ class Vk_Ctx : public rd::ICtx {
     delete this;
   }
   // CTX
-  void bind_vertex_buffer(u32 index, Resource_ID buffer, size_t stride, size_t offset,
-                          size_t size) override {
+  void bind_vertex_buffer(u32 index, Resource_ID buffer, size_t offset) override {
     Buffer buf = dev_ctx->buffers.read(buffer.id);
     vkCmdBindVertexBuffers(cmd, index, 1, &buf.buffer, &offset);
   }
-  void bind_index_buffer(Resource_ID id, size_t offset, rd::Index_t format, size_t size) override {
+  void bind_index_buffer(Resource_ID id, size_t offset, rd::Index_t format) override {
     Buffer      buf = dev_ctx->buffers.read(id.id);
     VkIndexType type{};
     switch (format) {
@@ -3519,6 +3551,7 @@ class VkFactory : public rd::IDevice {
   void release_resource(Resource_ID id) override {
     std::lock_guard<std::mutex> _lock(mutex);
     release_queue.push(id);
+    // ASSERT_DEBUG(id.type != (u32)Resource_Type::PASS);
   }
   u32         get_num_swapchain_images() override { return dev_ctx->sc_image_count; }
   Resource_ID get_swapchain_image() override {
@@ -3534,36 +3567,12 @@ class VkFactory : public rd::IDevice {
     return dev_ctx->get_image_info(res_id);
   }
   Resource_ID create_render_pass(rd::Render_Pass_Create_Info const &info) override {
-    Render_Pass rp{};
+    std::lock_guard<std::mutex> _lock(mutex);
+    Render_Pass                 rp{};
     rp.init();
     rp.create_info          = info;
     u32 depth_attachment_id = 0;
-    ito(info.rts.size) {
-      VkFormat format;
-      if (info.rts[i].format == rd::Format::NATIVE)
-        format = dev_ctx->images.read(info.rts[i].image.id).info.format;
-      else
-        format = to_vk(info.rts[i].format);
-      rp.rts_views.push(dev_ctx
-                            ->create_image_view(info.rts[i].image.id, //
-                                                info.rts[i].level, 1, //
-                                                info.rts[i].layer, 1, //
-                                                format)
-                            .id);
-    }
-    if (info.depth_target.image.is_null() == false) {
-      VkFormat format;
-      if (info.depth_target.format == rd::Format::NATIVE)
-        format = dev_ctx->images.read(info.depth_target.image.id).info.format;
-      else
-        format = to_vk(info.depth_target.format);
-      rp.depth_target_view = dev_ctx
-                                 ->create_image_view(info.depth_target.image.id, //
-                                                     info.depth_target.level, 1, //
-                                                     info.depth_target.layer, 1, //
-                                                     format)
-                                 .id;
-    }
+
     InlineArray<VkAttachmentDescription, 9> attachments;
     InlineArray<VkAttachmentReference, 8>   refs;
     attachments.init();
@@ -3572,22 +3581,12 @@ class VkFactory : public rd::IDevice {
       attachments.release();
       refs.release();
     });
-    u32 width  = 0;
-    u32 height = 0;
+
     ito(info.rts.size) {
       VkAttachmentDescription attachment;
       MEMZERO(attachment);
-      Image img = dev_ctx->images.read(info.rts[i].image.id);
-      if (width == 0)
-        width = img.info.extent.width;
-      else
-        ASSERT_ALWAYS(width == img.info.extent.width);
-      if (height == 0)
-        height = img.info.extent.height;
-      else
-        ASSERT_ALWAYS(height == img.info.extent.height);
 
-      attachment.format  = img.info.format;
+      attachment.format  = to_vk(info.rts[i].format);
       attachment.samples = VK_SAMPLE_COUNT_1_BIT;
       if (info.rts[i].clear_color.clear)
         attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
@@ -3608,20 +3607,11 @@ class VkFactory : public rd::IDevice {
 
       attachments.push(attachment);
     }
-    if (info.depth_target.image.is_null() == false) {
+    if (info.depth_target.enabled) {
       VkAttachmentDescription attachment;
       MEMZERO(attachment);
-      Image img = dev_ctx->images.read(info.depth_target.image.id);
-      if (width == 0)
-        width = img.info.extent.width;
-      else
-        ASSERT_ALWAYS(width == img.info.extent.width);
-      if (height == 0)
-        height = img.info.extent.height;
-      else
-        ASSERT_ALWAYS(height == img.info.extent.height);
 
-      attachment.format  = img.info.format;
+      attachment.format  = to_vk(info.depth_target.format);
       attachment.samples = VK_SAMPLE_COUNT_1_BIT;
       if (info.depth_target.clear_depth.clear)
         attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
@@ -3648,7 +3638,7 @@ class VkFactory : public rd::IDevice {
     subpass.pipelineBindPoint    = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = refs.size;
     subpass.pColorAttachments    = &refs[0];
-    if (info.depth_target.image.is_null() == false) {
+    if (info.depth_target.enabled) {
       MEMZERO(depth_attachment);
       depth_attachment.attachment     = depth_attachment_id;
       depth_attachment.layout         = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
@@ -3669,19 +3659,71 @@ class VkFactory : public rd::IDevice {
     cinfo.pDependencies   = &dependency;
     cinfo.dependencyCount = 1;
 
-    rp.height = height;
-    rp.width  = width;
-
     VK_ASSERT_OK(vkCreateRenderPass(dev_ctx->device, &cinfo, NULL, &rp.pass));
+    return {dev_ctx->render_passes.push(rp), (u32)Resource_Type::PASS};
+  }
+  Resource_ID create_frame_buffer(Resource_ID                         render_pass,
+                                  rd::Frame_Buffer_Create_Info const &info) override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    Render_Pass                 rp = dev_ctx->render_passes.read(render_pass.id);
+    Frame_Buffer                fb{};
+    fb.init();
+    fb.create_info = info;
+
+    u32 width  = 0;
+    u32 height = 0;
+    ito(info.rts.size) {
+      Image img = dev_ctx->images.read(info.rts[i].image.id);
+      if (width == 0)
+        width = img.info.extent.width;
+      else
+        ASSERT_ALWAYS(width == img.info.extent.width);
+      if (height == 0)
+        height = img.info.extent.height;
+      else
+        ASSERT_ALWAYS(height == img.info.extent.height);
+      VkFormat format;
+      if (info.rts[i].format == rd::Format::NATIVE)
+        format = dev_ctx->images.read(info.rts[i].image.id).info.format;
+      else
+        format = to_vk(info.rts[i].format);
+      fb.rts_views.push(dev_ctx
+                            ->create_image_view(info.rts[i].image.id, //
+                                                info.rts[i].level, 1, //
+                                                info.rts[i].layer, 1, //
+                                                format)
+                            .id);
+    }
+    if (info.depth_target.enabled) {
+      Image img = dev_ctx->images.read(info.depth_target.image.id);
+      if (width == 0)
+        width = img.info.extent.width;
+      else
+        ASSERT_ALWAYS(width == img.info.extent.width);
+      if (height == 0)
+        height = img.info.extent.height;
+      else
+        ASSERT_ALWAYS(height == img.info.extent.height);
+      VkFormat format;
+      if (info.depth_target.format == rd::Format::NATIVE)
+        format = dev_ctx->images.read(info.depth_target.image.id).info.format;
+      else
+        format = to_vk(info.depth_target.format);
+      fb.depth_target_view = dev_ctx
+                                 ->create_image_view(info.depth_target.image.id, //
+                                                     info.depth_target.level, 1, //
+                                                     info.depth_target.layer, 1, //
+                                                     format)
+                                 .id;
+    }
+    InlineArray<VkImageView, 8> views{};
+    defer(views.release());
+    ito(fb.rts_views.size) { views.push(dev_ctx->image_views.read(fb.rts_views[i]).view); }
+    if (info.depth_target.image.is_null() == false) {
+      views.push(dev_ctx->image_views.read(fb.depth_target_view).view);
+    }
     {
-      InlineArray<VkImageView, 8> views;
-      views.init();
-      defer(views.release());
-      ito(rp.rts_views.size) { views.push(dev_ctx->image_views.read(rp.rts_views[i]).view); }
-      if (info.depth_target.image.is_null() == false) {
-        views.push(dev_ctx->image_views.read(rp.depth_target_view).view);
-      }
-      VkFramebufferCreateInfo info;
+      VkFramebufferCreateInfo info{};
       MEMZERO(info);
       info.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
       info.attachmentCount = views.size;
@@ -3690,14 +3732,17 @@ class VkFactory : public rd::IDevice {
       info.layers          = 1;
       info.pAttachments    = &views[0];
       info.renderPass      = rp.pass;
-      VK_ASSERT_OK(vkCreateFramebuffer(dev_ctx->device, &info, NULL, &rp.fb));
+      VK_ASSERT_OK(vkCreateFramebuffer(dev_ctx->device, &info, NULL, &fb.fb));
     }
-    return {dev_ctx->render_passes.push(rp), (u32)Resource_Type::PASS};
+    fb.height = height;
+    fb.width  = width;
+
+    return {dev_ctx->frame_buffers.push(fb), (u32)Resource_Type::FRAME_BUFFER};
   }
-  rd::ICtx *start_render_pass(Resource_ID render_pass) override {
+  rd::ICtx *start_render_pass(Resource_ID render_pass, Resource_ID frame_buffer) override {
     std::lock_guard<std::mutex> _lock(mutex);
     Vk_Ctx *                    ctx = new Vk_Ctx();
-    ctx->init(rd::Pass_t::RENDER, dev_ctx, render_pass.id);
+    ctx->init(rd::Pass_t::RENDER, dev_ctx, render_pass.id, frame_buffer.id);
     return ctx;
   }
   void end_render_pass(rd::ICtx *_ctx) override {
@@ -3720,7 +3765,7 @@ class VkFactory : public rd::IDevice {
   rd::ICtx *start_compute_pass() override {
     std::lock_guard<std::mutex> _lock(mutex);
     Vk_Ctx *                    ctx = new Vk_Ctx();
-    ctx->init(rd::Pass_t::COMPUTE, dev_ctx, {0});
+    ctx->init(rd::Pass_t::COMPUTE, dev_ctx, {0}, {0});
     return ctx;
   }
   void wait_idle() {

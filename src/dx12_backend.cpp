@@ -76,7 +76,7 @@ D3D12_PRIMITIVE_TOPOLOGY to_dx(rd::Primitive op) {
 }
 D3D12_BLEND to_dx(rd::Blend_Factor factor) {
   switch (factor) {
-  // clang-format off
+    // clang-format off
     case rd::Blend_Factor::ZERO                     : return D3D12_BLEND_ZERO;
     case rd::Blend_Factor::ONE                      : return D3D12_BLEND_ONE;
     case rd::Blend_Factor::SRC_COLOR                : return D3D12_BLEND_SRC_COLOR;
@@ -273,6 +273,7 @@ enum class Resource_Type : u32 {
   COMPUTE_PSO,
   GRAPHICS_PSO,
   RENDER_PASS,
+  FRAME_BUFFER,
 };
 
 template <typename T> class Resource_Array {
@@ -342,6 +343,7 @@ struct DX12Binding_Signature {
                                        rd::Binding_Table_Create_Info const &table_info);
 };
 class RenderPass;
+class FrameBuffer;
 struct GraphicsPSOWrapper {
   ID3D12PipelineState *       pso = NULL;
   rd::Graphics_Pipeline_State state{};
@@ -397,6 +399,7 @@ class DX12Device : public rd::IDevice {
   // Resource_Array<HANDLE>                  events_table;
   Resource_Array<D3D12_SAMPLER_DESC *> sampler_table;
   Resource_Array<RenderPass *>         renderpass_table;
+  Resource_Array<FrameBuffer *>        fb_table;
 
   AutoArray<Pair<Resource_ID, i32>> deferred_release;
   struct Deferred_Descriptor_Range_Release {
@@ -834,6 +837,8 @@ class DX12Device : public rd::IDevice {
     res->Unmap(0, &rr);
   }
   Resource_ID create_render_pass(rd::Render_Pass_Create_Info const &info) override;
+  Resource_ID create_frame_buffer(Resource_ID                         render_pass,
+                                  rd::Frame_Buffer_Create_Info const &info) override;
   Resource_ID create_compute_pso(Resource_ID signature, Resource_ID cs) override {
     SCOPED_LOCK;
     IDxcBlob *                        bytecode = shader_table.load(cs.id);
@@ -854,7 +859,7 @@ class DX12Device : public rd::IDevice {
             (u32)Resource_Type::SIGNATURE};
   }
   rd::IBinding_Table *create_binding_table(Resource_ID signature) override;
-  rd::ICtx *          start_render_pass(Resource_ID render_pass) override;
+  rd::ICtx *          start_render_pass(Resource_ID render_pass, Resource_ID frame_buffer) override;
   void                end_render_pass(rd::ICtx *ctx) override;
   rd::ICtx *          start_compute_pass() override;
   void                end_compute_pass(rd::ICtx *ctx) override;
@@ -889,6 +894,10 @@ class DX12Device : public rd::IDevice {
   void       release() override {
     ASSERT_SINGLE_THREAD_SCOPE; // not a reentrant scope.
     wait_idle();
+    ito(0x10) {
+      deferred_desc_range_release_iteration();
+      deferred_resource_release_iteration();
+    }
     if (common_desc_heap) delete common_desc_heap;
     if (sampler_desc_heap) delete sampler_desc_heap;
     if (rtv_desc_heap) delete rtv_desc_heap;
@@ -1175,6 +1184,7 @@ class DX12Binding_Table : public rd::IBinding_Table {
   }
   void unbind() { is_bound = false; }
   void flush_push_constants(ComPtr<ID3D12GraphicsCommandList> cmd, rd::Pass_t pass_type) {
+    ASSERT_DEBUG(is_bound);
     if (!is_push_constants_dirty) return;
     if (signature->push_constants_size) {
       if (pass_type == rd::Pass_t::COMPUTE)
@@ -1379,13 +1389,24 @@ rd::IBinding_Table *DX12Device::create_binding_table(Resource_ID signature) {
   SCOPED_LOCK;
   return DX12Binding_Table::create(this, signature_table.load(signature.id));
 }
+
 class RenderPass {
   private:
-  DX12Device *                dev_ctx    = NULL;
-  u32                         rtv_offset = -1;
-  i32                         dsv_offset = -1;
   rd::Render_Pass_Create_Info info;
 
+  public:
+  rd::Render_Pass_Create_Info const &get_info() { return info; }
+  RenderPass(DX12Device *dev_ctx, rd::Render_Pass_Create_Info const &info) : info(info) {}
+  void release() { delete this; }
+};
+class FrameBuffer {
+  private:
+  DX12Device *                 dev_ctx    = NULL;
+  u32                          rtv_offset = -1;
+  i32                          dsv_offset = -1;
+  rd::Frame_Buffer_Create_Info info;
+
+  public:
   D3D12_CPU_DESCRIPTOR_HANDLE get_rtv_handle(u32 i) {
     return {dev_ctx->get_rtv_desc_heap()->get_heap()->GetCPUDescriptorHandleForHeapStart().ptr +
             (rtv_offset + i) * dev_ctx->get_rtv_desc_heap()->get_element_size()};
@@ -1396,9 +1417,8 @@ class RenderPass {
             rtv_offset * dev_ctx->get_dsv_desc_heap()->get_element_size()};
   }
 
-  public:
-  rd::Render_Pass_Create_Info const &get_info() { return info; }
-  RenderPass(DX12Device *dev_ctx, rd::Render_Pass_Create_Info const &info)
+  rd::Frame_Buffer_Create_Info const &get_info() { return info; }
+  FrameBuffer(DX12Device *dev_ctx, rd::Frame_Buffer_Create_Info const &info)
       : dev_ctx(dev_ctx), info(info) {
     if (info.rts.size) {
       rtv_offset = dev_ctx->get_rtv_desc_heap()->allocate(info.rts.size);
@@ -1415,7 +1435,7 @@ class RenderPass {
       dev_ctx->get_device()->CreateDepthStencilView(res, NULL, get_dsv_handle());
     }
   }
-  void bind(ComPtr<ID3D12GraphicsCommandList> cmd) {
+  void bind(ComPtr<ID3D12GraphicsCommandList> cmd, RenderPass *pass) {
     InlineArray<D3D12_CPU_DESCRIPTOR_HANDLE, 8> rtvs{};
     ito(info.rts.size) rtvs.push(get_rtv_handle(i));
     if (dsv_offset >= 0) {
@@ -1437,8 +1457,9 @@ class RenderPass {
       bar.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
       cmd->ResourceBarrier(1, &bar);
 
-      if (info.rts[i].clear_color.clear) {
-        cmd->ClearRenderTargetView(get_rtv_handle(i), (float *)&info.rts[i].clear_color.r, 0, NULL);
+      if (pass->get_info().rts[i].clear_color.clear) {
+        cmd->ClearRenderTargetView(get_rtv_handle(i),
+                                   (float *)&pass->get_info().rts[i].clear_color.r, 0, NULL);
       }
     }
     if (info.depth_target.image.is_valid()) {
@@ -1453,9 +1474,10 @@ class RenderPass {
       bar.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
       bar.Transition.StateAfter  = D3D12_RESOURCE_STATE_DEPTH_WRITE;
       cmd->ResourceBarrier(1, &bar);
-      cmd->ClearDepthStencilView(get_dsv_handle(),
-                                 D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
-                                 info.depth_target.clear_depth.d, 0, 0, NULL);
+      if (pass->get_info().depth_target.clear_depth.clear)
+        cmd->ClearDepthStencilView(get_dsv_handle(),
+                                   D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
+                                   pass->get_info().depth_target.clear_depth.d, 0, 0, NULL);
     }
   }
   void unbind(ComPtr<ID3D12GraphicsCommandList> cmd) {
@@ -1491,14 +1513,17 @@ class RenderPass {
     delete this;
   }
 };
+
 class DX12Context : public rd::ICtx {
   ComPtr<ID3D12GraphicsCommandList>              cmd;
   rd::Pass_t                                     type;
   DX12Device *                                   dev_ctx     = NULL;
   DX12Binding_Table *                            cur_binding = NULL;
   Hash_Table<Resource_ID, D3D12_RESOURCE_STATES> resource_state_tracker{};
-  RenderPass *                                   render_pass = NULL;
-  ~DX12Context()                                             = default;
+  RenderPass *                                   render_pass  = NULL;
+  FrameBuffer *                                  frame_buffer = NULL;
+  GraphicsPSOWrapper *                           gpso         = NULL;
+  ~DX12Context()                                              = default;
   // Synchronization
   void _image_barrier(Resource_ID image_id, D3D12_RESOURCE_STATES new_state) {
     InlineArray<D3D12_RESOURCE_BARRIER, 0x10> bars{};
@@ -1565,58 +1590,61 @@ class DX12Context : public rd::ICtx {
     resource_state_tracker.release();
     delete this;
   }
-  DX12Context(DX12Device *device, rd::Pass_t type, RenderPass *render_pass = NULL)
-      : type(type), dev_ctx(device), render_pass(render_pass) {
+  DX12Context(DX12Device *device, rd::Pass_t type, RenderPass *render_pass = NULL,
+              FrameBuffer *frame_buffer = NULL)
+      : type(type), dev_ctx(device), render_pass(render_pass), frame_buffer(frame_buffer) {
     cmd = device->alloc_graphics_cmd();
     device->bind_desc_heaps(cmd.Get());
   }
   void bind_table(rd::IBinding_Table *table) override { //
     if (cur_binding) cur_binding->unbind();
     cur_binding = (DX12Binding_Table *)table;
+    cur_binding->bind(cmd, type);
   }
   ComPtr<ID3D12GraphicsCommandList> get_cmd() { return cmd; }
   // Graphics
   void start_render_pass() override {
     ASSERT_DEBUG(render_pass && type == rd::Pass_t::RENDER);
-    render_pass->bind(cmd);
+    frame_buffer->bind(cmd, render_pass);
   }
   void end_render_pass() override {
     ASSERT_DEBUG(render_pass && type == rd::Pass_t::RENDER);
-    render_pass->unbind(cmd);
+    frame_buffer->unbind(cmd);
   }
   void bind_graphics_pso(Resource_ID pso) override {
     GraphicsPSOWrapper *wpso = dev_ctx->get_graphics_pso(pso.id);
     cmd->IASetPrimitiveTopology(wpso->topology);
     cmd->SetPipelineState(wpso->pso);
+    gpso = wpso;
   }
   void draw_indexed(u32 indices, u32 instances, u32 first_index, u32 first_instance,
                     i32 vertex_offset) override {
+    ASSERT_DEBUG(gpso);
     ASSERT_DEBUG(cur_binding);
-    cur_binding->bind(cmd, type);
     cur_binding->flush_push_constants(cmd, type);
     cmd->DrawIndexedInstanced(indices, instances, first_index, vertex_offset, first_instance);
   }
-  void bind_index_buffer(Resource_ID buffer, size_t offset, rd::Index_t format,
-                         size_t size) override {
+  void bind_index_buffer(Resource_ID buffer, size_t offset, rd::Index_t format) override {
+    ASSERT_DEBUG(gpso);
     ID3D12Resource *        res = dev_ctx->get_resource(buffer.id);
     D3D12_INDEX_BUFFER_VIEW view{};
     view.BufferLocation = res->GetGPUVirtualAddress() + offset;
     view.Format         = to_dx(format);
-    view.SizeInBytes    = size;
+    view.SizeInBytes    = res->GetDesc().Width - offset;
     cmd->IASetIndexBuffer(&view);
   }
-  void bind_vertex_buffer(u32 index, Resource_ID buffer, size_t stride, size_t offset,
-                          size_t size) override {
+  void bind_vertex_buffer(u32 index, Resource_ID buffer, size_t offset) override {
+    ASSERT_DEBUG(gpso);
     ID3D12Resource *         res = dev_ctx->get_resource(buffer.id);
     D3D12_VERTEX_BUFFER_VIEW view{};
     view.BufferLocation = res->GetGPUVirtualAddress() + offset;
-    view.SizeInBytes    = size;
-    view.StrideInBytes  = stride;
+    view.SizeInBytes    = res->GetDesc().Width - offset;
+    view.StrideInBytes  = gpso->state.bindings[index].stride;
     cmd->IASetVertexBuffers(index, 1, &view);
   }
   void draw(u32 vertices, u32 instances, u32 first_vertex, u32 first_instance) override {
+    ASSERT_DEBUG(gpso);
     ASSERT_DEBUG(cur_binding);
-    cur_binding->bind(cmd, type);
     cur_binding->flush_push_constants(cmd, type);
     cmd->DrawInstanced(vertices, instances, first_vertex, first_instance);
   }
@@ -1651,7 +1679,6 @@ class DX12Context : public rd::ICtx {
   }
   void dispatch(u32 dim_x, u32 dim_y, u32 dim_z) override {
     ASSERT_DEBUG(cur_binding);
-    cur_binding->bind(cmd, type);
     cur_binding->flush_push_constants(cmd, type);
     cmd->Dispatch(dim_x, dim_y, dim_z);
   }
@@ -1808,18 +1835,18 @@ Resource_ID DX12Device::create_graphics_pso(Resource_ID signature, Resource_ID r
     desc.BlendState.RenderTarget[i].DestBlend      = to_dx(state.blend_states[i].dst_color);
     desc.BlendState.RenderTarget[i].DestBlendAlpha = to_dx(state.blend_states[i].dst_alpha);
     desc.BlendState.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    if (rp->get_info().rts[i].format == rd::Format::NATIVE) {
-      ID3D12Resource *res = get_resource(rp->get_info().rts[i].image.id);
-      desc.RTVFormats[i]  = res->GetDesc().Format;
-    } else
-      desc.RTVFormats[i] = to_dx(rp->get_info().rts[i].format);
+    /* if (rp->get_info().rts[i].format == rd::Format::NATIVE) {
+       ID3D12Resource *res = get_resource(rp->get_info().rts[i].image.id);
+       desc.RTVFormats[i]  = res->GetDesc().Format;
+     } else*/
+    desc.RTVFormats[i] = to_dx(rp->get_info().rts[i].format);
   }
-  if (rp->get_info().depth_target.image.is_valid()) {
-    if (rp->get_info().depth_target.format == rd::Format::NATIVE) {
+  if (rp->get_info().depth_target.enabled) {
+    /*if (rp->get_info().depth_target.format == rd::Format::NATIVE) {
       ID3D12Resource *res = get_resource(rp->get_info().depth_target.image.id);
       desc.DSVFormat      = res->GetDesc().Format;
-    } else
-      desc.DSVFormat = to_dx(rp->get_info().depth_target.format);
+    } else*/
+    desc.DSVFormat = to_dx(rp->get_info().depth_target.format);
   }
   desc.SampleDesc.Count   = 1;
   desc.SampleDesc.Quality = 0;
@@ -1914,14 +1941,20 @@ Resource_ID DX12Device::create_graphics_pso(Resource_ID signature, Resource_ID r
   wrapper->pso                = pso;
   return {graphics_pso_table.push(wrapper), (u32)Resource_Type::GRAPHICS_PSO};
 }
+Resource_ID DX12Device::create_frame_buffer(Resource_ID                         render_pass,
+                                            rd::Frame_Buffer_Create_Info const &info) {
+  SCOPED_LOCK;
+  return {fb_table.push(new FrameBuffer(this, info)), (u32)Resource_Type::FRAME_BUFFER};
+}
 Resource_ID DX12Device::create_render_pass(rd::Render_Pass_Create_Info const &info) {
   SCOPED_LOCK;
   return {renderpass_table.push(new RenderPass(this, info)), (u32)Resource_Type::RENDER_PASS};
 }
-rd::ICtx *DX12Device::start_render_pass(Resource_ID render_pass) {
+rd::ICtx *DX12Device::start_render_pass(Resource_ID render_pass, Resource_ID frame_buffer) {
   SCOPED_LOCK;
-  RenderPass *rp = renderpass_table.load(render_pass.id);
-  return new DX12Context(this, rd::Pass_t::RENDER, rp);
+  RenderPass * rp = renderpass_table.load(render_pass.id);
+  FrameBuffer *fb = fb_table.load(frame_buffer.id);
+  return new DX12Context(this, rd::Pass_t::RENDER, rp, fb);
 }
 void DX12Device::end_render_pass(rd::ICtx *ctx) {
   SCOPED_LOCK;
@@ -1984,6 +2017,10 @@ void DX12Device::deferred_resource_release_iteration() {
         auto render_pass = renderpass_table.load(item.first.id);
         render_pass->release();
         renderpass_table.free(item.first.id);
+      } else if (item.first.type == (u32)Resource_Type::FRAME_BUFFER) {
+        auto fb = fb_table.load(item.first.id);
+        fb->release();
+        fb_table.free(item.first.id);
       } else if (item.first.type == (u32)Resource_Type::COMPUTE_PSO) {
         auto pso = compute_pso_table.load(item.first.id);
         pso->Release();
