@@ -34,7 +34,8 @@ void test_buffers(rd::IDevice *dev) {
 [numthreads(1024, 1, 1)]
 void main(uint3 DTid : SV_DispatchThreadID)
 {
-    BufferOut.Store<uint>(DTid.x * 4, DTid.x);
+    for (uint i = 0; i < 100000; i++)
+      BufferOut.Store<uint>(DTid.x * 4, BufferOut.Load<uint>(DTid.x * 4) + 1);
 }
 )"),
                                                                 NULL, 0));
@@ -66,7 +67,8 @@ void main(uint3 DTid : SV_DispatchThreadID)
     // dev->wait_idle();
     // RenderDoc_CTX::end();
   }
-  dev->wait_idle();
+  // dev->wait_idle();
+  u32 val = 2;
   {
     Resource_ID readback = [dev] {
       rd::Buffer_Create_Info buf_info;
@@ -76,7 +78,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
       buf_info.size        = sizeof(u32) * 1024;
       return dev->create_buffer(buf_info);
     }();
-    rd::ICtx *ctx = dev->start_async_compute_pass();
+    rd::ICtx *ctx = dev->start_compute_pass();
     {
       TracyVulkIINamedZone(ctx, "Async Compute Example 2");
       Resource_ID signature = [dev] {
@@ -138,13 +140,13 @@ struct CullPushConstants
 [numthreads(1024, 1, 1)]
   void main(uint3 DTid : SV_DispatchThreadID)
 {
-    BufferOut.Store<uint>(DTid.x * 4, BufferIn.Load<uint>(DTid.x * 4) * pc.val);
+    for (uint i = 0; i < 100000; i++)
+      BufferOut.Store<uint>(DTid.x * 4, BufferIn.Load<uint>(DTid.x * 4) * pc.val);
 }
 )"),
                                                                 NULL, 0));
 
       ctx->bind_compute(cs2);
-      u32 val = 3;
       table->push_constants(&val, 0, 4);
       ctx->dispatch(1, 1, 1);
       /* Resource_ID event_id = dev->create_event();
@@ -153,17 +155,19 @@ struct CullPushConstants
       ctx->buffer_barrier(buffer, rd::Buffer_Access::TRANSFER_SRC);
       ctx->copy_buffer(buffer, 0, readback, 0, sizeof(u32) * 1024);
     }
-    dev->end_async_compute_pass(ctx);
-    dev->wait_idle();
-    // while (!dev->get_event_state(event_id)) fprintf(stdout, "waiting...\n");
-    // dev->release_resource(event_id);
-    u32 *map = (u32 *)dev->map_buffer(readback);
-    ito(1024) {
-      // fprintf(stdout, "%i ", map[i]);
-      ASSERT_ALWAYS(map[i] == i * 3);
-    }
-    fflush(stdout);
-    dev->unmap_buffer(readback);
+    dev->end_compute_pass(ctx);
+    // dev->wait_idle();
+    //// while (!dev->get_event_state(event_id)) fprintf(stdout, "waiting...\n");
+    //// dev->release_resource(event_id);
+    // u32 *map = (u32 *)dev->map_buffer(readback);
+    // ito(1024) {
+    //  // fprintf(stdout, "%i ", map[i]);
+    //  u32 x       = i;
+    //  jto(100000) x = x * val;
+    //  ASSERT_ALWAYS(map[i] == x);
+    //}
+    // fflush(stdout);
+    // dev->unmap_buffer(readback);
   }
 }
 
@@ -269,7 +273,7 @@ void main(uint3 tid : SV_DispatchThreadID)
     ctx->copy_image_to_buffer(readback, 0, rw_texture, rd::Image_Copy::top_level(pitch));
   }
   dev->end_compute_pass(ctx);
-  dev->wait_idle();
+ /* dev->wait_idle();
   u8 *map = (u8 *)dev->map_buffer(readback);
   {
     Image2D tmp{};
@@ -280,7 +284,7 @@ void main(uint3 tid : SV_DispatchThreadID)
     write_image_rgba32_float_pfm("img.pfm", tmp.data, tmp.width, pitch, tmp.height, true);
   }
 
-  dev->unmap_buffer(readback);
+  dev->unmap_buffer(readback);*/
 }
 
 int main(int argc, char *argv[]) {
@@ -293,10 +297,10 @@ int main(int argc, char *argv[]) {
       RenderDoc_CTX::start();
       do {
         dev->start_frame();
-        test_buffers(dev);
+        //test_buffers(dev);
         test_mipmap_generation(dev);
         dev->end_frame();
-      } while (TracyIsConnected);
+      } while (true);
 
       RenderDoc_CTX::end();
     };

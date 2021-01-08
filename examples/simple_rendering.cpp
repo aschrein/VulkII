@@ -539,10 +539,10 @@ int main(int argc, char *argv[]) {
   (void)argv;
 
   auto window_loop = [](rd::Impl_t impl) { IGUIApp::start<Event_Consumer>(impl); };
-  // std::thread vulkan_thread = std::thread([window_loop] { window_loop(rd::Impl_t::VULKAN); });
-  std::thread dx12_thread = std::thread([window_loop] { window_loop(rd::Impl_t::DX12); });
-  // vulkan_thread.join();
-  dx12_thread.join();
+   std::thread vulkan_thread = std::thread([window_loop] { window_loop(rd::Impl_t::VULKAN); });
+  //std::thread dx12_thread = std::thread([window_loop] { window_loop(rd::Impl_t::DX12); });
+   vulkan_thread.join();
+  //dx12_thread.join();
 
   return 0;
 }

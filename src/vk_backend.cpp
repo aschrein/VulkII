@@ -24,6 +24,10 @@
 #  include <vulkan/vulkan_win32.h>
 #endif
 
+#ifdef TRACY_ENABLE
+#  include "3rdparty/tracy/TracyVulkan.hpp"
+#endif
+
 #include "rendering.hpp"
 
 #include <spirv_cross/spirv_cross.hpp>
@@ -1618,7 +1622,13 @@ static int              get_thread_id() {
   return id;
 };
 } // namespace
-
+#ifdef TRACY_ENABLE
+struct TracyContext {
+  tracy::VkCtx *gfx_ctx     = NULL;
+  tracy::VkCtx *compute_ctx = NULL;
+  tracy::VkCtx *copy_ctx    = NULL;
+};
+#endif
 struct VkDeviceContext {
   static constexpr u32 MAX_SC_IMAGES = 0x10;
   static constexpr u32 MAX_THREADS   = 0x100;
@@ -1626,7 +1636,9 @@ struct VkDeviceContext {
   VkSurfaceKHR surface       = VK_NULL_HANDLE;
   i32          window_width  = 1280;
   i32          window_height = 720;
-
+#ifdef TRACY_ENABLE
+  TracyContext tracy_ctx{};
+#endif
   VkInstance                 instance                                      = VK_NULL_HANDLE;
   VkPhysicalDevice           physdevice                                    = VK_NULL_HANDLE;
   VkPhysicalDeviceProperties device_properties                             = {};
@@ -1928,17 +1940,17 @@ struct VkDeviceContext {
   } sets;
 
   // ID                                          cur_pass;
-  Hash_Table<Graphics_Pipeline_State, ID> pipeline_cache;
-  Hash_Table<ID, ID>                      compute_pipeline_cache;
-  Hash_Table<u64, ID>                     shader_cache;
+  //Hash_Table<Graphics_Pipeline_State, ID> pipeline_cache;
+  //Hash_Table<ID, ID>                      compute_pipeline_cache;
+  //Hash_Table<u64, ID>                     shader_cache;
   // Hash_Table<rd::Render_Pass_Create_Info, ID> pass_cache;
   std::mutex mutex;
   std::mutex mutex2;
 
   void init_ds() {
-    shader_cache.init();
-    pipeline_cache.init();
-    compute_pipeline_cache.init();
+    //shader_cache.init();
+    //pipeline_cache.init();
+    //compute_pipeline_cache.init();
     mem_chunks.init(this);
     signatures.init(this);
     buffers.init(this);
@@ -1960,9 +1972,14 @@ struct VkDeviceContext {
 
   void release() {
     vkDeviceWaitIdle(device);
-    shader_cache.release();
-    pipeline_cache.release();
-    compute_pipeline_cache.release();
+#ifdef TRACY_ENABLE
+    TracyVkDestroy(tracy_ctx.gfx_ctx);
+    TracyVkDestroy(tracy_ctx.compute_ctx);
+    TracyVkDestroy(tracy_ctx.copy_ctx);
+#endif
+    //shader_cache.release();
+    //pipeline_cache.release();
+    //compute_pipeline_cache.release();
     buffers.release();
     samplers.release();
     images.release();
@@ -2203,7 +2220,11 @@ struct VkDeviceContext {
       pool = gfx_cmd_pools[cmd_index][get_thread_id()];
     else if (type == rd::Pass_t::ASYNC_COMPUTE)
       pool = compute_cmd_pools[cmd_index][get_thread_id()];
-    if (type == rd::Pass_t::ASYNC_COPY) pool = copy_cmd_pools[cmd_index][get_thread_id()];
+    else if (type == rd::Pass_t::ASYNC_COPY)
+      pool = copy_cmd_pools[cmd_index][get_thread_id()];
+    else {
+      TRAP;
+    }
     cmd.pool = pool;
 
     VkCommandBufferAllocateInfo info;
@@ -2356,9 +2377,9 @@ struct VkDeviceContext {
     std::lock_guard<std::mutex> _lock(mutex);
     u64                         shader_hash = hash_of(body);
     ito(num_defines) { shader_hash ^= hash_of(defines[0].first) ^ hash_of(defines[0].second); }
-    if (shader_cache.contains(shader_hash)) {
-      return {shader_cache.get(shader_hash), (u32)Resource_Type::SHADER};
-    }
+    //if (shader_cache.contains(shader_hash)) {
+    //  return {shader_cache.get(shader_hash), (u32)Resource_Type::SHADER};
+    //}
 
     String_Builder sb;
     sb.init();
@@ -2391,7 +2412,7 @@ struct VkDeviceContext {
     si.init(type, shader_hash, compile_hlsl(device, text, kind, defines, num_defines));
 
     ID shid = shaders.push(si);
-    shader_cache.insert(shader_hash, shid);
+    //shader_cache.insert(shader_hash, shid);
     return {shid, (u32)Resource_Type::SHADER};
   }
   Resource_ID create_sampler(rd::Sampler_Create_Info const &info) {
@@ -2488,7 +2509,7 @@ struct VkDeviceContext {
     } else if (res_id.type == (u32)Resource_Type::SEMAPHORE) {
       semaphores.remove(res_id.id, 4);
     } else if (res_id.type == (u32)Resource_Type::COMMAND_BUFFER) {
-      cmd_buffers.remove(res_id.id, 4);
+      cmd_buffers.remove(res_id.id, 3);
     } else if (res_id.type == (u32)Resource_Type::SAMPLER) {
       samplers.remove(res_id.id, 3);
     } else if (res_id.type == (u32)Resource_Type::TIMESTAMP) {
@@ -2840,7 +2861,28 @@ struct VkDeviceContext {
         }
       }
     }
-
+#ifdef TRACY_ENABLE
+    {
+      Resource_ID   cmd_id = create_command_buffer(rd::Pass_t::RENDER);
+      CommandBuffer cmd    = cmd_buffers.read(cmd_id.id);
+      tracy_ctx.gfx_ctx    = TracyVkContext(physdevice, device, gfx_queue, cmd.cmd);
+      release_resource(cmd_id);
+    }
+    {
+      Resource_ID   cmd_id  = create_command_buffer(rd::Pass_t::ASYNC_COMPUTE);
+      CommandBuffer cmd     = cmd_buffers.read(cmd_id.id);
+      tracy_ctx.compute_ctx = TracyVkContext(physdevice, device, compute_queue, cmd.cmd);
+      release_resource(cmd_id);
+    }
+    {
+      //Resource_ID   cmd_id = create_command_buffer(rd::Pass_t::ASYNC_COPY);
+      Resource_ID   cmd_id = create_command_buffer(rd::Pass_t::RENDER);
+      CommandBuffer cmd    = cmd_buffers.read(cmd_id.id);
+      tracy_ctx.copy_ctx   = TracyVkContext(physdevice, device, gfx_queue, cmd.cmd);
+      //tracy_ctx.copy_ctx   = TracyVkContext(physdevice, device, copy_queue, cmd.cmd);
+      release_resource(cmd_id);
+    }
+#endif
     ito(sc_image_count) {
       if (sc_images[i].is_null()) continue;
       Image image = images.read(sc_images[i]);
@@ -3058,6 +3100,65 @@ struct VkDeviceContext {
     return {0u};
   }
   void end_frame(VkSemaphore *wait_sem) {
+#ifdef TRACY_ENABLE
+    {
+      Resource_ID              cmd_id = create_command_buffer(rd::Pass_t::RENDER);
+      CommandBuffer            cmd    = cmd_buffers.read(cmd_id.id);
+      VkCommandBufferBeginInfo begin_info;
+      MEMZERO(begin_info);
+      begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+      begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+      VK_ASSERT_OK(vkResetCommandBuffer(cmd.cmd, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT));
+      VK_ASSERT_OK(vkBeginCommandBuffer(cmd.cmd, &begin_info));
+      TracyVkCollect(tracy_ctx.gfx_ctx, cmd.cmd);
+      vkEndCommandBuffer(cmd.cmd);
+      VkSubmitInfo submit_info;
+      MEMZERO(submit_info);
+      submit_info.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+      submit_info.commandBufferCount = 1;
+      submit_info.pCommandBuffers    = &cmd.cmd;
+      vkQueueSubmit(gfx_queue, 1, &submit_info, VK_NULL_HANDLE);
+      release_resource(cmd_id);
+    }
+    {
+      Resource_ID              cmd_id = create_command_buffer(rd::Pass_t::ASYNC_COMPUTE);
+      CommandBuffer            cmd    = cmd_buffers.read(cmd_id.id);
+      VkCommandBufferBeginInfo begin_info;
+      MEMZERO(begin_info);
+      begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+      begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+      VK_ASSERT_OK(vkResetCommandBuffer(cmd.cmd, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT));
+      VK_ASSERT_OK(vkBeginCommandBuffer(cmd.cmd, &begin_info));
+      TracyVkCollect(tracy_ctx.compute_ctx, cmd.cmd);
+      vkEndCommandBuffer(cmd.cmd);
+      VkSubmitInfo submit_info;
+      MEMZERO(submit_info);
+      submit_info.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+      submit_info.commandBufferCount = 1;
+      submit_info.pCommandBuffers    = &cmd.cmd;
+      vkQueueSubmit(compute_queue, 1, &submit_info, VK_NULL_HANDLE);
+      release_resource(cmd_id);
+    }
+    {
+      Resource_ID              cmd_id = create_command_buffer(rd::Pass_t::ASYNC_COPY);
+      CommandBuffer            cmd    = cmd_buffers.read(cmd_id.id);
+      VkCommandBufferBeginInfo begin_info;
+      MEMZERO(begin_info);
+      begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+      begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+      VK_ASSERT_OK(vkResetCommandBuffer(cmd.cmd, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT));
+      VK_ASSERT_OK(vkBeginCommandBuffer(cmd.cmd, &begin_info));
+      TracyVkCollect(tracy_ctx.copy_ctx, cmd.cmd);
+      vkEndCommandBuffer(cmd.cmd);
+      VkSubmitInfo submit_info;
+      MEMZERO(submit_info);
+      submit_info.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+      submit_info.commandBufferCount = 1;
+      submit_info.pCommandBuffers    = &cmd.cmd;
+      vkQueueSubmit(copy_queue, 1, &submit_info, VK_NULL_HANDLE);
+      release_resource(cmd_id);
+    }
+#endif
     if (surface != VK_NULL_HANDLE) {
       Resource_ID   cmd_id = create_command_buffer(rd::Pass_t::RENDER);
       CommandBuffer cmd    = cmd_buffers.read(cmd_id.id);
@@ -3128,7 +3229,7 @@ struct VkDeviceContext {
       vkQueuePresentKHR(gfx_queue, &present_info);
     }
   }
-};
+}; // namespace
 
 struct Resource_Path {
   u32  set;
@@ -3157,7 +3258,9 @@ class Vk_Ctx : public rd::ICtx {
   ID                cur_pass{};
   ID                cur_fb{};
   VK_Binding_Table *binding_table = NULL;
-
+#ifdef TRACY_ENABLE
+  tracy::VkCtxScope *tracy_scope = NULL;
+#endif
   template <typename K, typename V> using Table = Hash_Table<K, V, Default_Allocator, 64>;
   Table<Resource_ID, BufferLaoutTracker> buffer_layouts;
   Table<Resource_ID, ImageLayoutTracker> image_layouts;
@@ -3332,6 +3435,7 @@ class Vk_Ctx : public rd::ICtx {
     cmd            = dev_ctx->cmd_buffers.read(cmd_id.id).cmd;
     this->cur_pass = pass_id;
     this->cur_fb   = frame_buffer_id;
+
     VkCommandBufferBeginInfo begin_info;
     MEMZERO(begin_info);
     begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -3507,8 +3611,31 @@ class Vk_Ctx : public rd::ICtx {
     r.levelCount     = range.num_levels;
     vkCmdClearColorImage(cmd, img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &_cv, 1, &r);
   }
+#ifdef TRACY_ENABLE
+  void tracy_scope_enter(void *src_loc) override {
+    ASSERT_DEBUG(tracy_scope == NULL);
+    tracy::VkCtx *ctx = NULL;
+    if (type == rd::Pass_t::RENDER || type == rd::Pass_t::COMPUTE)
+      ctx = dev_ctx->tracy_ctx.gfx_ctx;
+    else if (type == rd::Pass_t::ASYNC_COMPUTE)
+      ctx = dev_ctx->tracy_ctx.compute_ctx;
+    else if (type == rd::Pass_t::ASYNC_COPY)
+      ctx = dev_ctx->tracy_ctx.copy_ctx;
+    else {
+      TRAP;
+    }
+    tracy_scope = new tracy::VkCtxScope(ctx, (tracy::SourceLocationData *)src_loc, cmd, true);
+  }
+  void tracy_scope_exit() override {
+    ASSERT_DEBUG(tracy_scope);
+    delete tracy_scope;
+    tracy_scope = NULL;
+  }
+#else
   void tracy_scope_enter(void *src_loc) override {}
   void tracy_scope_exit() override {}
+#endif
+
   // void update_buffer(Resource_ID buf_id, size_t offset, void const *data,
   //                   size_t data_size) override {
   //  Buffer buf = dev_ctx->buffers.read(buf_id.id);
