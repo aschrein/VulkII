@@ -476,158 +476,161 @@ float4 main(in PSInput input) : SV_TARGET0 {
       }
       on_frame();
       rd::ICtx *ctx = factory->start_render_pass(render_pass, frame_buffers[frame_id]);
-      image_bindings.reset();
-      io.Fonts->TexID      = (ImTextureID)bind_texture(font_texture, 0, 0, rd::Format::NATIVE);
-      auto         sc_info = factory->get_swapchain_image_info();
-      static float angle   = 0.0f;
-      angle += 1.0e-3f;
-      // ctx->set_scissor(0, 0, sc_info.width, sc_info.height);
-      ctx->set_viewport(0.0f, 0.0f, (f32)sc_info.width, (f32)sc_info.height, 0.0f, 1.0f);
-      // ImGui Pass
       {
-        ImGui_ImplSDL2_NewFrame(window);
-        ImGui::NewFrame();
-        ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDocking;
-        ImGuiViewport *  viewport     = ImGui::GetMainViewport();
-        ImGui::SetNextWindowPos(viewport->Pos);
-        ImGui::SetNextWindowSize(viewport->Size);
-        ImGui::SetNextWindowViewport(viewport->ID);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-        window_flags |= ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
-                        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove;
-        window_flags |= ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus;
-        window_flags |= ImGuiWindowFlags_NoBackground;
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 1.0f);
-        ImGui::SetNextWindowBgAlpha(-1.0f);
-        ImGui::Begin("DockSpace", nullptr, window_flags);
-        ImGui::PopStyleVar(4);
-        ImGuiID dockspace_id = ImGui::GetID("MyDockSpace");
-        ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_PassthruCentralNode);
-        on_gui();
-        ImGui::End();
-
-        // static bool show_demo_window = true;
-        // ImGui::ShowDemoWindow(&show_demo_window);
-
-        ImGui::Render();
-      }
-      ImDrawData *draw_data = ImGui::GetDrawData();
-      // Render IMGUI
-      {
-        Resource_ID vertex_buffer = [=] {
-          rd::Buffer_Create_Info buf_info;
-          MEMZERO(buf_info);
-          buf_info.memory_type = rd::Memory_Type::CPU_WRITE_GPU_READ;
-          buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
-          buf_info.size        = (draw_data->TotalVtxCount + 1) * sizeof(ImDrawVert);
-          return factory->create_buffer(buf_info);
-        }();
-        factory->release_resource(vertex_buffer);
-        Resource_ID index_buffer = [=] {
-          rd::Buffer_Create_Info buf_info;
-          MEMZERO(buf_info);
-          buf_info.memory_type = rd::Memory_Type::CPU_WRITE_GPU_READ;
-          buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER;
-          buf_info.size        = (draw_data->TotalIdxCount + 1) * sizeof(ImDrawIdx);
-          return factory->create_buffer(buf_info);
-        }();
-        factory->release_resource(index_buffer);
+        TracyVulkIINamedZone(ctx, "ImGui Rendering Pass");
+        image_bindings.reset();
+        io.Fonts->TexID      = (ImTextureID)bind_texture(font_texture, 0, 0, rd::Format::NATIVE);
+        auto         sc_info = factory->get_swapchain_image_info();
+        static float angle   = 0.0f;
+        angle += 1.0e-3f;
+        // ctx->set_scissor(0, 0, sc_info.width, sc_info.height);
+        ctx->set_viewport(0.0f, 0.0f, (f32)sc_info.width, (f32)sc_info.height, 0.0f, 1.0f);
+        // ImGui Pass
         {
-          {
-            ImDrawVert *vtx_dst = (ImDrawVert *)factory->map_buffer(vertex_buffer);
+          ImGui_ImplSDL2_NewFrame(window);
+          ImGui::NewFrame();
+          ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDocking;
+          ImGuiViewport *  viewport     = ImGui::GetMainViewport();
+          ImGui::SetNextWindowPos(viewport->Pos);
+          ImGui::SetNextWindowSize(viewport->Size);
+          ImGui::SetNextWindowViewport(viewport->ID);
+          ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+          ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+          window_flags |= ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+                          ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove;
+          window_flags |= ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus;
+          window_flags |= ImGuiWindowFlags_NoBackground;
+          ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+          ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 1.0f);
+          ImGui::SetNextWindowBgAlpha(-1.0f);
+          ImGui::Begin("DockSpace", nullptr, window_flags);
+          ImGui::PopStyleVar(4);
+          ImGuiID dockspace_id = ImGui::GetID("MyDockSpace");
+          ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f),
+                           ImGuiDockNodeFlags_PassthruCentralNode);
+          on_gui();
+          ImGui::End();
 
-            ito(draw_data->CmdListsCount) {
+          // static bool show_demo_window = true;
+          // ImGui::ShowDemoWindow(&show_demo_window);
 
-              const ImDrawList *cmd_list = draw_data->CmdLists[i];
-              memcpy(vtx_dst, cmd_list->VtxBuffer.Data,
-                     cmd_list->VtxBuffer.Size * sizeof(ImDrawVert));
-
-              vtx_dst += cmd_list->VtxBuffer.Size;
-            }
-            factory->unmap_buffer(vertex_buffer);
-          }
-          {
-            ImDrawIdx *idx_dst = (ImDrawIdx *)factory->map_buffer(index_buffer);
-            ito(draw_data->CmdListsCount) {
-
-              const ImDrawList *cmd_list = draw_data->CmdLists[i];
-
-              memcpy(idx_dst, cmd_list->IdxBuffer.Data,
-                     cmd_list->IdxBuffer.Size * sizeof(ImDrawIdx));
-              idx_dst += cmd_list->IdxBuffer.Size;
-            }
-            factory->unmap_buffer(index_buffer);
-          }
+          ImGui::Render();
         }
-        ImVec2 clip_off          = draw_data->DisplayPos;
-        ImVec2 clip_scale        = draw_data->FramebufferScale;
-        int    global_vtx_offset = 0;
-        int    global_idx_offset = 0;
-        ito(image_bindings.size) {
-          ctx->image_barrier(image_bindings[i].id, rd::Image_Access::SAMPLED);
-        }
-        ctx->start_render_pass();
-        ctx->bind_graphics_pso(pso);
-        if (sizeof(ImDrawIdx) == 2)
-          ctx->bind_index_buffer(index_buffer, 0, rd::Index_t::UINT16);
-        else
-          ctx->bind_index_buffer(index_buffer, 0, rd::Index_t::UINT32);
-        ctx->bind_vertex_buffer(0, vertex_buffer, 0);
-
-        u32 control = 0;
-        for (int n = 0; n < draw_data->CmdListsCount; n++) {
-          const ImDrawList *cmd_list = draw_data->CmdLists[n];
-          for (int cmd_i = 0; cmd_i < cmd_list->CmdBuffer.Size; cmd_i++) {
-            const ImDrawCmd *pcmd = &cmd_list->CmdBuffer[cmd_i];
-            ImVec4           clip_rect;
-            clip_rect.x  = (pcmd->ClipRect.x - clip_off.x) * clip_scale.x;
-            clip_rect.y  = (pcmd->ClipRect.y - clip_off.y) * clip_scale.y;
-            clip_rect.z  = (pcmd->ClipRect.z - clip_off.x) * clip_scale.x;
-            clip_rect.w  = (pcmd->ClipRect.w - clip_off.y) * clip_scale.y;
-            ImGui_ID img = image_bindings[(size_t)pcmd->TextureId];
-            if (img.format == rd::Format::D32_FLOAT) {
-              control = 1;
-            }
-            if (img.format == rd::Format::R32_UINT) {
-              control    = 2;
-              img.format = rd::Format::RGBA8_UNORM;
-            }
-
-            rd::IBinding_Table *table = factory->create_binding_table(signature);
-            defer(table->release());
+        ImDrawData *draw_data = ImGui::GetDrawData();
+        // Render IMGUI
+        {
+          Resource_ID vertex_buffer = [=] {
+            rd::Buffer_Create_Info buf_info;
+            MEMZERO(buf_info);
+            buf_info.memory_type = rd::Memory_Type::CPU_WRITE_GPU_READ;
+            buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
+            buf_info.size        = (draw_data->TotalVtxCount + 1) * sizeof(ImDrawVert);
+            return factory->create_buffer(buf_info);
+          }();
+          factory->release_resource(vertex_buffer);
+          Resource_ID index_buffer = [=] {
+            rd::Buffer_Create_Info buf_info;
+            MEMZERO(buf_info);
+            buf_info.memory_type = rd::Memory_Type::CPU_WRITE_GPU_READ;
+            buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER;
+            buf_info.size        = (draw_data->TotalIdxCount + 1) * sizeof(ImDrawIdx);
+            return factory->create_buffer(buf_info);
+          }();
+          factory->release_resource(index_buffer);
+          {
             {
-              float scale[2];
-              scale[0] = 2.0f / draw_data->DisplaySize.x;
-              scale[1] = 2.0f / draw_data->DisplaySize.y;
-              float translate[2];
-              translate[0] = -1.0f - draw_data->DisplayPos.x * scale[0];
-              translate[1] = -1.0f - draw_data->DisplayPos.y * scale[1];
-              table->push_constants(scale, 0, 8);
-              table->push_constants(translate, 8, 8);
-              table->push_constants(&control, 16, 4);
+              ImDrawVert *vtx_dst = (ImDrawVert *)factory->map_buffer(vertex_buffer);
+
+              ito(draw_data->CmdListsCount) {
+
+                const ImDrawList *cmd_list = draw_data->CmdLists[i];
+                memcpy(vtx_dst, cmd_list->VtxBuffer.Data,
+                       cmd_list->VtxBuffer.Size * sizeof(ImDrawVert));
+
+                vtx_dst += cmd_list->VtxBuffer.Size;
+              }
+              factory->unmap_buffer(vertex_buffer);
             }
-            rd::Image_Subresource range{};
-            range.layer      = img.base_layer;
-            range.level      = img.base_level;
-            range.num_layers = 1;
-            range.num_levels = 1;
-            table->bind_sampler(0, 1, sampler);
-            table->bind_texture(0, 0, 0, img.id, range, rd::Format::NATIVE);
-            ctx->bind_table(table);
+            {
+              ImDrawIdx *idx_dst = (ImDrawIdx *)factory->map_buffer(index_buffer);
+              ito(draw_data->CmdListsCount) {
 
-            ctx->set_scissor(clip_rect.x, clip_rect.y, clip_rect.z - clip_rect.x,
-                             clip_rect.w - clip_rect.y);
-            ctx->draw_indexed(pcmd->ElemCount, 1, pcmd->IdxOffset + global_idx_offset, 0,
-                              pcmd->VtxOffset + global_vtx_offset);
+                const ImDrawList *cmd_list = draw_data->CmdLists[i];
+
+                memcpy(idx_dst, cmd_list->IdxBuffer.Data,
+                       cmd_list->IdxBuffer.Size * sizeof(ImDrawIdx));
+                idx_dst += cmd_list->IdxBuffer.Size;
+              }
+              factory->unmap_buffer(index_buffer);
+            }
           }
-          global_idx_offset += cmd_list->IdxBuffer.Size;
-          global_vtx_offset += cmd_list->VtxBuffer.Size;
-        }
-        ctx->end_render_pass();
-      }
+          ImVec2 clip_off          = draw_data->DisplayPos;
+          ImVec2 clip_scale        = draw_data->FramebufferScale;
+          int    global_vtx_offset = 0;
+          int    global_idx_offset = 0;
+          ito(image_bindings.size) {
+            ctx->image_barrier(image_bindings[i].id, rd::Image_Access::SAMPLED);
+          }
+          ctx->start_render_pass();
+          ctx->bind_graphics_pso(pso);
+          if (sizeof(ImDrawIdx) == 2)
+            ctx->bind_index_buffer(index_buffer, 0, rd::Index_t::UINT16);
+          else
+            ctx->bind_index_buffer(index_buffer, 0, rd::Index_t::UINT32);
+          ctx->bind_vertex_buffer(0, vertex_buffer, 0);
 
+          u32 control = 0;
+          for (int n = 0; n < draw_data->CmdListsCount; n++) {
+            const ImDrawList *cmd_list = draw_data->CmdLists[n];
+            for (int cmd_i = 0; cmd_i < cmd_list->CmdBuffer.Size; cmd_i++) {
+              const ImDrawCmd *pcmd = &cmd_list->CmdBuffer[cmd_i];
+              ImVec4           clip_rect;
+              clip_rect.x  = (pcmd->ClipRect.x - clip_off.x) * clip_scale.x;
+              clip_rect.y  = (pcmd->ClipRect.y - clip_off.y) * clip_scale.y;
+              clip_rect.z  = (pcmd->ClipRect.z - clip_off.x) * clip_scale.x;
+              clip_rect.w  = (pcmd->ClipRect.w - clip_off.y) * clip_scale.y;
+              ImGui_ID img = image_bindings[(size_t)pcmd->TextureId];
+              if (img.format == rd::Format::D32_FLOAT) {
+                control = 1;
+              }
+              if (img.format == rd::Format::R32_UINT) {
+                control    = 2;
+                img.format = rd::Format::RGBA8_UNORM;
+              }
+
+              rd::IBinding_Table *table = factory->create_binding_table(signature);
+              defer(table->release());
+              {
+                float scale[2];
+                scale[0] = 2.0f / draw_data->DisplaySize.x;
+                scale[1] = 2.0f / draw_data->DisplaySize.y;
+                float translate[2];
+                translate[0] = -1.0f - draw_data->DisplayPos.x * scale[0];
+                translate[1] = -1.0f - draw_data->DisplayPos.y * scale[1];
+                table->push_constants(scale, 0, 8);
+                table->push_constants(translate, 8, 8);
+                table->push_constants(&control, 16, 4);
+              }
+              rd::Image_Subresource range{};
+              range.layer      = img.base_layer;
+              range.level      = img.base_level;
+              range.num_layers = 1;
+              range.num_levels = 1;
+              table->bind_sampler(0, 1, sampler);
+              table->bind_texture(0, 0, 0, img.id, range, rd::Format::NATIVE);
+              ctx->bind_table(table);
+
+              ctx->set_scissor(clip_rect.x, clip_rect.y, clip_rect.z - clip_rect.x,
+                               clip_rect.w - clip_rect.y);
+              ctx->draw_indexed(pcmd->ElemCount, 1, pcmd->IdxOffset + global_idx_offset, 0,
+                                pcmd->VtxOffset + global_vtx_offset);
+            }
+            global_idx_offset += cmd_list->IdxBuffer.Size;
+            global_vtx_offset += cmd_list->VtxBuffer.Size;
+          }
+          ctx->end_render_pass();
+        }
+      }
       factory->end_render_pass(ctx);
       factory->end_frame();
       frame_id = (frame_id + 1) % NUM_FRAMES;
@@ -989,46 +992,49 @@ void main(uint3 tid : SV_DispatchThreadID) {
     default: TRAP;
     }
     rd::ICtx *ctx = factory->start_compute_pass();
-    ctx->buffer_barrier(gpu_buffer, rd::Buffer_Access::TRANSFER_DST);
-    ctx->copy_buffer(staging_buffer, 0, gpu_buffer, 0, image->get_size_in_bytes());
-    rd::IBinding_Table *table = factory->create_binding_table(signature);
-    defer(table->release());
-    table->bind_UAV_buffer(0, 0, gpu_buffer, 0, 0);
-    table->bind_UAV_buffer(0, 1, gpu_buffer, 0, 0);
-    ctx->bind_table(table);
-    ctx->bind_compute(cs);
+    {
+      TracyVulkIINamedZone(ctx, "Build Mips");
+      ctx->buffer_barrier(gpu_buffer, rd::Buffer_Access::TRANSFER_DST);
+      ctx->copy_buffer(staging_buffer, 0, gpu_buffer, 0, image->get_size_in_bytes());
+      rd::IBinding_Table *table = factory->create_binding_table(signature);
+      defer(table->release());
+      table->bind_UAV_buffer(0, 0, gpu_buffer, 0, 0);
+      table->bind_UAV_buffer(0, 1, gpu_buffer, 0, 0);
+      ctx->bind_table(table);
+      ctx->bind_compute(cs);
 
-    if (filter == FILTER_BOX) {
-      for (u32 i = 0; i < mip_offsets.size - 1; i++) {
-        pc.src_row_pitch = mip_pitch[i];
-        pc.src_offset    = mip_offsets[i];
-        pc.src_width     = mip_sizes[i].x;
-        pc.src_height    = mip_sizes[i].y;
-        pc.dst_row_pitch = mip_pitch[i + 1];
-        pc.dst_offset    = mip_offsets[i + 1];
-        pc.dst_width     = mip_sizes[i + 1].x;
-        pc.dst_height    = mip_sizes[i + 1].y;
-        table->push_constants(&pc, 0, sizeof(pc));
-        ctx->buffer_barrier(gpu_buffer, rd::Buffer_Access::UAV);
-        ctx->dispatch((mip_sizes[i + 1].x + 15) / 16, (mip_sizes[i + 1].y + 15) / 16, 1);
+      if (filter == FILTER_BOX) {
+        for (u32 i = 0; i < mip_offsets.size - 1; i++) {
+          pc.src_row_pitch = mip_pitch[i];
+          pc.src_offset    = mip_offsets[i];
+          pc.src_width     = mip_sizes[i].x;
+          pc.src_height    = mip_sizes[i].y;
+          pc.dst_row_pitch = mip_pitch[i + 1];
+          pc.dst_offset    = mip_offsets[i + 1];
+          pc.dst_width     = mip_sizes[i + 1].x;
+          pc.dst_height    = mip_sizes[i + 1].y;
+          table->push_constants(&pc, 0, sizeof(pc));
+          ctx->buffer_barrier(gpu_buffer, rd::Buffer_Access::UAV);
+          ctx->dispatch((mip_sizes[i + 1].x + 15) / 16, (mip_sizes[i + 1].y + 15) / 16, 1);
+        }
+      } else {
+        TRAP;
       }
-    } else {
-      TRAP;
-    }
-    ctx->buffer_barrier(gpu_buffer, rd::Buffer_Access::TRANSFER_SRC);
-    ctx->image_barrier(output_image, rd::Image_Access::TRANSFER_DST);
-    ito(mip_offsets.size) {
-      rd::Image_Copy dst_info;
-      MEMZERO(dst_info);
-      dst_info.buffer_row_pitch = mip_pitch[i];
-      dst_info.level            = i;
-      dst_info.size_x           = mip_sizes[i].x;
-      dst_info.size_y           = mip_sizes[i].y;
-      dst_info.size_z           = 1;
-      ASSERT_DEBUG(mip_offsets[i] + mip_sizes[i].x * mip_sizes[i].y * image->get_bpp() <=
-                   gpu_buffer_size);
-      ASSERT_DEBUG((mip_offsets[i] & (rd::IDevice::BUFFER_COPY_ALIGNMENT - 1)) == 0);
-      ctx->copy_buffer_to_image(gpu_buffer, mip_offsets[i], output_image, dst_info);
+      ctx->buffer_barrier(gpu_buffer, rd::Buffer_Access::TRANSFER_SRC);
+      ctx->image_barrier(output_image, rd::Image_Access::TRANSFER_DST);
+      ito(mip_offsets.size) {
+        rd::Image_Copy dst_info;
+        MEMZERO(dst_info);
+        dst_info.buffer_row_pitch = mip_pitch[i];
+        dst_info.level            = i;
+        dst_info.size_x           = mip_sizes[i].x;
+        dst_info.size_y           = mip_sizes[i].y;
+        dst_info.size_z           = 1;
+        ASSERT_DEBUG(mip_offsets[i] + mip_sizes[i].x * mip_sizes[i].y * image->get_bpp() <=
+                     gpu_buffer_size);
+        ASSERT_DEBUG((mip_offsets[i] & (rd::IDevice::BUFFER_COPY_ALIGNMENT - 1)) == 0);
+        ctx->copy_buffer_to_image(gpu_buffer, mip_offsets[i], output_image, dst_info);
+      }
     }
     factory->end_compute_pass(ctx);
     return output_image;

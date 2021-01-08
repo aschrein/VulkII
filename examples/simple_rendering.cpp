@@ -199,7 +199,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
       }*/
       gfx_state.IA_set_vertex_binding(0, 12, rd::Input_Rate::VERTEX);
       gfx_state.IA_set_vertex_binding(1, 12, rd::Input_Rate::VERTEX);
-      //gfx_state.IA_set_vertex_binding(2, 8, rd::Input_Rate::VERTEX);
+      // gfx_state.IA_set_vertex_binding(2, 8, rd::Input_Rate::VERTEX);
       gfx_state.IA_set_topology(rd::Primitive::TRIANGLE_LIST);
       return rctx.factory->create_graphics_pso(signature, pass, gfx_state);
     }();
@@ -318,39 +318,43 @@ float4 main(in PSInput input) : SV_TARGET0 {
     float4x4 viewproj = g_camera.viewproj();
 
     rd::ICtx *ctx = rctx.factory->start_render_pass(pass, frame_buffer);
-    ctx->start_render_pass();
-    // timestamps.insert(rctx.factory, ctx);
-    ctx->set_viewport(0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f);
-    ctx->set_scissor(0, 0, width, height);
-    float dx = 0.0f;
-    // float4x4 world = float4x4(  //
-    //    1.0f, 0.0f, 0.0f, dx,   //
-    //    0.0f, 1.0f, 0.0f, 0.0f, //
-    //    0.0f, 0.0f, 1.0f, 0.0f, //
-    //    0.0f, 0.0f, 0.0f, 1.0f  //
-    //);
-    pc.viewproj = viewproj;
+    {
+      TracyVulkIINamedZone(ctx, "GBuffer Pass");
+      ctx->start_render_pass();
 
-    rd::IBinding_Table *table = rctx.factory->create_binding_table(signature);
-    defer(table->release());
-    table->push_constants(&viewproj, 0, sizeof(float4x4));
-    ctx->bind_table(table);
-    ctx->bind_graphics_pso(pso);
-    rctx.scene->traverse([&](Node *node) {
-      if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
-        GfxSufraceComponent *gs    = mn->getComponent<GfxSufraceComponent>();
-        float4x4             world = mn->get_transform();
-        pc.world_transform         = transpose(world);
-        table->push_constants(&pc, 0, sizeof(pc));
-        ito(gs->getNumSurfaces()) {
-          GfxSurface *s = gs->getSurface(i);
-          s->draw(ctx, gfx_state);
+      // timestamps.insert(rctx.factory, ctx);
+      ctx->set_viewport(0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f);
+      ctx->set_scissor(0, 0, width, height);
+      float dx = 0.0f;
+      // float4x4 world = float4x4(  //
+      //    1.0f, 0.0f, 0.0f, dx,   //
+      //    0.0f, 1.0f, 0.0f, 0.0f, //
+      //    0.0f, 0.0f, 1.0f, 0.0f, //
+      //    0.0f, 0.0f, 0.0f, 1.0f  //
+      //);
+      pc.viewproj = viewproj;
+
+      rd::IBinding_Table *table = rctx.factory->create_binding_table(signature);
+      defer(table->release());
+      table->push_constants(&viewproj, 0, sizeof(float4x4));
+      ctx->bind_table(table);
+      ctx->bind_graphics_pso(pso);
+      rctx.scene->traverse([&](Node *node) {
+        if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
+          GfxSufraceComponent *gs    = mn->getComponent<GfxSufraceComponent>();
+          float4x4             world = mn->get_transform();
+          pc.world_transform         = transpose(world);
+          table->push_constants(&pc, 0, sizeof(pc));
+          ito(gs->getNumSurfaces()) {
+            GfxSurface *s = gs->getSurface(i);
+            s->draw(ctx, gfx_state);
+          }
         }
-      }
-    });
+      });
 
-    // rctx.gizmo_layer->render(rctx.factory, ctx, width, height);
-    ctx->end_render_pass();
+      // rctx.gizmo_layer->render(rctx.factory, ctx, width, height);
+      ctx->end_render_pass();
+    }
     rctx.factory->end_render_pass(ctx);
 
     // timestamps.insert(rctx.factory, ctx);
@@ -534,10 +538,10 @@ int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
 
-  auto        window_loop   = [](rd::Impl_t impl) { IGUIApp::start<Event_Consumer>(impl); };
-  std::thread vulkan_thread = std::thread([window_loop] { window_loop(rd::Impl_t::VULKAN); });
-  std::thread dx12_thread   = std::thread([window_loop] { window_loop(rd::Impl_t::DX12); });
-  vulkan_thread.join();
+  auto window_loop = [](rd::Impl_t impl) { IGUIApp::start<Event_Consumer>(impl); };
+  // std::thread vulkan_thread = std::thread([window_loop] { window_loop(rd::Impl_t::VULKAN); });
+  std::thread dx12_thread = std::thread([window_loop] { window_loop(rd::Impl_t::DX12); });
+  // vulkan_thread.join();
   dx12_thread.join();
 
   return 0;

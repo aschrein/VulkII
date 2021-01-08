@@ -2,6 +2,8 @@
 #ifndef UTILS_H
 #define UTILS_H
 
+//#define TRACY_ENABLE
+
 #include <codecvt>
 #include <cstdlib>
 #include <locale>
@@ -12,6 +14,12 @@
 #include <string.h>
 #include <time.h>
 #include <type_traits>
+
+#ifdef TRACY_ENABLE
+#  include "3rdparty/tracy/Tracy.hpp"
+#else
+#  define TracyIsConnected false
+#endif
 
 static inline double time() { return ((double)clock()) / CLOCKS_PER_SEC; }
 

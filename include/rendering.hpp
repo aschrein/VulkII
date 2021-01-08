@@ -370,7 +370,7 @@ struct Clear_Depth {
 
 enum class Fence_Position { PASS_FINISED };
 
-enum class Pass_t { COMPUTE, RENDER };
+enum class Pass_t { COMPUTE, RENDER, ASYNC_COMPUTE, ASYNC_COPY };
 
 struct RT_Ref {
   bool   enabled;
@@ -557,33 +557,42 @@ class IDevice {
   virtual Resource_ID create_sampler(Sampler_Create_Info const &info)                          = 0;
   // Deferred release. Must call new_frame 3-6 times for the actual release to make sure it's not
   // used by the GPU.
-  virtual void            release_resource(Resource_ID id)                                     = 0;
-  virtual Resource_ID     create_event()                                                       = 0;
-  virtual Resource_ID     create_timestamp()                                                   = 0;
-  virtual Resource_ID     get_swapchain_image()                                                = 0;
-  virtual Image2D_Info    get_swapchain_image_info()                                           = 0;
-  virtual u32             get_num_swapchain_images()                                           = 0;
-  virtual Image_Info      get_image_info(Resource_ID res_id)                                   = 0;
-  virtual void *          map_buffer(Resource_ID id)                                           = 0;
-  virtual void            unmap_buffer(Resource_ID id)                                         = 0;
-  virtual Resource_ID     create_render_pass(Render_Pass_Create_Info const &info)              = 0;
+  virtual void            release_resource(Resource_ID id)                          = 0;
+  virtual Resource_ID     create_event()                                            = 0;
+  virtual Resource_ID     create_timestamp()                                        = 0;
+  virtual Resource_ID     get_swapchain_image()                                     = 0;
+  virtual Image2D_Info    get_swapchain_image_info()                                = 0;
+  virtual u32             get_num_swapchain_images()                                = 0;
+  virtual Image_Info      get_image_info(Resource_ID res_id)                        = 0;
+  virtual void *          map_buffer(Resource_ID id)                                = 0;
+  virtual void            unmap_buffer(Resource_ID id)                              = 0;
+  virtual Resource_ID     create_render_pass(Render_Pass_Create_Info const &info)   = 0;
   virtual Resource_ID     create_frame_buffer(Resource_ID                     render_pass,
-                                              Frame_Buffer_Create_Info const &info)            = 0;
-  virtual Resource_ID     create_compute_pso(Resource_ID signature, Resource_ID cs)            = 0;
+                                              Frame_Buffer_Create_Info const &info) = 0;
+  virtual Resource_ID     create_compute_pso(Resource_ID signature, Resource_ID cs) = 0;
   virtual Resource_ID     create_graphics_pso(Resource_ID signature, Resource_ID render_pass,
-                                              Graphics_Pipeline_State const &)                 = 0;
-  virtual Resource_ID     create_signature(Binding_Table_Create_Info const &info)              = 0;
-  virtual IBinding_Table *create_binding_table(Resource_ID signature)                          = 0;
-  virtual ICtx *          start_render_pass(Resource_ID render_pass, Resource_ID frame_buffer) = 0;
-  virtual void            end_render_pass(ICtx *ctx)                                           = 0;
-  virtual ICtx *          start_compute_pass()                                                 = 0;
-  virtual void            end_compute_pass(ICtx *ctx)                                          = 0;
-  virtual bool            get_timestamp_state(Resource_ID)                                     = 0;
-  virtual double          get_timestamp_ms(Resource_ID t0, Resource_ID t1)                     = 0;
-  virtual void            wait_idle()                                                          = 0;
-  virtual bool            get_event_state(Resource_ID id)                                      = 0;
-  virtual Impl_t          getImplType()                                                        = 0;
-  virtual void            release()                                                            = 0;
+                                              Graphics_Pipeline_State const &)      = 0;
+  virtual Resource_ID     create_signature(Binding_Table_Create_Info const &info)   = 0;
+  virtual IBinding_Table *create_binding_table(Resource_ID signature)               = 0;
+  virtual bool            get_timestamp_state(Resource_ID)                          = 0;
+  virtual double          get_timestamp_ms(Resource_ID t0, Resource_ID t1)          = 0;
+  virtual void            wait_idle()                                               = 0;
+  virtual bool            get_event_state(Resource_ID id)                           = 0;
+  virtual Impl_t          getImplType()                                             = 0;
+
+  ///////////////////
+  // Pass creation //
+  ///////////////////
+  virtual ICtx *start_render_pass(Resource_ID render_pass, Resource_ID frame_buffer) = 0;
+  virtual void  end_render_pass(ICtx *ctx)                                           = 0;
+  virtual ICtx *start_compute_pass()                                                 = 0;
+  virtual void  end_compute_pass(ICtx *ctx)                                          = 0;
+  virtual ICtx *start_async_compute_pass()                                           = 0;
+  virtual void  end_async_compute_pass(ICtx *ctx)                                    = 0;
+  virtual ICtx *start_async_copy_pass()                                              = 0;
+  virtual void  end_async_copy_pass(ICtx *ctx)                                       = 0;
+
+  virtual void release() = 0;
   // Does the deferred release iteration and increments the swap chain image if there's any.
   virtual void start_frame() = 0;
   virtual void end_frame()   = 0;
@@ -594,7 +603,15 @@ class IDevice {
 class ICtx {
   public:
   virtual void bind_table(IBinding_Table *table) = 0;
-  // Graphics
+
+  ///////////////
+  // Profiling //
+  ///////////////
+  virtual void tracy_scope_enter(void *) = 0;
+  virtual void tracy_scope_exit()        = 0;
+  //////////////
+  // Graphics //
+  //////////////
   virtual void start_render_pass()                                                     = 0;
   virtual void end_render_pass()                                                       = 0;
   virtual void bind_graphics_pso(Resource_ID pso)                                      = 0;
@@ -610,29 +627,43 @@ class ICtx {
   virtual void set_viewport(float x, float y, float width, float height, float mindepth,
                             float maxdepth)                     = 0;
   virtual void set_scissor(u32 x, u32 y, u32 width, u32 height) = 0;
-  // Compute
+
+  /////////////
+  // Compute //
+  /////////////
   virtual void bind_compute(Resource_ID id)              = 0;
   virtual void dispatch(u32 dim_x, u32 dim_y, u32 dim_z) = 0;
-  // Memory movement
+
+  /////////////////////
+  // Memory movement //
+  /////////////////////
   virtual void fill_buffer(Resource_ID id, size_t offset, size_t size, u32 value) = 0;
   virtual void clear_image(Resource_ID id, Image_Subresource const &range,
                            Clear_Value const &cv)                                 = 0;
   // Unsupported by DX12?
-  //virtual void update_buffer(Resource_ID buf_id, size_t offset, void const *data,
+  // virtual void update_buffer(Resource_ID buf_id, size_t offset, void const *data,
   //                           size_t data_size)                                    = 0;
   virtual void copy_buffer_to_image(Resource_ID buf_id, size_t buffer_offset, Resource_ID img_id,
-                                    Image_Copy const &dst_info)                   = 0;
+                                    Image_Copy const &dst_info) = 0;
   virtual void copy_image_to_buffer(Resource_ID buf_id, size_t buffer_offset, Resource_ID img_id,
-                                    Image_Copy const &dst_info)                   = 0;
+                                    Image_Copy const &dst_info) = 0;
   virtual void copy_buffer(Resource_ID src_buf_id, size_t src_offset, Resource_ID dst_buf_id,
-                           size_t dst_offset, u32 size)                           = 0;
-  // Synchronization
+                           size_t dst_offset, u32 size)         = 0;
+  /////////////////////
+  // Synchronization //
+  /////////////////////
   virtual void image_barrier(Resource_ID image_id, Image_Access access) = 0;
   virtual void buffer_barrier(Resource_ID buf_id, Buffer_Access access) = 0;
   virtual void insert_event(Resource_ID id)                             = 0;
   virtual void insert_timestamp(Resource_ID timestamp_id)               = 0;
 };
-
+#ifdef TRACY_ENABLE
+// clang-format off
+#define TracyVulkIINamedZone(ctx, name) ZoneScopedN(name); static constexpr tracy::SourceLocationData TracyConcat(__tracy_gpu_source_location, __LINE__) { name, __FUNCTION__, __FILE__, (uint32_t)__LINE__, 0 }; ctx->tracy_scope_enter((void*)&TracyConcat(__tracy_gpu_source_location, __LINE__)); defer(ctx->tracy_scope_exit();)
+// clang-format on
+#else
+#  define TracyVulkIINamedZone(ctx, name)
+#endif
 IDevice *create_vulkan(void *window_handler);
 #ifdef WIN32
 IDevice *create_dx12(void *window_handler);

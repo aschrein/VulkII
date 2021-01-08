@@ -1627,13 +1627,17 @@ struct VkDeviceContext {
   i32          window_width  = 1280;
   i32          window_height = 720;
 
-  VkInstance                 instance                              = VK_NULL_HANDLE;
-  VkPhysicalDevice           physdevice                            = VK_NULL_HANDLE;
-  VkPhysicalDeviceProperties device_properties                     = {};
-  VkQueue                    queue                                 = VK_NULL_HANDLE;
-  VkDevice                   device                                = VK_NULL_HANDLE;
-  VkCommandPool              cmd_pools[MAX_SC_IMAGES][MAX_THREADS] = {};
-  VkQueryPool                query_pool                            = VK_NULL_HANDLE;
+  VkInstance                 instance                                      = VK_NULL_HANDLE;
+  VkPhysicalDevice           physdevice                                    = VK_NULL_HANDLE;
+  VkPhysicalDeviceProperties device_properties                             = {};
+  VkQueue                    gfx_queue                                     = VK_NULL_HANDLE;
+  VkQueue                    compute_queue                                 = VK_NULL_HANDLE;
+  VkQueue                    copy_queue                                    = VK_NULL_HANDLE;
+  VkDevice                   device                                        = VK_NULL_HANDLE;
+  VkCommandPool              gfx_cmd_pools[MAX_SC_IMAGES][MAX_THREADS]     = {};
+  VkCommandPool              compute_cmd_pools[MAX_SC_IMAGES][MAX_THREADS] = {};
+  VkCommandPool              copy_cmd_pools[MAX_SC_IMAGES][MAX_THREADS]    = {};
+  VkQueryPool                query_pool                                    = VK_NULL_HANDLE;
   u32                        timestamp_frequency;
   std::atomic<u32>           query_cursor;
   // VkCommandBuffer            cmd_buffers[MAX_SC_IMAGES] = {};
@@ -1653,9 +1657,12 @@ struct VkDeviceContext {
   // Descriptor_Pool desc_pools[MAX_SC_IMAGES][MAX_THREADS] = {};
   Descriptor_Pool desc_pool = {};
 
-  u32 graphics_queue_id = 0;
-  u32 compute_queue_id  = 0;
-  u32 transfer_queue_id = 0;
+  enum {
+    GRAPHICS_QUEUE_INDEX = 0,
+    COMPUTE_QUEUE_INDEX  = 1,
+    COPY_QUEUE_INDEX     = 2,
+  };
+  u32 queue_indices[3]{};
 
   struct Mem_Chunk_Array : Resource_Array<Mem_Chunk, Mem_Chunk_Array> {
     static constexpr char const NAME[]  = "Mem_Chunk_Array";
@@ -1974,8 +1981,14 @@ struct VkDeviceContext {
     // ito(mem_chunks.size) mem_chunks[i].release(device);
     mem_chunks.release();
     signatures.release();
-    ito(sc_image_count) jto(MAX_THREADS) if (cmd_pools[i][j] != VK_NULL_HANDLE)
-        vkDestroyCommandPool(device, cmd_pools[i][j], NULL);
+    ito(sc_image_count) jto(MAX_THREADS) {
+      if (gfx_cmd_pools[i][j] != VK_NULL_HANDLE)
+        vkDestroyCommandPool(device, gfx_cmd_pools[i][j], NULL);
+      if (compute_cmd_pools[i][j] != VK_NULL_HANDLE)
+        vkDestroyCommandPool(device, compute_cmd_pools[i][j], NULL);
+      if (copy_cmd_pools[i][j] != VK_NULL_HANDLE)
+        vkDestroyCommandPool(device, copy_cmd_pools[i][j], NULL);
+    }
     vkDeviceWaitIdle(device);
     vkDestroyQueryPool(device, query_pool, NULL);
     ito(sc_image_count) vkDestroySemaphore(device, sc_free_sem[i], NULL);
@@ -2020,8 +2033,8 @@ struct VkDeviceContext {
     VkBufferCreateInfo          cinfo;
     MEMZERO(cinfo);
     cinfo.sType                 = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    cinfo.pQueueFamilyIndices   = &graphics_queue_id;
-    cinfo.queueFamilyIndexCount = 1;
+    cinfo.pQueueFamilyIndices   = queue_indices;
+    cinfo.queueFamilyIndexCount = 3;
     cinfo.sharingMode           = VK_SHARING_MODE_EXCLUSIVE;
     cinfo.size                  = size;
     cinfo.usage                 = 0;
@@ -2043,8 +2056,8 @@ struct VkDeviceContext {
     {
       MEMZERO(cinfo);
       cinfo.sType                 = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-      cinfo.pQueueFamilyIndices   = &graphics_queue_id;
-      cinfo.queueFamilyIndexCount = 1;
+      cinfo.pQueueFamilyIndices   = queue_indices;
+      cinfo.queueFamilyIndexCount = 3;
       cinfo.sharingMode           = VK_SHARING_MODE_EXCLUSIVE;
       cinfo.size                  = info.size;
       cinfo.usage                 = to_vk_buffer_usage_bits(info.usage_bits);
@@ -2155,7 +2168,7 @@ struct VkDeviceContext {
     return module;
   }
 
-  VkCommandPool cur_cmd_pool() { return cmd_pools[cmd_index][get_thread_id()]; }
+  // VkCommandPool cur_cmd_pool() { return cmd_pools[cmd_index][get_thread_id()]; }
 
   Resource_ID create_fence(bool signaled) {
     std::lock_guard<std::mutex> _lock(mutex);
@@ -2182,15 +2195,21 @@ struct VkDeviceContext {
     return {fence_id, (u32)Resource_Type::EVENT};
   }
 
-  Resource_ID create_command_buffer() {
+  Resource_ID create_command_buffer(rd::Pass_t type) {
     CommandBuffer cmd;
     MEMZERO(cmd);
-    cmd.pool = cmd_pools[cmd_index][get_thread_id()];
+    VkCommandPool pool = VK_NULL_HANDLE;
+    if (type == rd::Pass_t::RENDER || type == rd::Pass_t::COMPUTE)
+      pool = gfx_cmd_pools[cmd_index][get_thread_id()];
+    else if (type == rd::Pass_t::ASYNC_COMPUTE)
+      pool = compute_cmd_pools[cmd_index][get_thread_id()];
+    if (type == rd::Pass_t::ASYNC_COPY) pool = copy_cmd_pools[cmd_index][get_thread_id()];
+    cmd.pool = pool;
 
     VkCommandBufferAllocateInfo info;
     MEMZERO(info);
     info.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    info.commandPool        = cmd_pools[cmd_index][get_thread_id()];
+    info.commandPool        = pool;
     info.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     info.commandBufferCount = 1;
     VK_ASSERT_OK(vkAllocateCommandBuffers(device, &info, &cmd.cmd));
@@ -2276,8 +2295,8 @@ struct VkDeviceContext {
       MEMZERO(cinfo);
       cinfo.flags                 = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
       cinfo.sType                 = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-      cinfo.pQueueFamilyIndices   = &graphics_queue_id;
-      cinfo.queueFamilyIndexCount = 1;
+      cinfo.pQueueFamilyIndices   = queue_indices;
+      cinfo.queueFamilyIndexCount = 3;
       cinfo.sharingMode           = VK_SHARING_MODE_EXCLUSIVE;
       cinfo.usage                 = 0;
       cinfo.extent                = VkExtent3D{width, height, depth};
@@ -2565,8 +2584,8 @@ struct VkDeviceContext {
     sc_create_info.compositeAlpha        = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     sc_create_info.presentMode           = present_mode_of_choice;
     sc_create_info.clipped               = VK_TRUE;
-    sc_create_info.queueFamilyIndexCount = 1;
-    sc_create_info.pQueueFamilyIndices   = &graphics_queue_id;
+    sc_create_info.queueFamilyIndexCount = 3;
+    sc_create_info.pQueueFamilyIndices   = queue_indices;
 
     sc_image_count = 0;
     VK_ASSERT_OK(vkCreateSwapchainKHR(device, &sc_create_info, 0, &swapchain));
@@ -2681,14 +2700,14 @@ struct VkDeviceContext {
             vkGetPhysicalDeviceSurfaceSupportKHR(physdevice_handles[i], j, surface, &sup);
 
           if (sup && (queue_family_properties[j].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
-            graphics_queue_id  = j;
-            graphics_device_id = physdevice_handles[i];
+            queue_indices[GRAPHICS_QUEUE_INDEX] = j;
+            graphics_device_id                  = physdevice_handles[i];
           }
           if (sup && (queue_family_properties[j].queueFlags & VK_QUEUE_COMPUTE_BIT)) {
-            compute_queue_id = j;
+            queue_indices[COMPUTE_QUEUE_INDEX] = j;
           }
           if (sup && (queue_family_properties[j].queueFlags & VK_QUEUE_TRANSFER_BIT)) {
-            transfer_queue_id = j;
+            queue_indices[COPY_QUEUE_INDEX] = j;
           }
         }
         VkPhysicalDeviceProperties Properties;
@@ -2718,14 +2737,16 @@ struct VkDeviceContext {
     device_create_info.enabledExtensionCount   = ARRAY_SIZE(device_extensions);
     device_create_info.ppEnabledExtensionNames = device_extensions;
     float                   priority           = 1.0f;
-    VkDeviceQueueCreateInfo queue_create_info;
-    MEMZERO(queue_create_info);
-    queue_create_info.sType                 = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-    queue_create_info.queueFamilyIndex      = graphics_queue_id;
-    queue_create_info.queueCount            = 1;
-    queue_create_info.pQueuePriorities      = &priority;
-    device_create_info.queueCreateInfoCount = 1;
-    device_create_info.pQueueCreateInfos    = &queue_create_info;
+    VkDeviceQueueCreateInfo queue_create_info[3];
+    ito(3) {
+      MEMZERO(queue_create_info[i]);
+      queue_create_info[i].sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+      queue_create_info[i].queueFamilyIndex = queue_indices[i];
+      queue_create_info[i].queueCount       = 1;
+      queue_create_info[i].pQueuePriorities = &priority;
+    }
+    device_create_info.queueCreateInfoCount = 3;
+    device_create_info.pQueueCreateInfos    = queue_create_info;
 
     VkPhysicalDeviceFeatures2 pd_features2;
     MEMZERO(pd_features2);
@@ -2772,8 +2793,12 @@ struct VkDeviceContext {
     device_create_info.pEnabledFeatures                      = &enabled_features;
 
     VK_ASSERT_OK(vkCreateDevice(graphics_device_id, &device_create_info, NULL, &device));
-    vkGetDeviceQueue(device, graphics_queue_id, 0, &queue);
-    ASSERT_ALWAYS(queue != VK_NULL_HANDLE);
+    {
+      vkGetDeviceQueue(device, queue_indices[GRAPHICS_QUEUE_INDEX], 0, &gfx_queue);
+      vkGetDeviceQueue(device, queue_indices[COMPUTE_QUEUE_INDEX], 0, &compute_queue);
+      vkGetDeviceQueue(device, queue_indices[COPY_QUEUE_INDEX], 0, &copy_queue);
+      ASSERT_ALWAYS(gfx_queue != VK_NULL_HANDLE);
+    }
     vkGetPhysicalDeviceProperties(physdevice, &device_properties);
     update_swapchain();
     {
@@ -2781,10 +2806,38 @@ struct VkDeviceContext {
       MEMZERO(info);
       info.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
       info.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-      info.queueFamilyIndex = graphics_queue_id;
+      info.queueFamilyIndex = queue_indices[GRAPHICS_QUEUE_INDEX];
 
       ito(sc_image_count) {
-        jto(MAX_THREADS) { VK_ASSERT_OK(vkCreateCommandPool(device, &info, 0, &cmd_pools[i][j])); }
+        jto(MAX_THREADS) {
+          VK_ASSERT_OK(vkCreateCommandPool(device, &info, 0, &gfx_cmd_pools[i][j]));
+        }
+      }
+    }
+    {
+      VkCommandPoolCreateInfo info;
+      MEMZERO(info);
+      info.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+      info.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+      info.queueFamilyIndex = queue_indices[COMPUTE_QUEUE_INDEX];
+
+      ito(sc_image_count) {
+        jto(MAX_THREADS) {
+          VK_ASSERT_OK(vkCreateCommandPool(device, &info, 0, &compute_cmd_pools[i][j]));
+        }
+      }
+    }
+    {
+      VkCommandPoolCreateInfo info;
+      MEMZERO(info);
+      info.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+      info.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+      info.queueFamilyIndex = queue_indices[COPY_QUEUE_INDEX];
+
+      ito(sc_image_count) {
+        jto(MAX_THREADS) {
+          VK_ASSERT_OK(vkCreateCommandPool(device, &info, 0, &copy_cmd_pools[i][j]));
+        }
       }
     }
 
@@ -2833,8 +2886,8 @@ struct VkDeviceContext {
   void _image_barrier_sync(Image const &img, VkAccessFlags old_mem_access,
                            VkImageLayout old_image_layout, VkAccessFlags new_mem_access,
                            VkImageLayout new_image_layout) {
-    if (cmd_pools[cmd_index][get_thread_id()] == VK_NULL_HANDLE) return;
-    Resource_ID              cmd_id = create_command_buffer();
+    if (gfx_cmd_pools[cmd_index][get_thread_id()] == VK_NULL_HANDLE) return;
+    Resource_ID              cmd_id = create_command_buffer(rd::Pass_t::RENDER);
     CommandBuffer            cmd    = cmd_buffers.read(cmd_id.id);
     VkCommandBufferBeginInfo begin_info;
     MEMZERO(begin_info);
@@ -2870,15 +2923,15 @@ struct VkDeviceContext {
     submit_info.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit_info.commandBufferCount = 1;
     submit_info.pCommandBuffers    = &cmd.cmd;
-    vkQueueSubmit(queue, 1, &submit_info, VK_NULL_HANDLE);
+    vkQueueSubmit(gfx_queue, 1, &submit_info, VK_NULL_HANDLE);
     vkDeviceWaitIdle(device);
   }
 
   Resource_ID _image_barrier_async(Image const &img, VkAccessFlags old_mem_access,
                                    VkImageLayout old_image_layout, VkAccessFlags new_mem_access,
                                    VkImageLayout new_image_layout) {
-    if (cmd_pools[cmd_index] == VK_NULL_HANDLE) return {0u};
-    Resource_ID              cmd_id = create_command_buffer();
+    if (gfx_cmd_pools[cmd_index] == VK_NULL_HANDLE) return {0u};
+    Resource_ID              cmd_id = create_command_buffer(rd::Pass_t::RENDER);
     CommandBuffer            cmd    = cmd_buffers.read(cmd_id.id);
     VkCommandBufferBeginInfo begin_info;
     MEMZERO(begin_info);
@@ -2918,7 +2971,7 @@ struct VkDeviceContext {
     submit_info.pCommandBuffers      = &cmd.cmd;
     submit_info.signalSemaphoreCount = 1;
     submit_info.pSignalSemaphores    = &raw_sem;
-    vkQueueSubmit(queue, 1, &submit_info, VK_NULL_HANDLE);
+    vkQueueSubmit(gfx_queue, 1, &submit_info, VK_NULL_HANDLE);
     return sem;
   }
 
@@ -2975,8 +3028,14 @@ struct VkDeviceContext {
       } else if (acquire_res != VK_SUCCESS) {
         TRAP;
       }
-      jto(MAX_THREADS) VK_ASSERT_OK(vkResetCommandPool(
-          device, cmd_pools[cmd_index][j], VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT));
+      jto(MAX_THREADS) {
+        VK_ASSERT_OK(vkResetCommandPool(device, gfx_cmd_pools[cmd_index][j],
+                                        VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT));
+        VK_ASSERT_OK(vkResetCommandPool(device, compute_cmd_pools[cmd_index][j],
+                                        VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT));
+        VK_ASSERT_OK(vkResetCommandPool(device, copy_cmd_pools[cmd_index][j],
+                                        VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT));
+      }
       // jto(MAX_THREADS) desc_pools[cmd_index][j].reset();
       if (1) {
 
@@ -2986,15 +3045,21 @@ struct VkDeviceContext {
         return sem;
       }
     } else {
-      jto(MAX_THREADS) VK_ASSERT_OK(vkResetCommandPool(
-          device, cmd_pools[cmd_index][j], VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT));
+      jto(MAX_THREADS) {
+        VK_ASSERT_OK(vkResetCommandPool(device, gfx_cmd_pools[cmd_index][j],
+                                        VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT));
+        VK_ASSERT_OK(vkResetCommandPool(device, compute_cmd_pools[cmd_index][j],
+                                        VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT));
+        VK_ASSERT_OK(vkResetCommandPool(device, copy_cmd_pools[cmd_index][j],
+                                        VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT));
+      }
       // jto(MAX_THREADS) desc_pools[cmd_index][j].reset();
     }
     return {0u};
   }
   void end_frame(VkSemaphore *wait_sem) {
     if (surface != VK_NULL_HANDLE) {
-      Resource_ID   cmd_id = create_command_buffer();
+      Resource_ID   cmd_id = create_command_buffer(rd::Pass_t::RENDER);
       CommandBuffer cmd    = cmd_buffers.read(cmd_id.id);
       // vkResetCommandBuffer(cmd, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
       VkCommandBufferBeginInfo begin_info;
@@ -3040,7 +3105,7 @@ struct VkDeviceContext {
         submit_info.pCommandBuffers      = &cmd.cmd;
         submit_info.signalSemaphoreCount = 1;
         submit_info.pSignalSemaphores    = &render_finish_sem[cmd_index];
-        vkQueueSubmit(queue, 1, &submit_info, frame_fences[cmd_index]);
+        vkQueueSubmit(gfx_queue, 1, &submit_info, frame_fences[cmd_index]);
       } else {
         submit_info.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submit_info.waitSemaphoreCount   = 1;
@@ -3050,7 +3115,7 @@ struct VkDeviceContext {
         submit_info.pCommandBuffers      = &cmd.cmd;
         submit_info.signalSemaphoreCount = 1;
         submit_info.pSignalSemaphores    = &render_finish_sem[cmd_index];
-        vkQueueSubmit(queue, 1, &submit_info, frame_fences[cmd_index]);
+        vkQueueSubmit(gfx_queue, 1, &submit_info, frame_fences[cmd_index]);
       }
       VkPresentInfoKHR present_info;
       MEMZERO(present_info);
@@ -3060,7 +3125,7 @@ struct VkDeviceContext {
       present_info.swapchainCount     = 1;
       present_info.pSwapchains        = &swapchain;
       present_info.pImageIndices      = &image_index;
-      vkQueuePresentKHR(queue, &present_info);
+      vkQueuePresentKHR(gfx_queue, &present_info);
     }
   }
 };
@@ -3263,7 +3328,7 @@ class Vk_Ctx : public rd::ICtx {
     this->dev_ctx = dev_ctx;
     buffer_layouts.reset();
     image_layouts.reset();
-    cmd_id         = dev_ctx->create_command_buffer();
+    cmd_id         = dev_ctx->create_command_buffer(type);
     cmd            = dev_ctx->cmd_buffers.read(cmd_id.id).cmd;
     this->cur_pass = pass_id;
     this->cur_fb   = frame_buffer_id;
@@ -3303,7 +3368,12 @@ class Vk_Ctx : public rd::ICtx {
 
     VkSemaphore raw_sem           = dev_ctx->semaphores.read(finish_sem).sem;
     submit_info.pSignalSemaphores = &raw_sem;
-    vkQueueSubmit(dev_ctx->queue, 1, &submit_info, finish_fence);
+    if (type == rd::Pass_t::RENDER || type == rd::Pass_t::COMPUTE)
+      vkQueueSubmit(dev_ctx->gfx_queue, 1, &submit_info, finish_fence);
+    else if (type == rd::Pass_t::ASYNC_COMPUTE)
+      vkQueueSubmit(dev_ctx->compute_queue, 1, &submit_info, finish_fence);
+    if (type == rd::Pass_t::ASYNC_COPY)
+      vkQueueSubmit(dev_ctx->copy_queue, 1, &submit_info, finish_fence);
     return finish_sem;
   }
   void release() {
@@ -3403,7 +3473,8 @@ class Vk_Ctx : public rd::ICtx {
                                   cnt_buf_offset, max_count, stride);
   }
   void dispatch(u32 dim_x, u32 dim_y, u32 dim_z) override {
-    ASSERT_ALWAYS(type == rd::Pass_t::COMPUTE);
+    ASSERT_ALWAYS(type == rd::Pass_t::COMPUTE || type == rd::Pass_t::RENDER ||
+                  type == rd::Pass_t::ASYNC_COMPUTE);
     _bind_sets();
     vkCmdDispatch(cmd, dim_x, dim_y, dim_z);
   }
@@ -3436,7 +3507,9 @@ class Vk_Ctx : public rd::ICtx {
     r.levelCount     = range.num_levels;
     vkCmdClearColorImage(cmd, img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &_cv, 1, &r);
   }
-  //void update_buffer(Resource_ID buf_id, size_t offset, void const *data,
+  void tracy_scope_enter(void *src_loc) override {}
+  void tracy_scope_exit() override {}
+  // void update_buffer(Resource_ID buf_id, size_t offset, void const *data,
   //                   size_t data_size) override {
   //  Buffer buf = dev_ctx->buffers.read(buf_id.id);
   //  vkCmdUpdateBuffer(cmd, buf.buffer, offset, data_size, data);
@@ -3759,6 +3832,56 @@ class VkFactory : public rd::IDevice {
       finish_sem = ctx->submit(dev_ctx->fences.read(f.id).fence, NULL);
     }
     last_sem = finish_sem;
+    dev_ctx->release_resource(f);
+    ctx->release();
+  }
+  rd::ICtx *start_async_compute_pass() override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    Vk_Ctx *                    ctx = new Vk_Ctx();
+    ctx->init(rd::Pass_t::ASYNC_COMPUTE, dev_ctx, {0}, {0});
+    return ctx;
+  }
+  void end_async_compute_pass(rd::ICtx *_ctx) override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    Vk_Ctx *                    ctx = (Vk_Ctx *)_ctx;
+    Resource_ID                 f   = dev_ctx->create_fence(false);
+
+    ID finish_sem;
+    if (last_sem.is_valid()) {
+      Semaphore s = dev_ctx->semaphores.read(last_sem);
+      finish_sem  = ctx->submit(dev_ctx->fences.read(f.id).fence, &s.sem);
+      dev_ctx->release_resource({last_sem, (u32)Resource_Type::SEMAPHORE});
+      last_sem = {0};
+    } else {
+      finish_sem = ctx->submit(dev_ctx->fences.read(f.id).fence, NULL);
+    }
+    last_sem = finish_sem;
+
+    dev_ctx->release_resource(f);
+    ctx->release();
+  }
+  rd::ICtx *start_async_copy_pass() override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    Vk_Ctx *                    ctx = new Vk_Ctx();
+    ctx->init(rd::Pass_t::ASYNC_COPY, dev_ctx, {0}, {0});
+    return ctx;
+  }
+  void end_async_copy_pass(rd::ICtx *_ctx) override {
+    std::lock_guard<std::mutex> _lock(mutex);
+    Vk_Ctx *                    ctx = (Vk_Ctx *)_ctx;
+    Resource_ID                 f   = dev_ctx->create_fence(false);
+
+    ID finish_sem;
+    if (last_sem.is_valid()) {
+      Semaphore s = dev_ctx->semaphores.read(last_sem);
+      finish_sem  = ctx->submit(dev_ctx->fences.read(f.id).fence, &s.sem);
+      dev_ctx->release_resource({last_sem, (u32)Resource_Type::SEMAPHORE});
+      last_sem = {0};
+    } else {
+      finish_sem = ctx->submit(dev_ctx->fences.read(f.id).fence, NULL);
+    }
+    last_sem = finish_sem;
+
     dev_ctx->release_resource(f);
     ctx->release();
   }
