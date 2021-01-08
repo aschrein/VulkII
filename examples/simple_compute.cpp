@@ -9,26 +9,52 @@
 #include "utils.hpp"
 
 void test_buffers(rd::IDevice *dev) {
-  {
-    // Start renderdoc capture
-    // RenderDoc_CTX::start();
-    rd::ICtx *ctx = dev->start_async_compute_pass();
-    {
-      TracyVulkIINamedZone(ctx, "Async Compute Example 1");
-      // Create signature
-      Resource_ID signature = [dev] {
-        rd::Binding_Space_Create_Info set_info{};
-        // 0-binding in 0-space/set
-        set_info.bindings.push({rd::Binding_t::UAV_BUFFER, 1});
-        rd::Binding_Table_Create_Info table_info{};
-        table_info.spaces.push(set_info);
-        table_info.push_constants_size = 4;
-        return dev->create_signature(table_info);
-      }();
-      // Resource release is deferred so it's safe to release right away.
-      dev->release_resource(signature);
-      Resource_ID cs =
-          dev->create_compute_pso(signature, dev->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
+  Resource_ID wevent_0{};
+  Resource_ID wevent_1{};
+  Resource_ID buffer = [dev] {
+    rd::Buffer_Create_Info buf_info;
+    MEMZERO(buf_info);
+    buf_info.memory_type = rd::Memory_Type::GPU_LOCAL;
+    buf_info.usage_bits =
+        (u32)rd::Buffer_Usage_Bits::USAGE_UAV | (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
+    buf_info.size = sizeof(u32) * 1024;
+    return dev->create_buffer(buf_info);
+  }();
+  defer(dev->release_resource(buffer));
+  // Allocate a buffer.
+  Resource_ID buffer1 = [dev] {
+    rd::Buffer_Create_Info buf_info;
+    MEMZERO(buf_info);
+    buf_info.memory_type = rd::Memory_Type::GPU_LOCAL;
+    buf_info.usage_bits =
+        (u32)rd::Buffer_Usage_Bits::USAGE_UAV | (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
+    buf_info.size = sizeof(u32) * 1024;
+    return dev->create_buffer(buf_info);
+  }();
+  defer(dev->release_resource(buffer1));
+  Resource_ID readback = [dev] {
+    rd::Buffer_Create_Info buf_info;
+    MEMZERO(buf_info);
+    buf_info.memory_type = rd::Memory_Type::CPU_READ_WRITE;
+    buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
+    buf_info.size        = sizeof(u32) * 1024;
+    return dev->create_buffer(buf_info);
+  }();
+  Resource_ID signature = [dev] {
+    rd::Binding_Space_Create_Info set_info{};
+    set_info.bindings.push({rd::Binding_t::UAV_BUFFER, 1});
+    set_info.bindings.push({rd::Binding_t::UAV_BUFFER, 1});
+    rd::Binding_Table_Create_Info table_info{};
+    table_info.spaces.push(set_info);
+    table_info.push_constants_size = 4;
+    return dev->create_signature(table_info);
+  }();
+  defer(dev->release_resource(signature));
+
+  defer(dev->release_resource(readback));
+
+  Resource_ID cs0 =
+      dev->create_compute_pso(signature, dev->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
 [[vk::binding(0, 0)]] RWByteAddressBuffer BufferOut : register(u0, space0);
 
 [numthreads(1024, 1, 1)]
@@ -38,96 +64,24 @@ void main(uint3 DTid : SV_DispatchThreadID)
       BufferOut.Store<uint>(DTid.x * 4, BufferOut.Load<uint>(DTid.x * 4) + 1);
 }
 )"),
-                                                                NULL, 0));
-      ctx->bind_compute(cs);
-      // Allocate a buffer.
-      Resource_ID buffer = [dev] {
-        rd::Buffer_Create_Info buf_info;
-        MEMZERO(buf_info);
-        buf_info.memory_type = rd::Memory_Type::GPU_LOCAL;
-        buf_info.usage_bits =
-            (u32)rd::Buffer_Usage_Bits::USAGE_UAV | (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
-        buf_info.size = sizeof(u32) * 1024;
-        return dev->create_buffer(buf_info);
-      }();
-      dev->release_resource(buffer);
-      // Allocate a binding table.
-      rd::IBinding_Table *table = dev->create_binding_table(signature);
-      defer(table->release());
-      table->bind_UAV_buffer(/* set/space= */ 0, /* binding= */ 0, buffer, /* offset= */ 0,
-                             /* size= */ sizeof(u32) * 1024);
-
-      ctx->bind_table(table);
-      // Buffer barrier.
-      ctx->buffer_barrier(buffer, rd::Buffer_Access::UAV);
-      ctx->dispatch(1, 1, 1);
-    }
-    // End the pass and submit the commands to the queue.
-    dev->end_async_compute_pass(ctx);
-    // dev->wait_idle();
-    // RenderDoc_CTX::end();
-  }
-  // dev->wait_idle();
-  u32 val = 2;
-  {
-    Resource_ID readback = [dev] {
-      rd::Buffer_Create_Info buf_info;
-      MEMZERO(buf_info);
-      buf_info.memory_type = rd::Memory_Type::CPU_READ_WRITE;
-      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
-      buf_info.size        = sizeof(u32) * 1024;
-      return dev->create_buffer(buf_info);
-    }();
-    rd::ICtx *ctx = dev->start_compute_pass();
-    {
-      TracyVulkIINamedZone(ctx, "Async Compute Example 2");
-      Resource_ID signature = [dev] {
-        rd::Binding_Space_Create_Info set_info{};
-        set_info.bindings.push({rd::Binding_t::UAV_BUFFER, 1});
-        set_info.bindings.push({rd::Binding_t::UAV_BUFFER, 1});
-        rd::Binding_Table_Create_Info table_info{};
-        table_info.spaces.push(set_info);
-        table_info.push_constants_size = 4;
-        return dev->create_signature(table_info);
-      }();
-      defer(dev->release_resource(signature));
-      Resource_ID cs =
-          dev->create_compute_pso(signature, dev->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
+                                                            NULL, 0));
+  dev->release_resource(cs0);
+  Resource_ID cs1 =
+      dev->create_compute_pso(signature, dev->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
 [[vk::binding(0, 0)]] RWByteAddressBuffer BufferOut : register(u0, space0);
+[[vk::binding(1, 0)]] RWByteAddressBuffer BufferIn : register(u1, space0);
 
 [numthreads(1024, 1, 1)]
 void main(uint3 DTid : SV_DispatchThreadID)
 {
-    BufferOut.Store<uint>(DTid.x * 4, DTid.x);
+    for (uint i = 0; i < 100000; i++)
+      BufferOut.Store<uint>(DTid.x * 4, BufferIn.Load<uint>(DTid.x * 4) + DTid.x);
 }
 )"),
-                                                                NULL, 0));
-      ctx->bind_compute(cs);
-
-      Resource_ID buffer = [dev] {
-        rd::Buffer_Create_Info buf_info;
-        MEMZERO(buf_info);
-        buf_info.memory_type = rd::Memory_Type::GPU_LOCAL;
-        buf_info.usage_bits =
-            (u32)rd::Buffer_Usage_Bits::USAGE_UAV | (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
-        buf_info.size = sizeof(u32) * 1024;
-        return dev->create_buffer(buf_info);
-      }();
-      defer(dev->release_resource(buffer));
-
-      rd::IBinding_Table *table = dev->create_binding_table(signature);
-      defer(table->release());
-      table->bind_UAV_buffer(0, 0, buffer, 0, sizeof(u32) * 1024);
-      table->bind_UAV_buffer(0, 1, buffer, 0, sizeof(u32) * 1024);
-
-      ctx->bind_table(table);
-      ctx->buffer_barrier(buffer, rd::Buffer_Access::UAV);
-      ctx->dispatch(1, 1, 1);
-
-      ctx->buffer_barrier(buffer, rd::Buffer_Access::UAV);
-
-      Resource_ID cs2 =
-          dev->create_compute_pso(signature, dev->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
+                                                            NULL, 0));
+  dev->release_resource(cs1);
+  Resource_ID cs2 =
+      dev->create_compute_pso(signature, dev->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
 [[vk::binding(0, 0)]] RWByteAddressBuffer BufferOut: register(u0, space0);
 [[vk::binding(1, 0)]] RWByteAddressBuffer BufferIn : register(u1, space0);
   
@@ -144,19 +98,68 @@ struct CullPushConstants
       BufferOut.Store<uint>(DTid.x * 4, BufferIn.Load<uint>(DTid.x * 4) * pc.val);
 }
 )"),
-                                                                NULL, 0));
+                                                            NULL, 0));
+  dev->release_resource(cs2);
+  {
+    // Start renderdoc capture
+    // RenderDoc_CTX::start();
+    rd::ICtx *ctx = dev->start_compute_pass();
+    {
+      TracyVulkIINamedZone(ctx, "Async Compute Example 1");
+      ctx->bind_compute(cs0);
+      // Allocate a binding table.
+      rd::IBinding_Table *table = dev->create_binding_table(signature);
+      defer(table->release());
+      table->bind_UAV_buffer(/* set/space= */ 0, /* binding= */ 0, buffer, /* offset= */ 0,
+                             /* size= */ sizeof(u32) * 1024);
+      table->bind_UAV_buffer(/* set/space= */ 0, /* binding= */ 1, buffer, /* offset= */ 0,
+                             /* size= */ sizeof(u32) * 1024);
+      ctx->bind_table(table);
+      ctx->dispatch(1, 1, 1);
+    }
+    // End the pass and submit the commands to the queue.
+    wevent_0 = dev->end_compute_pass(ctx);
+    // dev->wait_idle();
+    // RenderDoc_CTX::end();
+  }
+  // dev->wait_idle();
+  u32 val = 2;
+  {
+    rd::ICtx *ctx = dev->start_async_compute_pass();
+    {
+      TracyVulkIINamedZone(ctx, "Async Compute Example 2");
+      // ctx->wait_for_event(wevent_0);
+      ctx->bind_compute(cs1);
+      rd::IBinding_Table *table = dev->create_binding_table(signature);
+      defer(table->release());
+      table->bind_UAV_buffer(0, 0, buffer, 0, sizeof(u32) * 1024);
+      table->bind_UAV_buffer(0, 1, buffer, 0, sizeof(u32) * 1024);
+      ctx->bind_table(table);
+      ctx->dispatch(1, 1, 1);
+    }
+    wevent_1 = dev->end_async_compute_pass(ctx);
+  }
+  {
+    rd::ICtx *ctx = dev->start_async_compute_pass();
+    {
+      TracyVulkIINamedZone(ctx, "Async Compute Example 3");
+      //ctx->wait_for_event(wevent_0);
+      //ctx->wait_for_event(wevent_1);
 
       ctx->bind_compute(cs2);
-      table->push_constants(&val, 0, 4);
-      ctx->dispatch(1, 1, 1);
-      /* Resource_ID event_id = dev->create_event();
-       ctx->insert_event(event_id);*/
 
+      rd::IBinding_Table *table = dev->create_binding_table(signature);
+      defer(table->release());
+      table->bind_UAV_buffer(0, 0, buffer, 0, sizeof(u32) * 1024);
+      table->bind_UAV_buffer(0, 1, buffer, 0, sizeof(u32) * 1024);
+      table->push_constants(&val, 0, 4);
+      ctx->bind_table(table);
+      ctx->dispatch(1, 1, 1);
       ctx->buffer_barrier(buffer, rd::Buffer_Access::TRANSFER_SRC);
       ctx->copy_buffer(buffer, 0, readback, 0, sizeof(u32) * 1024);
     }
-    dev->end_compute_pass(ctx);
-    // dev->wait_idle();
+    dev->end_async_compute_pass(ctx);
+    dev->wait_idle();
     //// while (!dev->get_event_state(event_id)) fprintf(stdout, "waiting...\n");
     //// dev->release_resource(event_id);
     // u32 *map = (u32 *)dev->map_buffer(readback);
@@ -169,6 +172,7 @@ struct CullPushConstants
     // fflush(stdout);
     // dev->unmap_buffer(readback);
   }
+  fprintf(stdout, "Buffer test finished.\n");
 }
 
 void test_mipmap_generation(rd::IDevice *dev) {
@@ -273,18 +277,19 @@ void main(uint3 tid : SV_DispatchThreadID)
     ctx->copy_image_to_buffer(readback, 0, rw_texture, rd::Image_Copy::top_level(pitch));
   }
   dev->end_compute_pass(ctx);
- /* dev->wait_idle();
-  u8 *map = (u8 *)dev->map_buffer(readback);
-  {
-    Image2D tmp{};
-    tmp.data   = map;
-    tmp.width  = image->width;
-    tmp.height = image->height;
-    tmp.format = rd::Format::RGBA32_FLOAT;
-    write_image_rgba32_float_pfm("img.pfm", tmp.data, tmp.width, pitch, tmp.height, true);
-  }
+  dev->wait_idle();
+  /*
+   u8 *map = (u8 *)dev->map_buffer(readback);
+   {
+     Image2D tmp{};
+     tmp.data   = map;
+     tmp.width  = image->width;
+     tmp.height = image->height;
+     tmp.format = rd::Format::RGBA32_FLOAT;
+     write_image_rgba32_float_pfm("img.pfm", tmp.data, tmp.width, pitch, tmp.height, true);
+   }
 
-  dev->unmap_buffer(readback);*/
+   dev->unmap_buffer(readback);*/
 }
 
 int main(int argc, char *argv[]) {
@@ -297,8 +302,8 @@ int main(int argc, char *argv[]) {
       RenderDoc_CTX::start();
       do {
         dev->start_frame();
-        //test_buffers(dev);
-        test_mipmap_generation(dev);
+        test_buffers(dev);
+        // test_mipmap_generation(dev);
         dev->end_frame();
       } while (true);
 

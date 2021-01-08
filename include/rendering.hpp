@@ -557,8 +557,8 @@ class IDevice {
   virtual Resource_ID create_sampler(Sampler_Create_Info const &info)                          = 0;
   // Deferred release. Must call new_frame 3-6 times for the actual release to make sure it's not
   // used by the GPU.
-  virtual void            release_resource(Resource_ID id)                          = 0;
-  virtual Resource_ID     create_event()                                            = 0;
+  virtual void release_resource(Resource_ID id) = 0;
+  // virtual Resource_ID     create_event()                                            = 0;
   virtual Resource_ID     create_timestamp()                                        = 0;
   virtual Resource_ID     get_swapchain_image()                                     = 0;
   virtual Image2D_Info    get_swapchain_image_info()                                = 0;
@@ -583,14 +583,14 @@ class IDevice {
   ///////////////////
   // Pass creation //
   ///////////////////
-  virtual ICtx *start_render_pass(Resource_ID render_pass, Resource_ID frame_buffer) = 0;
-  virtual void  end_render_pass(ICtx *ctx)                                           = 0;
-  virtual ICtx *start_compute_pass()                                                 = 0;
-  virtual void  end_compute_pass(ICtx *ctx)                                          = 0;
-  virtual ICtx *start_async_compute_pass()                                           = 0;
-  virtual void  end_async_compute_pass(ICtx *ctx)                                    = 0;
-  virtual ICtx *start_async_copy_pass()                                              = 0;
-  virtual void  end_async_copy_pass(ICtx *ctx)                                       = 0;
+  virtual ICtx *      start_render_pass(Resource_ID render_pass, Resource_ID frame_buffer) = 0;
+  virtual Resource_ID end_render_pass(ICtx *ctx)                                           = 0;
+  virtual ICtx *      start_compute_pass()                                                 = 0;
+  virtual Resource_ID end_compute_pass(ICtx *ctx)                                          = 0;
+  virtual ICtx *      start_async_compute_pass()                                           = 0;
+  virtual Resource_ID end_async_compute_pass(ICtx *ctx)                                    = 0;
+  virtual ICtx *      start_async_copy_pass()                                              = 0;
+  virtual Resource_ID end_async_copy_pass(ICtx *ctx)                                       = 0;
 
   virtual void release() = 0;
   // Does the deferred release iteration and increments the swap chain image if there's any.
@@ -649,13 +649,21 @@ class ICtx {
                                     Image_Copy const &dst_info) = 0;
   virtual void copy_buffer(Resource_ID src_buf_id, size_t src_offset, Resource_ID dst_buf_id,
                            size_t dst_offset, u32 size)         = 0;
+  //////////////
+  // Barriers //
+  //////////////
+  virtual void image_barrier(Resource_ID image_id, Image_Access access) = 0;
+  virtual void buffer_barrier(Resource_ID buf_id, Buffer_Access access) = 0;
+
+  /////////////
+  // Queries //
+  /////////////
+  virtual void insert_timestamp(Resource_ID timestamp_id) = 0;
+
   /////////////////////
   // Synchronization //
   /////////////////////
-  virtual void image_barrier(Resource_ID image_id, Image_Access access) = 0;
-  virtual void buffer_barrier(Resource_ID buf_id, Buffer_Access access) = 0;
-  virtual void insert_event(Resource_ID id)                             = 0;
-  virtual void insert_timestamp(Resource_ID timestamp_id)               = 0;
+  virtual void wait_for_event(Resource_ID wait_event) = 0;
 };
 #ifdef TRACY_ENABLE
 // clang-format off

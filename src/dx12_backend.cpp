@@ -278,6 +278,7 @@ enum class Resource_Type : u32 {
   SIGNATURE,
   SHADER,
   SAMPLER,
+  EVENT,
   COMPUTE_PSO,
   GRAPHICS_PSO,
   RENDER_PASS,
@@ -369,6 +370,12 @@ struct TracyContext {
 };
 #endif
 
+struct EventWrapper {
+  ComPtr<ID3D12Fence> fence;
+  HANDLE              event = NULL;
+  void                release() { CloseHandle(event); }
+};
+
 class DX12Device : public rd::IDevice {
   static constexpr u32 NUM_BACK_BUFFERS = 3;
 
@@ -427,6 +434,7 @@ class DX12Device : public rd::IDevice {
   Resource_Array<D3D12_SAMPLER_DESC *> sampler_table;
   Resource_Array<RenderPass *>         renderpass_table;
   Resource_Array<FrameBuffer *>        fb_table;
+  Resource_Array<EventWrapper *>       event_table;
 
   AutoArray<Pair<Resource_ID, i32>> deferred_release;
   struct Deferred_Descriptor_Range_Release {
@@ -494,6 +502,7 @@ class DX12Device : public rd::IDevice {
     deferred_desc_range_release.push({type, offset, size, 6});
   }
   ResourceWrapper *      get_resource(ID id) { return resource_table.load(id); }
+  EventWrapper *         get_event(ID id) { return event_table.load(id); }
   DX12Binding_Signature *get_signature(ID id) { return signature_table.load(id); }
   ID3D12PipelineState *  get_compute_pso(ID id) { return compute_pso_table.load(id); }
   GraphicsPSOWrapper *   get_graphics_pso(ID id) { return graphics_pso_table.load(id); }
@@ -872,21 +881,20 @@ class DX12Device : public rd::IDevice {
     //  TRAP;
     //}
   }
-  Resource_ID create_event() override {
-    /* ComPtr<ID3D12Fence> fence;
-     {
-       SCOPED_LOCK;
-       DX_ASSERT_OK(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)));
-     }
-     HANDLE event = CreateEventEx(nullptr, false, false, EVENT_ALL_ACCESS);
-     defer(CloseHandle(event));
-     DX_ASSERT_OK(fence->SetEventOnCompletion(1, event));
-     {
-       SCOPED_LOCK;
-       cmd_queue->Signal(fence.Get(), 1);
-     }
-     WaitForSingleObject(event, INFINITE);*/
-    TRAP;
+  Resource_ID create_event() {
+    SCOPED_LOCK;
+    EventWrapper *ew = new EventWrapper;
+
+    DX_ASSERT_OK(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&ew->fence)));
+
+    ew->event = CreateEventEx(nullptr, false, false, EVENT_ALL_ACCESS);
+    DX_ASSERT_OK(ew->fence->SetEventOnCompletion(1, ew->event));
+    /*{
+      SCOPED_LOCK;
+      cmd_queue->Signal(fence.Get(), 1);
+    }*/
+    // WaitForSingleObject(event, INFINITE);
+    return {event_table.push(ew), (u32)Resource_Type::EVENT};
   }
   Resource_ID create_timestamp() override {
     SCOPED_LOCK;
@@ -974,14 +982,14 @@ class DX12Device : public rd::IDevice {
   }
   rd::IBinding_Table *create_binding_table(Resource_ID signature) override;
 
-  rd::ICtx *start_render_pass(Resource_ID render_pass, Resource_ID frame_buffer) override;
-  void      end_render_pass(rd::ICtx *ctx) override;
-  rd::ICtx *start_compute_pass() override;
-  void      end_compute_pass(rd::ICtx *ctx) override;
-  rd::ICtx *start_async_compute_pass() override;
-  void      end_async_compute_pass(rd::ICtx *ctx) override;
-  rd::ICtx *start_async_copy_pass() override;
-  void      end_async_copy_pass(rd::ICtx *ctx) override;
+  rd::ICtx *  start_render_pass(Resource_ID render_pass, Resource_ID frame_buffer) override;
+  Resource_ID end_render_pass(rd::ICtx *ctx) override;
+  rd::ICtx *  start_compute_pass() override;
+  Resource_ID end_compute_pass(rd::ICtx *ctx) override;
+  rd::ICtx *  start_async_compute_pass() override;
+  Resource_ID end_async_compute_pass(rd::ICtx *ctx) override;
+  rd::ICtx *  start_async_copy_pass() override;
+  Resource_ID end_async_copy_pass(rd::ICtx *ctx) override;
 
   bool get_timestamp_state(Resource_ID) override {
     SCOPED_LOCK;
@@ -1010,7 +1018,8 @@ class DX12Device : public rd::IDevice {
   }
   bool get_event_state(Resource_ID id) override {
     SCOPED_LOCK;
-    TRAP;
+    EventWrapper *ew = event_table.load(id.id);
+    return ew->fence->GetCompletedValue() == 1;
   }
   rd::Impl_t getImplType() override { return rd::Impl_t::DX12; }
   void       release() override {
@@ -1672,7 +1681,8 @@ class DX12Context : public rd::ICtx {
   RenderPass *                                   render_pass  = NULL;
   FrameBuffer *                                  frame_buffer = NULL;
   GraphicsPSOWrapper *                           gpso         = NULL;
-  ~DX12Context()                                              = default;
+  InlineArray<ID3D12Fence *, 0x10>               wait_fences{};
+  ~DX12Context() = default;
   // Synchronization
   void _image_barrier(Resource_ID image_id, D3D12_RESOURCE_STATES new_state) {
     InlineArray<D3D12_RESOURCE_BARRIER, 0x10> bars{};
@@ -1727,7 +1737,8 @@ class DX12Context : public rd::ICtx {
   tracy::D3D12ZoneScope *tracy_scope = NULL;
 #endif
   public:
-  void release() {
+  auto &get_wait_fences() { return wait_fences; }
+  void  release() {
 #ifdef TRACY_ENABLE
     ASSERT_DEBUG(tracy_scope == NULL);
 #endif
@@ -1782,7 +1793,10 @@ class DX12Context : public rd::ICtx {
   void tracy_scope_enter(void *src_loc) override {}
   void tracy_scope_exit() override {}
 #endif
-
+  void wait_for_event(Resource_ID wait_event) override {
+    EventWrapper *ew = dev_ctx->get_event(wait_event.id);
+    wait_fences.push(ew->fence.Get());
+  }
   void bind_table(rd::IBinding_Table *table) override { //
     if (cur_binding) cur_binding->unbind();
     cur_binding = (DX12Binding_Table *)table;
@@ -2002,50 +2016,102 @@ class DX12Context : public rd::ICtx {
   void buffer_barrier(Resource_ID buf_id, rd::Buffer_Access access) override {
     _buffer_barrier(buf_id, to_dx(access));
   }
-  void insert_event(Resource_ID id) override { TRAP; }
+  // void insert_event(Resource_ID id) override { TRAP; }
   void insert_timestamp(Resource_ID timestamp_id) override { TRAP; }
 };
 rd::ICtx *DX12Device::start_async_compute_pass() {
   SCOPED_LOCK;
   return new DX12Context(this, rd::Pass_t::ASYNC_COMPUTE);
 }
-void DX12Device::end_async_compute_pass(rd::ICtx *ctx) {
-  SCOPED_LOCK;
-  DX12Context *d3dctx = ((DX12Context *)ctx);
-  ASSERT_DEBUG(d3dctx->get_type() == rd::Pass_t::ASYNC_COMPUTE);
-  ComPtr<ID3D12GraphicsCommandList> cmd  = d3dctx->get_cmd();
-  ID3D12CommandList *               icmd = cmd.Get();
-  d3dctx->release();
-  DX_ASSERT_OK(cmd->Close());
-  compute_cmd_queue->ExecuteCommandLists(1, &icmd);
+Resource_ID DX12Device::end_async_compute_pass(rd::ICtx *ctx) {
+  {
+    SCOPED_LOCK;
+    DX12Context *d3dctx = ((DX12Context *)ctx);
+    ASSERT_DEBUG(d3dctx->get_type() == rd::Pass_t::ASYNC_COMPUTE);
+    ComPtr<ID3D12GraphicsCommandList> cmd  = d3dctx->get_cmd();
+    ID3D12CommandList *               icmd = cmd.Get();
+    ito(d3dctx->get_wait_fences().size) {
+      compute_cmd_queue->Wait(d3dctx->get_wait_fences()[i], 1);
+    }
+    d3dctx->release();
+    DX_ASSERT_OK(cmd->Close());
+    compute_cmd_queue->ExecuteCommandLists(1, &icmd);
+  }
+  {
+    Resource_ID eid = create_event();
+    release_resource(eid);
+    EventWrapper *ew = event_table.load(eid.id);
+    compute_cmd_queue->Signal(ew->fence.Get(), 1);
+    return eid;
+  }
 }
 rd::ICtx *DX12Device::start_async_copy_pass() {
   SCOPED_LOCK;
   return new DX12Context(this, rd::Pass_t::ASYNC_COPY);
 }
-void DX12Device::end_async_copy_pass(rd::ICtx *ctx) {
-  SCOPED_LOCK;
-  DX12Context *d3dctx = ((DX12Context *)ctx);
-  ASSERT_DEBUG(d3dctx->get_type() == rd::Pass_t::ASYNC_COPY);
-  ComPtr<ID3D12GraphicsCommandList> cmd  = d3dctx->get_cmd();
-  ID3D12CommandList *               icmd = cmd.Get();
-  d3dctx->release();
-  DX_ASSERT_OK(cmd->Close());
-  copy_cmd_queue->ExecuteCommandLists(1, &icmd);
+Resource_ID DX12Device::end_async_copy_pass(rd::ICtx *ctx) {
+  {
+    SCOPED_LOCK;
+    DX12Context *d3dctx = ((DX12Context *)ctx);
+    ASSERT_DEBUG(d3dctx->get_type() == rd::Pass_t::ASYNC_COPY);
+    ComPtr<ID3D12GraphicsCommandList> cmd  = d3dctx->get_cmd();
+    ID3D12CommandList *               icmd = cmd.Get();
+    ito(d3dctx->get_wait_fences().size) { copy_cmd_queue->Wait(d3dctx->get_wait_fences()[i], 1); }
+    d3dctx->release();
+    DX_ASSERT_OK(cmd->Close());
+    copy_cmd_queue->ExecuteCommandLists(1, &icmd);
+  }
+  {
+    Resource_ID eid = create_event();
+    release_resource(eid);
+    EventWrapper *ew = event_table.load(eid.id);
+    copy_cmd_queue->Signal(ew->fence.Get(), 1);
+    return eid;
+  }
 }
 rd::ICtx *DX12Device::start_compute_pass() {
   SCOPED_LOCK;
   return new DX12Context(this, rd::Pass_t::COMPUTE);
 }
-void DX12Device::end_compute_pass(rd::ICtx *ctx) {
-  SCOPED_LOCK;
-  DX12Context *d3dctx = ((DX12Context *)ctx);
-  ASSERT_DEBUG(d3dctx->get_type() == rd::Pass_t::COMPUTE);
-  ComPtr<ID3D12GraphicsCommandList> cmd  = d3dctx->get_cmd();
-  ID3D12CommandList *               icmd = cmd.Get();
-  d3dctx->release();
-  DX_ASSERT_OK(cmd->Close());
-  gfx_cmd_queue->ExecuteCommandLists(1, &icmd);
+Resource_ID DX12Device::end_compute_pass(rd::ICtx *ctx) {
+  {
+    SCOPED_LOCK;
+    DX12Context *d3dctx = ((DX12Context *)ctx);
+    ASSERT_DEBUG(d3dctx->get_type() == rd::Pass_t::COMPUTE);
+    ComPtr<ID3D12GraphicsCommandList> cmd  = d3dctx->get_cmd();
+    ID3D12CommandList *               icmd = cmd.Get();
+    ito(d3dctx->get_wait_fences().size) { gfx_cmd_queue->Wait(d3dctx->get_wait_fences()[i], 1); }
+    d3dctx->release();
+    DX_ASSERT_OK(cmd->Close());
+    gfx_cmd_queue->ExecuteCommandLists(1, &icmd);
+  }
+  {
+    Resource_ID eid = create_event();
+    release_resource(eid);
+    EventWrapper *ew = event_table.load(eid.id);
+    gfx_cmd_queue->Signal(ew->fence.Get(), 1);
+    return eid;
+  }
+}
+Resource_ID DX12Device::end_render_pass(rd::ICtx *ctx) {
+  {
+    SCOPED_LOCK;
+    DX12Context *d3dctx = ((DX12Context *)ctx);
+    ASSERT_DEBUG(d3dctx->get_type() == rd::Pass_t::RENDER);
+    ComPtr<ID3D12GraphicsCommandList> cmd  = d3dctx->get_cmd();
+    ID3D12CommandList *               icmd = cmd.Get();
+    ito(d3dctx->get_wait_fences().size) { gfx_cmd_queue->Wait(d3dctx->get_wait_fences()[i], 1); }
+    d3dctx->release();
+    DX_ASSERT_OK(cmd->Close());
+    gfx_cmd_queue->ExecuteCommandLists(1, &icmd);
+  }
+  {
+    Resource_ID eid = create_event();
+    release_resource(eid);
+    EventWrapper *ew = event_table.load(eid.id);
+    gfx_cmd_queue->Signal(ew->fence.Get(), 1);
+    return eid;
+  }
 }
 Resource_ID DX12Device::create_graphics_pso(Resource_ID signature, Resource_ID render_pass,
                                             rd::Graphics_Pipeline_State const &state) {
@@ -2183,16 +2249,6 @@ rd::ICtx *DX12Device::start_render_pass(Resource_ID render_pass, Resource_ID fra
   FrameBuffer *fb = fb_table.load(frame_buffer.id);
   return new DX12Context(this, rd::Pass_t::RENDER, rp, fb);
 }
-void DX12Device::end_render_pass(rd::ICtx *ctx) {
-  SCOPED_LOCK;
-  DX12Context *d3dctx = ((DX12Context *)ctx);
-  ASSERT_DEBUG(d3dctx->get_type() == rd::Pass_t::RENDER);
-  ComPtr<ID3D12GraphicsCommandList> cmd  = d3dctx->get_cmd();
-  ID3D12CommandList *               icmd = cmd.Get();
-  d3dctx->release();
-  DX_ASSERT_OK(cmd->Close());
-  gfx_cmd_queue->ExecuteCommandLists(1, &icmd);
-}
 void DX12Device::deferred_desc_range_release_iteration() {
   AutoArray<Deferred_Descriptor_Range_Release> new_deferred_desc_range_release;
   new_deferred_desc_range_release.reserve(deferred_desc_range_release.size);
@@ -2271,6 +2327,11 @@ void DX12Device::deferred_resource_release_iteration() {
         auto s = sampler_table.load(item.first.id);
         delete s;
         sampler_table.free(item.first.id);
+      } else if (item.first.type == (u32)Resource_Type::EVENT) {
+        auto s = event_table.load(item.first.id);
+        s->release();
+        delete s;
+        event_table.free(item.first.id);
       } else {
         TRAP;
       }

@@ -2,7 +2,7 @@
 #ifndef UTILS_H
 #define UTILS_H
 
-//#define TRACY_ENABLE
+#define TRACY_ENABLE
 
 #include <codecvt>
 #include <cstdlib>
@@ -1052,6 +1052,10 @@ template <typename T, unsigned int N> struct InlineArray {
   void         push(T const &a) {
     ASSERT_DEBUG(size < N);
     elems[size++] = a;
+  }
+  bool contains(T elem) {
+    ito(size) if (elems[i] == elem) return true;
+    return false;
   }
   void init() { memset(this, 0, sizeof(*this)); }
   void memzero() { memset(elems, 0, sizeof(elems)); }
