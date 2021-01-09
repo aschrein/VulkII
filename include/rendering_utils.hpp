@@ -633,6 +633,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
       }
       factory->end_render_pass(ctx);
       factory->end_frame();
+      //factory->wait_idle();
       frame_id = (frame_id + 1) % NUM_FRAMES;
     }
     on_release();

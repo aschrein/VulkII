@@ -143,8 +143,8 @@ struct CullPushConstants
     rd::ICtx *ctx = dev->start_async_compute_pass();
     {
       TracyVulkIINamedZone(ctx, "Async Compute Example 3");
-      //ctx->wait_for_event(wevent_0);
-      //ctx->wait_for_event(wevent_1);
+      ctx->wait_for_event(wevent_0);
+      ctx->wait_for_event(wevent_1);
 
       ctx->bind_compute(cs2);
 

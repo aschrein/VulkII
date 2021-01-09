@@ -116,24 +116,28 @@ struct Ref_Cnt : public Slot {
   void add_reference() { ref_cnt++; }
 };
 
-struct Mem_Chunk : public Ref_Cnt {
-  std::mutex *          mapped_mutex     = NULL;
-  VkDeviceMemory        mem              = VK_NULL_HANDLE;
-  VkMemoryPropertyFlags prop_flags       = 0;
-  u32                   size             = 0;
-  u32                   cursor           = 0; // points to the next free 4kb byte block
-  u32                   memory_type_bits = 0;
+struct Mem_Chunk : public Slot {
+  Util_Allocator *      ul           = NULL;
+  std::mutex *          mapped_mutex = NULL;
+  VkDeviceMemory        mem          = VK_NULL_HANDLE;
+  VkMemoryPropertyFlags prop_flags   = 0;
+  size_t                size         = 0;
+  // size_t                cursor           = 0; // points to the next free 4kb byte block
+  u32 memory_type_bits = 0;
 
+  bool is_referenced() { //
+    return ul->get_free_space() != size;
+  }
   void dump() {
     fprintf(stdout, "Mem_Chunk {\n");
-    fprintf(stdout, "  ref_cnt: %i\n", ref_cnt);
+    // fprintf(stdout, "  ref_cnt: %i\n", ref_cnt);
     fprintf(stdout, "  size   : %i\n", size);
-    fprintf(stdout, "  cursor : %i\n", cursor);
+    fprintf(stdout, "  free_size : %i\n", ul->get_free_space());
     fprintf(stdout, "}\n");
   }
   void lock() { mapped_mutex->lock(); }
   void unlock() { mapped_mutex->unlock(); }
-  void init(VkDevice device, u32 size, u32 heap_index, VkMemoryPropertyFlags prop_flags,
+  void init(VkDevice device, size_t size, u32 heap_index, VkMemoryPropertyFlags prop_flags,
             u32 type_bits) {
     VkMemoryAllocateInfo info;
     MEMZERO(info);
@@ -144,37 +148,45 @@ struct Mem_Chunk : public Ref_Cnt {
     this->size             = size;
     this->prop_flags       = prop_flags;
     this->memory_type_bits = type_bits;
-    this->cursor           = 0;
+    this->ul               = new Util_Allocator(size);
     mapped_mutex           = new std::mutex;
   }
   void release(VkDevice device) {
     delete mapped_mutex;
+    delete ul;
+
     vkFreeMemory(device, mem, NULL);
     MEMZERO(*this);
   }
   bool is_empty() const { return mem == VK_NULL_HANDLE; }
-  bool has_space(u32 alignment, u32 req_size) {
+  bool has_space(u32 alignment, size_t req_size) {
     if (mem == VK_NULL_HANDLE) return false;
-    if (ref_cnt == 0) cursor = 0;
-    return req_size + ((cursor + alignment - 1) & ~(alignment - 1)) <= size;
-  }
-  u32 alloc(u32 alignment, u32 req_size) {
-    if (ref_cnt == 0) cursor = 0;
     ASSERT_DEBUG((alignment & (alignment - 1)) == 0); // PoT
+    return ul->has_free_space(alignment, req_size);
+    // if (ref_cnt == 0) cursor = 0;
+    // return req_size + ((cursor + alignment - 1) & ~(alignment - 1)) <= size;
+  }
+  void   free(size_t offset, size_t size) { ul->free(offset, size); }
+  size_t alloc(size_t alignment, size_t req_size) {
+    // if (ref_cnt == 0) cursor = 0;
+    ASSERT_DEBUG((alignment & (alignment - 1)) == 0); // PoT
+    ptrdiff_t offset = ul->alloc(alignment, req_size);
+    ASSERT_DEBUG(offset >= 0);
+    return offset;
     // ASSERT_DEBUG(alignment < PAGE_SIZE || (alignment & (PAGE_SIZE - 1)) == 0); // PoT
     // if (alignment > PAGE_SIZE) {
     // u32 page_alignment = alignment / PAGE_SIZE;
     // ASSERT_DEBUG(((alignment - 1) & PAGE_SIZE) == 0); // 4kb bytes is
     // enough to align
-    if (cursor != 0) { // Need to align
-      cursor = ((cursor + alignment - 1) & ~(alignment - 1));
-    }
+    // if (cursor != 0) { // Need to align
+    //  cursor = ((cursor + alignment - 1) & ~(alignment - 1));
     //}
-    u32 offset = cursor;
-    cursor += req_size;
-    ASSERT_DEBUG(cursor <= size);
-    ref_cnt++;
-    return offset;
+    ////}
+    // size_t offset = cursor;
+    // cursor += req_size;
+    // ASSERT_DEBUG(cursor <= size);
+    // ref_cnt++;
+    // return offset;
   }
 };
 
@@ -196,7 +208,8 @@ struct DescriptorSet : public Slot {
 struct Buffer : public Slot {
   string             name;
   ID                 mem_chunk_id;
-  u32                mem_offset;
+  size_t             mem_offset;
+  size_t             mem_size;
   VkBuffer           buffer;
   VkBufferCreateInfo create_info;
 
@@ -461,7 +474,8 @@ u32 get_format_size(VkFormat format) {
 
 struct Image : public Slot {
   ID                    mem_chunk_id;
-  u32                   mem_offset;
+  size_t                mem_offset;
+  size_t                mem_size;
   VkImageAspectFlags    aspect;
   VkImage               image;
   Image_Info            info;
@@ -1380,7 +1394,7 @@ struct Fence : public Slot {
 };
 
 struct Event : public Slot {
-  VkEvent     event;
+  // VkEvent     event;
   VkSemaphore sem;
   void        init() { MEMZERO(*this); }
   void        release() {}
@@ -1680,7 +1694,7 @@ struct VkDeviceContext {
       this->dev_ctx = dev_ctx;
       Resource_Array::init();
     }
-    ID find_mem_chunk(u32 prop_flags, u32 memory_type_bits, u32 alignment, u32 size) {
+    ID find_mem_chunk(u32 prop_flags, u32 memory_type_bits, u32 alignment, size_t size) {
       can_read = false;
       defer(can_read = true);
       std::lock_guard<std::mutex> _lock(search_mutex);
@@ -1697,7 +1711,7 @@ struct VkDeviceContext {
       }
       // if failed create a new one
       Mem_Chunk new_chunk{};
-      u32       alloc_size = 1 << 26;
+      size_t    alloc_size = 1 << 28;
       if (alloc_size < size) {
         alloc_size = (size + alloc_size - 1) & ~(alloc_size - 1);
       }
@@ -1752,7 +1766,7 @@ struct VkDeviceContext {
       vkDestroyBuffer(dev_ctx->device, buf.buffer, NULL);
       dev_ctx->mem_chunks.acquire(buf.mem_chunk_id,
                                   [=](Mem_Chunk &mem_chunk) { //
-                                    mem_chunk.rem_reference();
+                                    mem_chunk.free(buf.mem_offset, buf.mem_size);
                                   });
       buf.release();
       MEMZERO(buf);
@@ -1771,7 +1785,7 @@ struct VkDeviceContext {
         vkDestroyImage(dev_ctx->device, img.image, NULL);
         dev_ctx->mem_chunks.acquire(img.mem_chunk_id,
                                     [=](Mem_Chunk &mem_chunk) { //
-                                      mem_chunk.rem_reference();
+                                      mem_chunk.free(img.mem_offset, img.mem_size);
                                     });
       }
       img.release();
@@ -1877,7 +1891,7 @@ struct VkDeviceContext {
     static constexpr char const NAME[]  = "Event_Pipe_Array";
     VkDeviceContext *           dev_ctx = NULL;
     void                        release_item(Event &item) {
-      vkDestroyEvent(dev_ctx->device, item.event, NULL);
+      // vkDestroyEvent(dev_ctx->device, item.event, NULL);
       vkDestroySemaphore(dev_ctx->device, item.sem, NULL);
       MEMZERO(item);
     }
@@ -2027,7 +2041,7 @@ struct VkDeviceContext {
     return mem;
   }
 
-  Pair<VkBuffer, VkDeviceMemory> create_transient_buffer(u32 size) {
+  Pair<VkBuffer, VkDeviceMemory> create_transient_buffer(size_t size) {
     std::lock_guard<std::mutex> _lock(mutex);
     VkBuffer                    buf;
     VkBufferCreateInfo          cinfo;
@@ -2074,9 +2088,9 @@ struct VkDeviceContext {
     ID chunk_index =
         mem_chunks.find_mem_chunk(prop_flags, reqs.memoryTypeBits, reqs.alignment, reqs.size);
     new_buf.mem_chunk_id = chunk_index;
+    new_buf.mem_size     = reqs.size;
     mem_chunks.acquire(chunk_index, [&](Mem_Chunk &chunk) {
       new_buf.mem_offset = chunk.alloc(reqs.alignment, reqs.size);
-      // chunk.add_reference();
       vkBindBufferMemory(device, new_buf.buffer, chunk.mem, new_buf.mem_offset);
     });
     return {buffers.push(new_buf), (i32)Resource_Type::BUFFER};
@@ -2190,8 +2204,8 @@ struct VkDeviceContext {
     {
       VkEventCreateInfo info{};
       info.sType = VK_STRUCTURE_TYPE_EVENT_CREATE_INFO;
-      VK_ASSERT_OK(vkCreateEvent(device, &info, NULL, &event.event));
-      vkResetEvent(device, event.event);
+      // VK_ASSERT_OK(vkCreateEvent(device, &info, NULL, &event.event));
+      // vkResetEvent(device, event.event);
     }
     {
       // VkSemaphoreTypeCreateInfo tinfo{};
@@ -2342,9 +2356,9 @@ struct VkDeviceContext {
     ID chunk_index =
         mem_chunks.find_mem_chunk(prop_flags, reqs.memoryTypeBits, reqs.alignment, reqs.size);
     new_image.mem_chunk_id = chunk_index;
+    new_image.mem_size     = reqs.size;
     mem_chunks.acquire(chunk_index, [&](Mem_Chunk &chunk) {
       new_image.mem_offset = chunk.alloc(reqs.alignment, reqs.size);
-      // chunk.add_reference();
       vkBindImageMemory(device, new_image.image, chunk.mem, new_image.mem_offset);
     });
 
@@ -3286,7 +3300,7 @@ class Vk_Ctx : public rd::ICtx {
   }
 
   void _copy_buffer(Resource_ID src_buf_id, size_t src_offset, Resource_ID dst_buf_id,
-                    size_t dst_offset, u32 size) {
+                    size_t dst_offset, size_t size) {
     Buffer       src_buffer = dev_ctx->buffers.read(src_buf_id.id);
     Buffer       dst_buffer = dev_ctx->buffers.read(dst_buf_id.id);
     VkBufferCopy info;
@@ -3450,7 +3464,7 @@ class Vk_Ctx : public rd::ICtx {
     buffer_layouts.release();
     image_layouts.release();
 
-    vkCmdSetEvent(cmd, event.event, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+    // vkCmdSetEvent(cmd, event.event, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
     vkEndCommandBuffer(cmd);
     VkPipelineStageFlags stage_flags[0x10]{};
     ito(0x10) stage_flags[i] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
@@ -3548,7 +3562,7 @@ class Vk_Ctx : public rd::ICtx {
     _copy_buffer_image(buf_id, offset, img_id, dst_info);
   }
   void copy_buffer(Resource_ID src_buf_id, size_t src_offset, Resource_ID dst_buf_id,
-                   size_t dst_offset, u32 size) override {
+                   size_t dst_offset, size_t size) override {
     _copy_buffer(src_buf_id, src_offset, dst_buf_id, dst_offset, size);
   }
   void draw_indexed(u32 index_count, u32 instance_count, u32 first_index, u32 first_instance,
@@ -3563,8 +3577,8 @@ class Vk_Ctx : public rd::ICtx {
     _bind_sets();
     vkCmdDraw(cmd, vertex_count, instance_count, first_vertex, first_instance);
   }
-  void multi_draw_indexed_indirect(Resource_ID arg_buf_id, u32 arg_buf_offset,
-                                   Resource_ID cnt_buf_id, u32 cnt_buf_offset, u32 max_count,
+  void multi_draw_indexed_indirect(Resource_ID arg_buf_id, size_t arg_buf_offset,
+                                   Resource_ID cnt_buf_id, size_t cnt_buf_offset, u32 max_count,
                                    u32 stride) override {
     Buffer arg_buf = dev_ctx->buffers.read(arg_buf_id.id);
     Buffer cnt_buf = dev_ctx->buffers.read(cnt_buf_id.id);
@@ -3730,10 +3744,13 @@ class VkFactory : public rd::IDevice {
   }
   bool get_event_state(Resource_ID fence_id) override {
     std::lock_guard<std::mutex> _lock(mutex);
-    Event                       event    = dev_ctx->events.read(fence_id.id);
-    VkResult                    wait_res = vkGetEventStatus(dev_ctx->device, event.event);
-    ASSERT_DEBUG(wait_res == VK_EVENT_SET || wait_res == VK_EVENT_RESET);
-    return wait_res == VK_EVENT_SET;
+    Event                       event = dev_ctx->events.read(fence_id.id);
+    // VkResult                    wait_res = vkGetEventStatus(dev_ctx->device, event.event);
+    // ASSERT_DEBUG(wait_res == VK_EVENT_SET || wait_res == VK_EVENT_RESET);
+    // return wait_res == VK_EVENT_SET;
+    u64      val = 0;
+    VkResult res = vkGetSemaphoreCounterValue(dev_ctx->device, event.sem, &val);
+    return val != 0;
   }
   Resource_ID create_shader(rd::Stage_t type, string_ref body,
                             Pair<string_ref, string_ref> *defines, size_t num_defines) override {
@@ -3983,8 +4000,8 @@ class VkFactory : public rd::IDevice {
     std::lock_guard<std::mutex> _lock(mutex);
     Vk_Ctx *                    ctx      = (Vk_Ctx *)_ctx;
     int                         queue_id = COMPUTE_QUEUE_INDEX;
-    if (last_sem[queue_id].is_valid())
-      ctx->wait_for_event({last_sem[queue_id], (u32)Resource_Type::EVENT});
+    // if (last_sem[queue_id].is_valid())
+    // ctx->wait_for_event({last_sem[queue_id], (u32)Resource_Type::EVENT});
     ID finish_sem      = ctx->submit();
     last_sem[queue_id] = finish_sem;
     dev_ctx->release_resource({finish_sem, (u32)Resource_Type::EVENT});
@@ -4001,8 +4018,8 @@ class VkFactory : public rd::IDevice {
     std::lock_guard<std::mutex> _lock(mutex);
     Vk_Ctx *                    ctx      = (Vk_Ctx *)_ctx;
     int                         queue_id = COPY_QUEUE_INDEX;
-    if (last_sem[queue_id].is_valid())
-      ctx->wait_for_event({last_sem[queue_id], (u32)Resource_Type::EVENT});
+    // if (last_sem[queue_id].is_valid())
+    // ctx->wait_for_event({last_sem[queue_id], (u32)Resource_Type::EVENT});
     ID finish_sem      = ctx->submit();
     last_sem[queue_id] = finish_sem;
     dev_ctx->release_resource({finish_sem, (u32)Resource_Type::EVENT});
@@ -4036,7 +4053,8 @@ class VkFactory : public rd::IDevice {
     std::lock_guard<std::mutex> _lock(mutex);
     Resource_ID                 sem = dev_ctx->start_frame();
     on_frame_begin();
-    ito(3) last_sem[i] = sem.id;
+    last_sem[GRAPHICS_QUEUE_INDEX] = sem.id;
+    // ito(3) last_sem[i] = sem.id;
   }
   void end_frame() override {
     std::lock_guard<std::mutex> _lock(mutex);
@@ -4048,6 +4066,8 @@ class VkFactory : public rd::IDevice {
         sems[num_sems++] = dev_ctx->events.read(last_sem[i]).sem;
       }
     }
+    // if (last_sem[GRAPHICS_QUEUE_INDEX].is_valid())
+    // sems[num_sems++] = dev_ctx->events.read(last_sem[GRAPHICS_QUEUE_INDEX]).sem;
     dev_ctx->end_frame(sems, num_sems);
   }
 };

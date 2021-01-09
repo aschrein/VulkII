@@ -134,7 +134,7 @@ struct Image_Create_Info {
 struct Buffer_Create_Info {
   u32         usage_bits;
   Memory_Type memory_type;
-  u32         size;
+  size_t      size;
 };
 
 struct Binding {
@@ -620,8 +620,8 @@ class ICtx {
   virtual void bind_index_buffer(Resource_ID id, size_t offset, Index_t format)        = 0;
   virtual void bind_vertex_buffer(u32 index, Resource_ID buffer, size_t offset)        = 0;
   virtual void draw(u32 vertices, u32 instances, u32 first_vertex, u32 first_instance) = 0;
-  virtual void multi_draw_indexed_indirect(Resource_ID arg_buf_id, u32 arg_buf_offset,
-                                           Resource_ID cnt_buf_id, u32 cnt_buf_offset,
+  virtual void multi_draw_indexed_indirect(Resource_ID arg_buf_id, size_t arg_buf_offset,
+                                           Resource_ID cnt_buf_id, size_t cnt_buf_offset,
                                            u32 max_count, u32 stride)                  = 0;
 
   virtual void set_viewport(float x, float y, float width, float height, float mindepth,
@@ -648,7 +648,7 @@ class ICtx {
   virtual void copy_image_to_buffer(Resource_ID buf_id, size_t buffer_offset, Resource_ID img_id,
                                     Image_Copy const &dst_info) = 0;
   virtual void copy_buffer(Resource_ID src_buf_id, size_t src_offset, Resource_ID dst_buf_id,
-                           size_t dst_offset, u32 size)         = 0;
+                           size_t dst_offset, size_t size)      = 0;
   //////////////
   // Barriers //
   //////////////

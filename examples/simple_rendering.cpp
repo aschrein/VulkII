@@ -13,6 +13,154 @@
 #include <mutex>
 #include <thread>
 
+class BufferThing {
+#define RESOURCE_LIST                                                                              \
+  RESOURCE(cs0);                                                                                   \
+  RESOURCE(cs1);                                                                                   \
+  RESOURCE(cs2);                                                                                   \
+  RESOURCE(buffer);                                                                                \
+  RESOURCE(buffer1);                                                                               \
+  RESOURCE(readback);                                                                              \
+  RESOURCE(signature);
+
+#define RESOURCE(name) Resource_ID name{};
+  RESOURCE_LIST
+#undef RESOURCE
+
+  public:
+  void init(rd::IDevice *dev) {
+    buffer = [dev] {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.memory_type = rd::Memory_Type::GPU_LOCAL;
+      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_UAV |
+                            (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC |
+                            (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
+      buf_info.size = sizeof(u32) * 16 * 1024 * 1024;
+      return dev->create_buffer(buf_info);
+    }();
+    // Allocate a buffer.
+    buffer1 = [dev] {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.memory_type = rd::Memory_Type::GPU_LOCAL;
+      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_UAV |
+                            (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC |
+                            (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
+      buf_info.size = sizeof(u32) * 16 * 1024 * 1024;
+      return dev->create_buffer(buf_info);
+    }();
+
+    signature = [dev] {
+      rd::Binding_Space_Create_Info set_info{};
+      set_info.bindings.push({rd::Binding_t::UAV_BUFFER, 1});
+      set_info.bindings.push({rd::Binding_t::UAV_BUFFER, 1});
+      rd::Binding_Table_Create_Info table_info{};
+      table_info.spaces.push(set_info);
+      table_info.push_constants_size = 4;
+      return dev->create_signature(table_info);
+    }();
+
+    cs0 = dev->create_compute_pso(signature, dev->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
+[[vk::binding(0, 0)]] RWByteAddressBuffer BufferOut : register(u0, space0);
+
+[numthreads(64, 1, 1)]
+void main(uint3 DTid : SV_DispatchThreadID)
+{
+    uint id = DTid.x % 1024;
+    for (uint i = 0; i < 100; i++)
+      BufferOut.Store<uint>(id * 4, BufferOut.Load<uint>(id * 4) + 1);
+}
+)"),
+                                                                NULL, 0));
+    cs1 = dev->create_compute_pso(signature, dev->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
+[[vk::binding(0, 0)]] RWByteAddressBuffer BufferOut : register(u0, space0);
+[[vk::binding(1, 0)]] RWByteAddressBuffer BufferIn : register(u1, space0);
+
+[numthreads(64, 1, 1)]
+void main(uint3 DTid : SV_DispatchThreadID)
+{
+    uint id = DTid.x % 1024;
+    for (uint i = 0; i < 100; i++)
+      BufferOut.Store<uint>(id * 4, BufferOut.Load<uint>(id * 4) + 1);
+}
+)"),
+                                                                NULL, 0));
+    cs2 = dev->create_compute_pso(signature, dev->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
+[[vk::binding(0, 0)]] RWByteAddressBuffer BufferOut: register(u0, space0);
+[[vk::binding(1, 0)]] RWByteAddressBuffer BufferIn : register(u1, space0);
+  
+struct CullPushConstants
+{
+  uint val;
+};
+[[vk::push_constant]] ConstantBuffer<CullPushConstants> pc : DX12_PUSH_CONSTANTS_REGISTER;
+  
+[numthreads(64, 1, 1)]
+  void main(uint3 DTid : SV_DispatchThreadID)
+{
+    uint id = DTid.x % 1024;
+    for (uint i = 0; i < 100; i++)
+      BufferOut.Store<uint>(id * 4, BufferOut.Load<uint>(id * 4) * pc.val);
+}
+)"),
+                                                                NULL, 0));
+  }
+  void test_buffers(rd::IDevice *dev) {
+    Resource_ID wevent_0{};
+    Resource_ID wevent_1{};
+    {
+      rd::ICtx *ctx = dev->start_async_compute_pass();
+      {
+        TracyVulkIINamedZone(ctx, "Async Compute Example 1");
+        ctx->bind_compute(cs0);
+        rd::IBinding_Table *table = dev->create_binding_table(signature);
+        defer(table->release());
+        table->bind_UAV_buffer(0, 0, buffer, 0, sizeof(u32) * 1024);
+        table->bind_UAV_buffer(0, 1, buffer, 0, sizeof(u32) * 1024);
+        ctx->bind_table(table);
+        ctx->dispatch(1024 * 32, 1, 1);
+      }
+      wevent_0 = dev->end_async_compute_pass(ctx);
+    }
+    // dev->wait_idle();
+    u32 val = 2;
+    {
+      rd::ICtx *ctx = dev->start_async_compute_pass();
+      {
+        TracyVulkIINamedZone(ctx, "Async Compute Example 2");
+        // ctx->wait_for_event(wevent_0);
+        ctx->bind_compute(cs1);
+        rd::IBinding_Table *table = dev->create_binding_table(signature);
+        defer(table->release());
+        table->bind_UAV_buffer(0, 0, buffer1, 0, sizeof(u32) * 1024);
+        table->bind_UAV_buffer(0, 1, buffer1, 0, sizeof(u32) * 1024);
+        ctx->bind_table(table);
+        // ctx->buffer_barrier(buffer, rd::Buffer_Access::UAV);
+        ctx->dispatch(1024 * 32, 1, 1);
+      }
+      wevent_1 = dev->end_async_compute_pass(ctx);
+    }
+    {
+      rd::ICtx *ctx = dev->start_async_copy_pass();
+      {
+        // ctx->wait_for_event(wevent_0);
+        // ctx->wait_for_event(wevent_1);
+        TracyVulkIINamedZone(ctx, "Async Copy Example");
+        ctx->copy_buffer(buffer, 0, buffer1, 0, sizeof(u32) * 16 * 1024 * 1024);
+      }
+      wevent_1 = dev->end_async_copy_pass(ctx);
+    }
+  }
+  void release(rd::IDevice *factory) {
+#define RESOURCE(name)                                                                             \
+  if (name.is_valid()) factory->release_resource(name);
+    RESOURCE_LIST
+#undef RESOURCE
+  }
+#undef RESOURCE_LIST
+};
+
 #if 1
 struct RenderingContext {
   rd::IDevice *factory = NULL;
@@ -37,8 +185,9 @@ class GBufferPass {
   RESOURCE_LIST
 #  undef RESOURCE
 
-  u32 width  = 0;
-  u32 height = 0;
+  u32         width  = 0;
+  u32         height = 0;
+  BufferThing bthing{};
 
   void render_once(rd::ICtx *ctx, Scene *scene, float4x4 viewproj, float4x4 world) {
 
@@ -79,6 +228,7 @@ class GBufferPass {
     float4x4 world_transform;
   };
   void init(RenderingContext rctx) {
+    bthing.init(rctx.factory);
     gbuffer_vs = rctx.factory->create_shader(rd::Stage_t::VERTEX, stref_s(R"(
 struct PushConstants
 {
@@ -261,7 +411,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
     // timestamps.update(rctx.factory);
     // float4x4 bvh_visualizer_offset = glm::translate(float4x4(1.0f), float3(-10.0f, 0.0f,
     // 0.0f));
-
+    bthing.test_buffers(rctx.factory);
     u32 width  = rctx.config->get_u32("g_buffer_width");
     u32 height = rctx.config->get_u32("g_buffer_height");
     if (this->width != width || this->height != height) {
@@ -366,11 +516,13 @@ float4 main(in PSInput input) : SV_TARGET0 {
     // threads.clear();
   }
   void release(rd::IDevice *factory) {
+    bthing.release(factory);
 #  define RESOURCE(name)                                                                           \
     if (name.is_valid()) factory->release_resource(name);
     RESOURCE_LIST
 #  undef RESOURCE
   }
+#  undef RESOURCE_LIST
 };
 #endif
 #if 1
@@ -538,11 +690,11 @@ int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
 
-  auto window_loop = [](rd::Impl_t impl) { IGUIApp::start<Event_Consumer>(impl); };
-   std::thread vulkan_thread = std::thread([window_loop] { window_loop(rd::Impl_t::VULKAN); });
-  //std::thread dx12_thread = std::thread([window_loop] { window_loop(rd::Impl_t::DX12); });
-   vulkan_thread.join();
-  //dx12_thread.join();
+  auto        window_loop   = [](rd::Impl_t impl) { IGUIApp::start<Event_Consumer>(impl); };
+  //std::thread vulkan_thread = std::thread([window_loop] { window_loop(rd::Impl_t::VULKAN); });
+   std::thread dx12_thread = std::thread([window_loop] { window_loop(rd::Impl_t::DX12); });
+  //vulkan_thread.join();
+   dx12_thread.join();
 
   return 0;
 }

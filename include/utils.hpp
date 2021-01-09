@@ -1695,11 +1695,11 @@ template <typename K, typename Alloc_t = Default_Allocator> struct BinNode {
 class Util_Allocator {
   private:
   struct Alloc_Key {
-    u32  offset;
-    u32  size;
-    bool operator==(Alloc_Key const &that) const { return offset == that.offset; }
-    bool operator>(Alloc_Key const &that) const { return offset > that.offset; }
-    bool operator<(Alloc_Key const &that) const { return offset < that.offset; }
+    size_t offset;
+    size_t size;
+    bool   operator==(Alloc_Key const &that) const { return offset == that.offset; }
+    bool   operator>(Alloc_Key const &that) const { return offset > that.offset; }
+    bool   operator<(Alloc_Key const &that) const { return offset < that.offset; }
   };
   using BinNode_t      = BinNode<Alloc_Key>;
   BinNode_t *free_root = NULL;
@@ -1714,18 +1714,17 @@ class Util_Allocator {
   ~Util_Allocator() {
     if (free_root) free_root->release();
   }
-  Util_Allocator(u32 size) { free_root = BinNode_t::create({0, size}); }
-  i32 alloc(u32 size) {
-    if (size == 0) {
-      return -1;
-    }
-    i32 offset = -1;
+  Util_Allocator(size_t size) { free_root = BinNode_t::create({0, size}); }
+  ptrdiff_t alloc(size_t alignment, size_t size) {
+    ASSERT_DEBUG(size);
+    if (free_root == NULL) return -1;
+    ptrdiff_t offset = -1;
     free_root->traverse([&](BinNode_t *node) {
       if (offset >= 0) return;
-      if (node->key.size >= size) {
-        offset       = node->key.offset;
-        u32 new_size = node->key.size - size;
-        free_root    = free_root->remove({node->key});
+      if (node->key.size >= size && (node->key.offset & (alignment - 1)) == 0u) {
+        offset          = node->key.offset;
+        size_t new_size = node->key.size - size;
+        free_root       = free_root->remove({node->key});
         if (new_size) {
           if (free_root == NULL) {
             free_root = BinNode_t::create({offset + size, new_size});
@@ -1736,25 +1735,38 @@ class Util_Allocator {
     });
     return offset;
   }
+  bool has_free_space(size_t alignment, size_t size) {
+    ASSERT_DEBUG(size);
+    ASSERT_DEBUG((alignment & (alignment - 1)) == 0); // pot
+    if (free_root == NULL) return false;
+    ptrdiff_t offset = -1;
+    free_root->traverse([&](BinNode_t *node) {
+      if (offset >= 0) return;
+      if (node->key.size >= size && (node->key.offset & (alignment - 1)) == 0u) {
+        offset = node->key.offset;
+      }
+    });
+    return offset >= 0;
+  }
   u32 get_num_nodes() {
     if (free_root == NULL) return 0;
     u32 size = 0;
     free_root->traverse_keys([&](Alloc_Key const &key) { size += 1; });
     return size;
   }
-  u32 get_free_space() {
+  size_t get_free_space() {
     if (free_root == NULL) return 0;
-    u32 size = 0;
+    size_t size = 0;
     free_root->traverse_keys([&](Alloc_Key const &key) { size += key.size; });
     return size;
   }
-  void free(u32 offset, u32 size) {
+  void free(size_t offset, size_t size) {
     if (free_root == NULL) {
       free_root = BinNode_t::create({offset, size});
       return;
     }
-    u32 new_offset = offset;
-    u32 new_size   = size;
+    size_t new_offset = offset;
+    size_t new_size   = size;
     // Try merging the lower bound node
     if (free_root) {
       BinNode_t *lb = free_root->lower_bound({offset, 0});

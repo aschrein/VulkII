@@ -263,7 +263,7 @@ class GPU_Desc_Heap {
   ~GPU_Desc_Heap() {}
   i32 allocate(u32 size) {
     SCOPED_LOCK;
-    return ual.alloc(size);
+    return ual.alloc(1, size);
   }
   void free(u32 offset, u32 size) {
     SCOPED_LOCK;
@@ -1288,9 +1288,12 @@ class DX12Binding_Table : public rd::IBinding_Table {
       desc.Flags                      = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
       DX_ASSERT_OK(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&out->cpu_common_heap)));
     }
-    out->common_heap_offset = dev_ctx->get_common_desc_heap()->allocate(signature->num_desc_common);
-    out->sampler_heap_offset =
-        dev_ctx->get_sampler_desc_heap()->allocate(signature->num_desc_samplers);
+    if (signature->num_desc_common)
+      out->common_heap_offset =
+          dev_ctx->get_common_desc_heap()->allocate(signature->num_desc_common);
+    if (signature->num_desc_samplers)
+      out->sampler_heap_offset =
+          dev_ctx->get_sampler_desc_heap()->allocate(signature->num_desc_samplers);
     return out;
   }
   void bind(ComPtr<ID3D12GraphicsCommandList> cmd, rd::Pass_t pass_type) {
@@ -1761,12 +1764,13 @@ class DX12Context : public rd::ICtx {
       : type(type), dev_ctx(device), render_pass(render_pass), frame_buffer(frame_buffer) {
     if (type == rd::Pass_t::COMPUTE || type == rd::Pass_t::RENDER) {
       cmd = device->alloc_graphics_cmd();
+      device->bind_desc_heaps(cmd.Get());
     } else if (type == rd::Pass_t::ASYNC_COMPUTE) {
       cmd = device->alloc_compute_cmd();
+      device->bind_desc_heaps(cmd.Get());
     } else if (type == rd::Pass_t::ASYNC_COPY) {
       cmd = device->alloc_copy_cmd();
     }
-    device->bind_desc_heaps(cmd.Get());
   }
 #ifdef TRACY_ENABLE
   void tracy_scope_enter(void *src_loc) override {
@@ -1855,8 +1859,8 @@ class DX12Context : public rd::ICtx {
     cur_binding->flush_push_constants(cmd, type);
     cmd->DrawInstanced(vertices, instances, first_vertex, first_instance);
   }
-  void multi_draw_indexed_indirect(Resource_ID arg_buf_id, u32 arg_buf_offset,
-                                   Resource_ID cnt_buf_id, u32 cnt_buf_offset, u32 max_count,
+  void multi_draw_indexed_indirect(Resource_ID arg_buf_id, size_t arg_buf_offset,
+                                   Resource_ID cnt_buf_id, size_t cnt_buf_offset, u32 max_count,
                                    u32 stride) override {
     TRAP;
   }
@@ -2004,7 +2008,7 @@ class DX12Context : public rd::ICtx {
     // cmd->CopyTextureRegion(&dst, buffer_offset, 0, 0, &src, &box);
   }
   void copy_buffer(Resource_ID src_buf_id, size_t src_offset, Resource_ID dst_buf_id,
-                   size_t dst_offset, u32 size) override {
+                   size_t dst_offset, size_t size) override {
     ID3D12Resource *src = dev_ctx->get_resource(src_buf_id.id)->res;
     ID3D12Resource *dst = dev_ctx->get_resource(dst_buf_id.id)->res;
     cmd->CopyBufferRegion(dst, dst_offset, src, src_offset, size);
