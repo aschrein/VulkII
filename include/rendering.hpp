@@ -578,7 +578,9 @@ class IDevice {
   virtual double          get_timestamp_ms(Resource_ID t0, Resource_ID t1)          = 0;
   virtual void            wait_idle()                                               = 0;
   virtual bool            get_event_state(Resource_ID id)                           = 0;
-  virtual Impl_t          getImplType()                                             = 0;
+  // Halts current thread
+  virtual void   wait_for_event(Resource_ID id) = 0;
+  virtual Impl_t getImplType()                  = 0;
 
   ///////////////////
   // Pass creation //
@@ -587,10 +589,12 @@ class IDevice {
   virtual Resource_ID end_render_pass(ICtx *ctx)                                           = 0;
   virtual ICtx *      start_compute_pass()                                                 = 0;
   virtual Resource_ID end_compute_pass(ICtx *ctx)                                          = 0;
-  virtual ICtx *      start_async_compute_pass()                                           = 0;
-  virtual Resource_ID end_async_compute_pass(ICtx *ctx)                                    = 0;
-  virtual ICtx *      start_async_copy_pass()                                              = 0;
-  virtual Resource_ID end_async_copy_pass(ICtx *ctx)                                       = 0;
+  // There are different queues for those but start_frame waits for completion so inter frame
+  // commands are not possible
+  virtual ICtx *      start_async_compute_pass()        = 0;
+  virtual Resource_ID end_async_compute_pass(ICtx *ctx) = 0;
+  virtual ICtx *      start_async_copy_pass()           = 0;
+  virtual Resource_ID end_async_copy_pass(ICtx *ctx)    = 0;
 
   virtual void release() = 0;
   // Does the deferred release iteration and increments the swap chain image if there's any.

@@ -13,6 +13,8 @@
 #include <mutex>
 #include <thread>
 
+#include <embree3/rtcore_builder.h>
+
 class BufferThing {
 #define RESOURCE_LIST                                                                              \
   RESOURCE(cs0);                                                                                   \

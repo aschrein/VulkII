@@ -3742,15 +3742,33 @@ class VkFactory : public rd::IDevice {
     std::lock_guard<std::mutex> _lock(mutex);
     return dev_ctx->create_buffer(info);
   }
-  bool get_event_state(Resource_ID fence_id) override {
+  void wait_for_event(Resource_ID id) override {
+    VkSemaphore sem = VK_NULL_HANDLE;
+    {
+      std::lock_guard<std::mutex> _lock(mutex);
+      sem = dev_ctx->events.read(id.id).sem;
+      VkSemaphoreWaitInfo info{};
+      info.sType          = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+      info.pSemaphores    = &sem;
+      info.semaphoreCount = 1;
+      VkResult res        = vkWaitSemaphores(dev_ctx->device, &info, 0);
+      if (res != VK_SUCCESS) return;
+    }
+    VkSemaphoreWaitInfo info{};
+    info.sType          = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+    info.pSemaphores    = &sem;
+    info.semaphoreCount = 1;
+    VK_ASSERT_OK(vkWaitSemaphores(dev_ctx->device, &info, -1));
+  }
+  bool get_event_state(Resource_ID id) override {
     std::lock_guard<std::mutex> _lock(mutex);
-    Event                       event = dev_ctx->events.read(fence_id.id);
-    // VkResult                    wait_res = vkGetEventStatus(dev_ctx->device, event.event);
-    // ASSERT_DEBUG(wait_res == VK_EVENT_SET || wait_res == VK_EVENT_RESET);
-    // return wait_res == VK_EVENT_SET;
-    u64      val = 0;
-    VkResult res = vkGetSemaphoreCounterValue(dev_ctx->device, event.sem, &val);
-    return val != 0;
+    VkSemaphore                 sem = dev_ctx->events.read(id.id).sem;
+    VkSemaphoreWaitInfo         info{};
+    info.sType          = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+    info.pSemaphores    = &sem;
+    info.semaphoreCount = 1;
+    VkResult res        = vkWaitSemaphores(dev_ctx->device, &info, 0);
+    return res == VK_SUCCESS;
   }
   Resource_ID create_shader(rd::Stage_t type, string_ref body,
                             Pair<string_ref, string_ref> *defines, size_t num_defines) override {

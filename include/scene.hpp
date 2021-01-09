@@ -11,6 +11,12 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include "imgui_internal.h"
 
+#ifdef VULKII_EMBREE
+#  include <embree3/rtcore.h>
+#  include <embree3/rtcore_builder.h>
+#  include <embree3/rtcore_scene.h>
+#endif
+
 using namespace glm;
 
 using int2     = ivec2;
@@ -891,130 +897,6 @@ struct Raw_Mesh_Opaque {
   }
 };
 
-struct BVH_Node {
-  // Bit layout:
-  // +-------------------------+
-  // | 32 31 30 29 28 27 26 25 |
-  // | 24 23 22 21 20 19 18 17 |
-  // | 16 15 14 13 12 11 10 9  |
-  // | 8  7  6  5  4  3  2  1  |
-  // +-------------------------+
-  // +--------------+
-  // | [32:32] Leaf |
-  // +--------------+
-  // |  Leaf:
-  // +->+---------------------+---------------------+
-  // |  | [31:25] Item count  | [24:1] Items offset |
-  // |  +---------------------+---------------------+
-  // |
-  // |  Branch:
-  // +->+----------------------------+
-  //    | [24:1]  First child offset |
-  //    +----------------------------+
-
-  // constants
-  static constexpr u32 LEAF_BIT = 1 << 31;
-  // Leaf flags:
-  static constexpr u32 ITEMS_OFFSET_MASK  = 0xffffff;  // 24 bits
-  static constexpr u32 ITEMS_OFFSET_SHIFT = 0;         // low bits
-  static constexpr u32 NUM_ITEMS_MASK     = 0b1111111; // 7 bits
-  static constexpr u32 NUM_ITEMS_SHIFT    = 24;        // after first 24 bits
-  static constexpr u32 MAX_ITEMS          = 16;        // max items
-  // Node flags:
-  static constexpr u32 FIRST_CHILD_MASK  = 0xffffff;
-  static constexpr u32 FIRST_CHILD_SHIFT = 0;
-  static constexpr u32 MAX_DEPTH         = 20;
-  static constexpr f32 EPS               = 1.0e-3f;
-
-  float3 min;
-  float3 max;
-  u32    flags;
-
-  bool intersects(float3 tmin, float3 tmax) {
-    return                 //
-        tmax.x >= min.x && //
-        tmin.x <= max.x && //
-        tmax.y >= min.y && //
-        tmin.y <= max.y && //
-        tmax.z >= min.z && //
-        tmin.z <= max.z && //
-        true;
-  }
-  bool intersects(float3 center, float radius) {
-    return                            //
-        center.x + radius >= min.x && //
-        center.x - radius <= max.x && //
-        center.y + radius >= min.y && //
-        center.y - radius <= max.y && //
-        center.z + radius >= min.z && //
-        center.z - radius <= max.z && //
-        true;
-  }
-  bool inside(float3 tmin) {
-    return                 //
-        tmin.x >= min.x && //
-        tmin.x <= max.x && //
-        tmin.y >= min.y && //
-        tmin.y <= max.y && //
-        tmin.z >= min.z && //
-        tmin.z <= max.z && //
-        true;
-  }
-  bool intersects_ray(float3 ro, float3 rd, float min_t) {
-    if (inside(ro)) return true;
-    float3 invd = 1.0f / rd;
-    float  dx_n = (min.x - ro.x) * invd.x;
-    float  dy_n = (min.y - ro.y) * invd.y;
-    float  dz_n = (min.z - ro.z) * invd.z;
-    float  dx_f = (max.x - ro.x) * invd.x;
-    float  dy_f = (max.y - ro.y) * invd.y;
-    float  dz_f = (max.z - ro.z) * invd.z;
-    float  nt   = MAX3(MIN(dx_n, dx_f), MIN(dy_n, dy_f), MIN(dz_n, dz_f));
-    float  ft   = MIN3(MAX(dx_n, dx_f), MAX(dy_n, dy_f), MAX(dz_n, dz_f));
-    if (nt > min_t || nt > ft - EPS) return false;
-    return true;
-  }
-  bool intersects_ray(float3 ro, float3 rd) {
-    if (inside(ro)) return true;
-    float3 invd = 1.0f / rd;
-    float  dx_n = (min.x - ro.x) * invd.x;
-    float  dy_n = (min.y - ro.y) * invd.y;
-    float  dz_n = (min.z - ro.z) * invd.z;
-    float  dx_f = (max.x - ro.x) * invd.x;
-    float  dy_f = (max.y - ro.y) * invd.y;
-    float  dz_f = (max.z - ro.z) * invd.z;
-    float  nt   = MAX3(MIN(dx_n, dx_f), MIN(dy_n, dy_f), MIN(dz_n, dz_f));
-    float  ft   = MIN3(MAX(dx_n, dx_f), MAX(dy_n, dy_f), MAX(dz_n, dz_f));
-    if (nt > ft - EPS) return false;
-    return true;
-  }
-  void init_leaf(float3 min, float3 max, u32 offset) {
-    flags = LEAF_BIT;
-    ASSERT_DEBUG(offset <= ITEMS_OFFSET_MASK);
-    flags |= ((offset << ITEMS_OFFSET_SHIFT));
-    this->min = min;
-    this->max = max;
-  }
-  void init_branch(float3 min, float3 max, BVH_Node *child) {
-    ptrdiff_t diff = ((u8 *)child - (u8 *)this) / sizeof(BVH_Node);
-    ASSERT_DEBUG(diff > 0 && diff < FIRST_CHILD_MASK);
-    flags     = ((u32)diff << FIRST_CHILD_SHIFT);
-    this->min = min;
-    this->max = max;
-  }
-  bool      is_leaf() { return (flags & LEAF_BIT) == LEAF_BIT; }
-  u32       num_items() { return ((flags >> NUM_ITEMS_SHIFT) & NUM_ITEMS_MASK); }
-  u32       items_offset() { return ((flags >> ITEMS_OFFSET_SHIFT) & ITEMS_OFFSET_MASK); }
-  BVH_Node *first_child() { return this + (((flags >> FIRST_CHILD_SHIFT) & FIRST_CHILD_MASK)); }
-  void      set_num_items(u32 num) {
-    ASSERT_DEBUG(num <= NUM_ITEMS_MASK);
-    flags &= ~(NUM_ITEMS_MASK << NUM_ITEMS_SHIFT);
-    flags |= (num << NUM_ITEMS_SHIFT);
-  }
-  void add_item() { set_num_items(num_items() + 1); }
-  bool is_full() { return num_items() == MAX_ITEMS - 1; }
-};
-
 class Type {
   public:
   virtual char const *getName()   = 0;
@@ -1060,6 +942,11 @@ struct AABB {
   float3               min;
   float3               max;
   static constexpr f32 EPS = 1.0e-6f;
+
+  float area() {
+    float3 dr = max - min;
+    return 2.0f * (dr.x * dr.y + dr.x * dr.z + dr.y * dr.z);
+  }
 
   void init(float3 p) {
     min = p;
@@ -1323,7 +1210,8 @@ public:
   }
   virtual ~Node() {}
 };
-
+// Switching to embree
+#if 0
 template <typename T> struct BVH_Helper {
   float3      min;
   float3      max;
@@ -1415,8 +1303,7 @@ template <typename T> struct BVH_Helper {
     return 1;
   }
 };
-
-static_assert(sizeof(BVH_Node) == 28, "Blamey!");
+#endif
 
 static float dot2(float3 a) { return dot(a, a); }
 
@@ -1473,125 +1360,162 @@ struct Tri {
   }
 };
 
-template <typename T> struct BVH {
-  Array<T>        item_pool;
-  Array<BVH_Node> node_pool;
-  BVH_Node *      root;
+struct BVH_Node {
+  static constexpr f32 EPS       = 1.0e-3f;
+  static constexpr u32 NULL_NODE = 0xffffffffu;
+  float3               min;
+  u32                  primitive_id;
+  float3               max;
+  u32                  next_on_miss;
 
-  void gen(BVH_Node *node, BVH_Helper<T> *hnode) {
-    ASSERT_ALWAYS(node != NULL);
-    ASSERT_ALWAYS(hnode != NULL);
-    if (hnode->is_leaf) {
-      ASSERT_DEBUG(hnode->items.size != 0);
-      u32 item_offset = alloc_item_chunk();
-      node->init_leaf(hnode->min, hnode->max, item_offset);
-      ASSERT_DEBUG(hnode->items.size <= BVH_Node::MAX_ITEMS);
-      node->set_num_items((u32)hnode->items.size);
-      T *items = item_pool.at(node->items_offset());
-      ito(hnode->items.size) { items[i] = hnode->items[i]; }
-    } else {
-      BVH_Node *children = node_pool.alloc(2);
-      node->init_branch(hnode->min, hnode->max, children);
-      gen(children + 0, hnode->left);
-      gen(children + 1, hnode->right);
-    }
+  bool intersects(float3 tmin, float3 tmax) const {
+    return                 //
+        tmax.x >= min.x && //
+        tmin.x <= max.x && //
+        tmax.y >= min.y && //
+        tmin.y <= max.y && //
+        tmax.z >= min.z && //
+        tmin.z <= max.z && //
+        true;
   }
-  void init(T *items, u32 num_items) { //
-    BVH_Helper<T> *hroot = new BVH_Helper<T>;
-    hroot->init();
-    hroot->reserve(num_items);
-    defer(hroot->release());
-    ito(num_items) { hroot->push(items[i]); }
-    u32 ncnt = hroot->split(BVH_Node::MAX_ITEMS);
-    item_pool.init();
-    node_pool.init();
-    item_pool.reserve(num_items * 4);
-    node_pool.reserve(ncnt);
-    root = node_pool.alloc(1);
-    gen(root, hroot);
+  bool intersects(float3 center, float radius) const {
+    return                            //
+        center.x + radius >= min.x && //
+        center.x - radius <= max.x && //
+        center.y + radius >= min.y && //
+        center.y - radius <= max.y && //
+        center.z + radius >= min.z && //
+        center.z - radius <= max.z && //
+        true;
   }
-  u32 alloc_item_chunk() {
-    T *new_chunk = item_pool.alloc(1);
-    MEMZERO(*new_chunk);
-    T *item_root = item_pool.at(0);
-    return (u32)(((u8 *)new_chunk - (u8 *)item_root) / sizeof(T));
+  bool inside(float3 tmin) const {
+    return                 //
+        tmin.x >= min.x && //
+        tmin.x <= max.x && //
+        tmin.y >= min.y && //
+        tmin.y <= max.y && //
+        tmin.z >= min.z && //
+        tmin.z <= max.z && //
+        true;
   }
-  void release() {
-    item_pool.release();
-    node_pool.release();
-    delete this;
+  bool intersects_ray(float3 ro, float3 rd, float &min_t) const {
+    if (inside(ro)) return true;
+    float3 invd = 1.0f / rd;
+    float  dx_n = (min.x - ro.x) * invd.x;
+    float  dy_n = (min.y - ro.y) * invd.y;
+    float  dz_n = (min.z - ro.z) * invd.z;
+    float  dx_f = (max.x - ro.x) * invd.x;
+    float  dy_f = (max.y - ro.y) * invd.y;
+    float  dz_f = (max.z - ro.z) * invd.z;
+    float  nt   = MAX3(MIN(dx_n, dx_f), MIN(dy_n, dy_f), MIN(dz_n, dz_f));
+    float  ft   = MIN3(MAX(dx_n, dx_f), MAX(dy_n, dy_f), MAX(dz_n, dz_f));
+    if (nt > min_t || nt > ft - EPS) return false;
+    min_t = nt;
+    return true;
   }
-  template <typename F> void traverse(F fn) { traverse(root, fn); }
-  template <typename F> void traverse(BVH_Node *node, F fn) {
-    if (node->is_leaf()) {
-      fn(node);
-    } else {
-      BVH_Node *children = node->first_child();
-      BVH_Node *left     = children + 0;
-      BVH_Node *right    = children + 1;
-      traverse(left, fn);
-      traverse(right, fn);
-    }
-  }
-  template <typename F> void traverse(float3 ro, float radius, F fn) {
-    if (!root->intersects(ro, radius)) return;
-    traverse(root, ro, radius, fn);
-  }
-  template <typename F> void traverse(BVH_Node *node, float3 ro, float radius, F fn) {
-    if (node->is_leaf()) {
-      T * items     = item_pool.at(node->items_offset());
-      u32 num_items = node->num_items();
-      fn(items, num_items);
-    } else {
-      BVH_Node *children = node->first_child();
-      BVH_Node *left     = children + 0;
-      BVH_Node *right    = children + 1;
-      if (left->intersects(ro, radius)) traverse(left, ro, radius, fn);
-      if (right->intersects(ro, radius)) traverse(right, ro, radius, fn);
-    }
-  }
-  template <typename F> void traverse(float3 ro, float3 rd, F fn) {
-    if (!root->intersects_ray(ro, rd)) return;
-    traverse(root, ro, rd, fn);
-  }
-  template <typename F> void traverse(BVH_Node *node, float3 ro, float3 rd, F fn) {
-    if (node->is_leaf()) {
-      T * items     = item_pool.at(node->items_offset());
-      u32 num_items = node->num_items();
-      // ASSERT_ALWAYS(num_items <= vfloat3::WIDTH);
-      fn(items, num_items);
-    } else {
-      BVH_Node *children = node->first_child();
-      BVH_Node *left     = children + 0;
-      BVH_Node *right    = children + 1;
-      if (left->intersects_ray(ro, rd)) traverse(left, ro, rd, fn);
-      if (right->intersects_ray(ro, rd)) traverse(right, ro, rd, fn);
-    }
-  }
-  float distance(float3 p) {
-    auto  aabb = AABB{root->min, root->max};
-    float size = MAX3(abs(aabb.max.x - aabb.min.x), abs(aabb.max.y - aabb.min.y),
-                      abs(aabb.max.z - aabb.min.z));
-
-    float dr           = size / 10.0f;
-    float r            = dr;
-    bool  found        = false;
-    float min_distance = 1.0e6f;
-    while (!found) {
-      traverse(p, r, [&](T *items, u32 num_items) {
-        ito(num_items) {
-          float dist = items[i].distance(p);
-          if (abs(dist) < abs(min_distance)) {
-            min_distance = dist;
-          }
-          found = true;
-        }
-      });
-      r += dr;
-    }
-    return min_distance;
+  bool intersects_ray(float3 ro, float3 rd) const {
+    if (inside(ro)) return true;
+    float3 invd = 1.0f / rd;
+    float  dx_n = (min.x - ro.x) * invd.x;
+    float  dy_n = (min.y - ro.y) * invd.y;
+    float  dz_n = (min.z - ro.z) * invd.z;
+    float  dx_f = (max.x - ro.x) * invd.x;
+    float  dy_f = (max.y - ro.y) * invd.y;
+    float  dz_f = (max.z - ro.z) * invd.z;
+    float  nt   = MAX3(MIN(dx_n, dx_f), MIN(dy_n, dy_f), MIN(dz_n, dz_f));
+    float  ft   = MIN3(MAX(dx_n, dx_f), MAX(dy_n, dy_f), MAX(dz_n, dz_f));
+    if (nt > ft - EPS) return false;
+    return true;
   }
 };
+static_assert(sizeof(BVH_Node) == 32, "Blamey!");
+
+// Based off
+// https://github.com/kayru/RayTracedShadows/blob/master/Source/Shaders/RayTracedShadows.comp
+struct BVH_Triangle {
+  static constexpr f32 EPS = 1.0e-3f;
+
+  float3 e0;
+  u32    padding0;
+  float3 e1;
+  u32    next_on_miss;
+  float3 v0;
+  u32    padding1;
+
+  bool intersects_ray(float3 ro, float3 rd, float &min_t) const {
+    const float3 s1   = cross(rd, e1);
+    const float  invd = 1.0f / (dot(s1, e0));
+    const float3 d    = ro.xyz - v0;
+    const float  b1   = dot(d, s1) * invd;
+    const float3 s2   = cross(d, e0);
+    const float  b2   = dot(rd, s2) * invd;
+    const float  temp = dot(e1, s2) * invd;
+
+    if (b1 < 0.0f || b1 > 1.0f || b2 < 0.0f || b1 + b2 > 1.0f || temp < 0.0f || temp > min_t) {
+      return false;
+    } else {
+      min_t = temp;
+      return true;
+    }
+  }
+};
+
+static_assert(sizeof(BVH_Triangle) == 48, "Blamey!");
+
+#if 1 // Switching to embree
+class Tri_BVH {
+  AutoArray<float4> bvh_nodes{};
+  Tri_BVH()  = default;
+  ~Tri_BVH() = default;
+  static Tri_BVH *create() {
+    Tri_BVH *out = new Tri_BVH;
+    return out;
+  }
+#  ifdef VULKII_EMBREE
+  friend class Embree_BVH_Builder;
+#  endif
+  public:
+  BVH_Node load_node(u32 index) {
+    float4 *ptr = (float4 *)bvh_nodes.ptr + index * 2;
+    return *(BVH_Node *)ptr;
+  }
+  BVH_Triangle load_triangle(u32 index) {
+    float4 *     ptr          = bvh_nodes.ptr + index * 2;
+    u32          primitive_id = *(reinterpret_cast<u32 *>(&ptr->w));
+    float4       vertex       = bvh_nodes.ptr[primitive_id];
+    BVH_Triangle tri          = *((BVH_Triangle *)ptr);
+    tri.v0                    = vertex;
+    return tri;
+  }
+  void                       release() { delete this; }
+  template <typename F> void intersects_ray(float3 ro, float3 rd, F on_hit) {
+    u32 cur_node_id = 0;
+    // Closest hit on triangle
+    f32 min_t    = 1.0e10f;
+    u32 inter_id = BVH_Node::NULL_NODE;
+    while (cur_node_id != BVH_Node::NULL_NODE) {
+      BVH_Node cur_node = load_node(cur_node_id);
+      if (cur_node.primitive_id != BVH_Node::NULL_NODE) { // Leaf Node
+        BVH_Triangle tri{};
+        tri.e0 = cur_node.min;
+        tri.e1 = cur_node.max;
+        tri.v0 = bvh_nodes.ptr[cur_node.primitive_id].xyz;
+        if (tri.intersects_ray(ro, rd, min_t)) {
+          inter_id = cur_node_id;
+        }
+      } else {
+        float aabb_min_t = min_t;
+        if (cur_node.intersects_ray(ro, rf, aabb_min_t)) {
+          cur_node_id++;
+        } else {
+        }
+      }
+      cur_node_id = cur_node.next_on_miss;
+    }
+    return inter_id;
+  }
+};
+#endif
 
 struct GPU_Meshlet {
   u32 vertex_offset;
@@ -2237,12 +2161,12 @@ class GfxSurface {
 
 class GfxSufraceComponent : public Node::Component {
   Array<GfxSurface *> gfx_surfaces;
-  BVH<Tri> *          bvh = NULL;
+  Tri_BVH *          bvh = NULL;
 
   public:
   DECLARE_TYPE(GfxSufraceComponent, Component)
 
-  BVH<Tri> *getBVH() { return bvh; }
+  Tri_BVH *getBVH() { return bvh; }
   ~GfxSufraceComponent() override {}
   GfxSufraceComponent(Node *n) : Component(n) { gfx_surfaces.init(); }
   static GfxSufraceComponent *create(rd::IDevice *factory, Node *n) {
@@ -2256,25 +2180,25 @@ class GfxSufraceComponent : public Node::Component {
     return s;
   }
   void buildBVH() {
-    if (bvh) bvh->release();
-    bvh = new BVH<Tri>;
-    AutoArray<Tri> tri_pool;
-    MeshNode *     mn = node->dyn_cast<MeshNode>();
-    ito(mn->getNumSurfaces()) {
-      tri_pool.reserve(tri_pool.size + mn->getSurface(i)->mesh.num_indices / 3);
-      kto(mn->getSurface(i)->mesh.num_indices / 3) {
-        Triangle_Full ftri = mn->getSurface(i)->mesh.fetch_triangle(k);
-        Tri           t;
-        t.surface_id  = i;
-        t.triangle_id = k;
-        t.a           = node->transform(ftri.v0.position);
-        t.b           = node->transform(ftri.v1.position);
-        t.c           = node->transform(ftri.v2.position);
+    /* if (bvh) bvh->release();
+     bvh = new BVH<Tri>;
+     AutoArray<Tri> tri_pool;
+     MeshNode *     mn = node->dyn_cast<MeshNode>();
+     ito(mn->getNumSurfaces()) {
+       tri_pool.reserve(tri_pool.size + mn->getSurface(i)->mesh.num_indices / 3);
+       kto(mn->getSurface(i)->mesh.num_indices / 3) {
+         Triangle_Full ftri = mn->getSurface(i)->mesh.fetch_triangle(k);
+         Tri           t;
+         t.surface_id  = i;
+         t.triangle_id = k;
+         t.a           = node->transform(ftri.v0.position);
+         t.b           = node->transform(ftri.v1.position);
+         t.c           = node->transform(ftri.v2.position);
 
-        tri_pool.push(t);
-      }
-    }
-    bvh->init(&tri_pool[0], (u32)tri_pool.size);
+         tri_pool.push(t);
+       }
+     }
+     bvh->init(&tri_pool[0], (u32)tri_pool.size);*/
   }
   u32         getNumSurfaces() { return (u32)gfx_surfaces.size; }
   GfxSurface *getSurface(u32 i) { return gfx_surfaces[i]; }
@@ -2464,5 +2388,154 @@ struct Topo_Mesh {
     nonmanifold_edges.release();
   }
 };
+
+#ifdef VULKII_EMBREE
+
+// Based off
+// https://github.com/embree/embree/blob/master/tutorials/bvh_builder/bvh_builder_device.cpp
+// https://interplayoflight.wordpress.com/2020/07/21/using-embree-generated-bvh-trees-for-gpu-raytracing/
+class Embree_BVH_Builder {
+  RTCDevice device = NULL;
+  // RTCScene  scene       = NULL;
+  ~Embree_BVH_Builder() = default;
+  Embree_BVH_Builder()  = default;
+
+  struct Node {
+    AABB          aabb{};
+    virtual float sah() = 0;
+    virtual ~Node()     = 0;
+  };
+
+  struct InnerNode : public Node {
+
+    Node *children[2]{};
+
+    InnerNode() {}
+    ~InnerNode() override {
+      if (children[0]) delete children[0];
+      if (children[1]) delete children[1];
+    }
+    float sah() {
+      AABB &bounds0 = children[0]->aabb;
+      AABB &bounds1 = children[1]->aabb;
+      AABB  uni     = bounds0;
+      uni.unite(bounds1);
+      return 1.0f + (bounds0.area() * children[0]->sah() + bounds1.area() * children[1]->sah()) /
+                        uni.area();
+    }
+
+    static void *create(RTCThreadLocalAllocator alloc, unsigned int numChildren, void *userPtr) {
+      assert(numChildren == 2);
+      void *ptr = rtcThreadLocalAlloc(alloc, sizeof(InnerNode), 16);
+      return (void *)new (ptr) InnerNode;
+    }
+
+    static void setChildren(void *nodePtr, void **childPtr, unsigned int numChildren,
+                            void *userPtr) {
+      assert(numChildren == 2);
+      for (size_t i = 0; i < 2; i++) ((InnerNode *)nodePtr)->children[i] = (Node *)childPtr[i];
+    }
+
+    static void setBounds(void *nodePtr, const RTCBounds **bounds, unsigned int numChildren,
+                          void *userPtr) {
+      assert(numChildren == 2);
+      ((InnerNode *)nodePtr)->aabb = *(const AABB *)bounds[0];
+      ((InnerNode *)nodePtr)->aabb.unite(*(const AABB *)bounds[1]);
+    }
+  };
+  static void splitPrimitive(const RTCBuildPrimitive *prim, unsigned int dim, float pos,
+                             RTCBounds *lprim, RTCBounds *rprim, void *userPtr) {
+    assert(dim < 3);
+    assert(prim->geomID == 0);
+    *(RTCBuildPrimitive *)lprim = *(RTCBuildPrimitive *)prim;
+    *(RTCBuildPrimitive *)rprim = *(RTCBuildPrimitive *)prim;
+    (&lprim->upper_x)[dim]      = pos;
+    (&rprim->lower_x)[dim]      = pos;
+  }
+  struct LeafNode : public Node {
+    u32 id               = 0;
+    ~LeafNode() override = default;
+    float sah() { return 1.0f; }
+
+    LeafNode(unsigned id, const AABB &aabb) : id(id) { this->aabb = aabb; }
+
+    static void *create(RTCThreadLocalAllocator alloc, const RTCBuildPrimitive *prims,
+                        size_t numPrims, void *userPtr) {
+      assert(numPrims == 1);
+      void *ptr = rtcThreadLocalAlloc(alloc, sizeof(LeafNode), 16);
+      return (void *)new (ptr) LeafNode(prims->geomID, *(AABB *)prims);
+    }
+  };
+
+  public:
+  static Embree_BVH_Builder *create() {
+    Embree_BVH_Builder *out = new Embree_BVH_Builder;
+    out->device             = rtcNewDevice(NULL);
+    return out;
+  }
+  void release() {
+    rtcReleaseDevice(device);
+    delete this;
+  }
+  struct BVH_Result {
+    u32                 prim_id = 0;
+    Embree_BVH_Builder *builder = NULL;
+    RTCBVH              bvh     = NULL;
+    Node *              root    = NULL;
+    void                release() { rtcReleaseBVH(bvh); }
+  };
+  template <typename T> BVH_Result build(T *elems, size_t num_elems, u32 prim_id) {
+    constexpr size_t   extra_nodes = 1000;
+    size_t             num_nodes   = num_elems;
+    size_t             capacity    = num_elems + extra_nodes;
+    RTCBuildPrimitive *prims       = tl_alloc_typed<RTCBuildPrimitive>(capacity);
+    defer(tl_free(prims));
+    ito(num_elems) {
+      RTCBuildPrimitive prim{};
+      AABB              aabb = elems[i].get_aabb();
+      prim.lower_x           = aabb.min.x;
+      prim.lower_y           = aabb.min.y;
+      prim.lower_z           = aabb.min.z;
+      prim.upper_x           = aabb.max.x;
+      prim.upper_y           = aabb.max.y;
+      prim.upper_z           = aabb.max.z;
+      prim.geomID            = i;
+      prim.primID            = prim_id;
+      prims[i]               = prim;
+    }
+
+    BVH_Result out{};
+    out.bvh = rtcNewBVH(device);
+
+    RTCBuildArguments arguments      = rtcDefaultBuildArguments();
+    arguments.byteSize               = sizeof(arguments);
+    arguments.buildFlags             = RTC_BUILD_FLAG_NONE;
+    arguments.buildQuality           = RTC_BUILD_QUALITY_HIGH;
+    arguments.maxBranchingFactor     = 2;
+    arguments.maxDepth               = 1024;
+    arguments.sahBlockSize           = 1;
+    arguments.minLeafSize            = 1;
+    arguments.maxLeafSize            = 1;
+    arguments.traversalCost          = 1.0f;
+    arguments.intersectionCost       = 1.0f;
+    arguments.bvh                    = out.bvh;
+    arguments.primitives             = prims;
+    arguments.primitiveCount         = num_nodes;
+    arguments.primitiveArrayCapacity = capacity;
+    arguments.createNode             = InnerNode::create;
+    arguments.setNodeChildren        = InnerNode::setChildren;
+    arguments.setNodeBounds          = InnerNode::setBounds;
+    arguments.createLeaf             = LeafNode::create;
+    arguments.splitPrimitive         = splitPrimitive;
+    arguments.buildProgress          = nullptr;
+    arguments.userPtr                = nullptr;
+
+    out.root    = (Node *)rtcBuildBVH(&arguments);
+    out.builder = this;
+    out.prim_id = prim_id;
+    return out;
+  }
+};
+#endif
 
 #endif // SCENE

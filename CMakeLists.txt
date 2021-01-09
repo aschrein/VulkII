@@ -11,10 +11,27 @@ ENDIF()
 IF (NOT Vulkan_FOUND)
   message(FATAL_ERROR "Could not find Vulkan library!")
 ELSE()
-  message(STATUS ${Vulkan_LIBRARY})
+  message(STATUS "Found Vulkan at " ${Vulkan_LIBRARY})
   message(STATUS "$ENV{VULKAN_SDK}/include")
 ENDIF()
 add_subdirectory(3rdparty/meshoptimizer)
+IF (WIN32)
+    if(NOT DEFINED ${embree_DIR})
+        message("[WARNING] Using hardcoded G/soft/intel/embree for embree path")
+        set(embree_DIR "G:/soft/intel/embree")
+    ENDIF()
+ENDIF()
+FIND_PACKAGE(embree 3.0)
+IF (NOT embree_FOUND)
+  message(STATUS "Could not find embree library!")
+  set(EMBREE_LIBRARY )
+  set(EMBREE_INCLUDE_DIRS )
+ELSE()
+  message(STATUS "Found embree at " ${embree_DIR})
+  message(STATUS "${EMBREE_INCLUDE_DIRS}")
+  add_compile_definitions(VULKII_EMBREE)
+  set(EMBREE_LIBRARY embree)
+ENDIF()
 
 add_library(TracyClient STATIC 3rdparty/tracy/TracyClient.cpp)
 target_include_directories(TracyClient PRIVATE 3rdparty/tracy)
@@ -76,9 +93,8 @@ ENDIF()
 add_compile_definitions(GLM_FORCE_SWIZZLE)
 
 function(ADD_EXAMPLE example_name example_file)
-
     file(GLOB INCLUDES_SRC
-    include/*.h
+        include/*.h
     )
     add_executable(${example_name}
     ${example_file}
@@ -110,11 +126,13 @@ function(ADD_EXAMPLE example_name example_file)
       3rdparty/imgui
       include
       ${INCLUDES}
+      ${EMBREE_INCLUDE_DIRS}
       "$ENV{VULKAN_SDK}/include"
       ${CMAKE_SOURCE_DIR}
       ${CMAKE_BINARY_DIR}
     )
     target_link_libraries(${example_name}
+    ${EMBREE_LIBRARY}
     TracyClient
     ${Vulkan_LIBRARY}
     meshoptimizer

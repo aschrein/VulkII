@@ -1,9 +1,23 @@
+# Dependencies
+
+1) [ISPC](https://github.com/ispc/ispc/releases) in PATH.
+2) [embree](https://github.com/embree/embree/releases) in embree_DIR.
+
+# Build
+
+Tested on Windows 10 and Ubuntu 20.
+
+```sh
+mkdir build && cd build
+cmake ../
+```
+
 ## About
 A toy rendering framework for experementation and fast prototyping. As of now it has Vulkan and Dx12 backends.
 
 Example:
 
-```c++
+```C++
 rd::IDevice *dev = rd::create_dx12(NULL);
 defer(dev->release());
 // Needed to swap command allocators and other per frame contexts.

@@ -393,17 +393,21 @@ class DX12Device : public rd::IDevice {
     bool                    enabled = false;
     ComPtr<IDXGISwapChain4> sc;
     ID                      images[NUM_BACK_BUFFERS]{};
-    ComPtr<ID3D12Fence>     fence;
     UINT64                  last_fence_signaled_value = 0;
-    HANDLE                  fence_event               = 0;
-    HANDLE                  sc_wait_obj               = 0;
-    u32                     width                     = 0;
-    u32                     height                    = 0;
+
+    HANDLE sc_wait_obj = 0;
+    u32    width       = 0;
+    u32    height      = 0;
   } sc{};
   GPU_Desc_Heap *dsv_desc_heap     = NULL;
   GPU_Desc_Heap *rtv_desc_heap     = NULL;
   GPU_Desc_Heap *common_desc_heap  = NULL;
   GPU_Desc_Heap *sampler_desc_heap = NULL;
+
+  ComPtr<ID3D12Fence> gfx_fence;
+  HANDLE              gfx_fence_event = 0;
+  ComPtr<ID3D12Fence> compute_fence;
+  ComPtr<ID3D12Fence> copy_fence;
 
   struct Frame_Context {
     UINT64                         fence_value = (u64)-1;
@@ -485,11 +489,16 @@ class DX12Device : public rd::IDevice {
   void wait_for_next_frame() {
     // First use
     if (frame_contexts[cur_ctx_id].fence_value == (u64)-1) return;
-    u64 cur_value = sc.fence->GetCompletedValue();
-    if (cur_value > frame_contexts[cur_ctx_id].fence_value) //
+  // frame_contexts[cur_ctx_id].gfx_fence->Signal(0);
+  // u64 cur_value = sc.fence->GetCompletedValue();
+  restart:
+    if (gfx_fence->GetCompletedValue() > frame_contexts[cur_ctx_id].fence_value &&
+        compute_fence->GetCompletedValue() > frame_contexts[cur_ctx_id].fence_value &&
+        copy_fence->GetCompletedValue() > frame_contexts[cur_ctx_id].fence_value) //
       return;
-    sc.fence->SetEventOnCompletion(frame_contexts[cur_ctx_id].fence_value, sc.fence_event);
-    WaitForSingleObject(sc.fence_event, INFINITE);
+    gfx_fence->SetEventOnCompletion(frame_contexts[cur_ctx_id].fence_value, gfx_fence_event);
+    WaitForSingleObject(gfx_fence_event, INFINITE);
+    goto restart;
   }
 
   public:
@@ -593,10 +602,12 @@ class DX12Device : public rd::IDevice {
     sampler_desc_heap = new GPU_Desc_Heap(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 2048);
     common_desc_heap =
         new GPU_Desc_Heap(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1 << 19);
-    DX_ASSERT_OK(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&sc.fence)));
+    DX_ASSERT_OK(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gfx_fence)));
+    DX_ASSERT_OK(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&compute_fence)));
+    DX_ASSERT_OK(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&copy_fence)));
 
-    sc.fence_event = CreateEvent(NULL, FALSE, FALSE, NULL);
-    ASSERT_DEBUG(sc.fence_event);
+    gfx_fence_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+    ASSERT_DEBUG(gfx_fence_event);
     {
       D3D12_COMMAND_QUEUE_DESC desc = {};
       desc.Type                     = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -1016,6 +1027,16 @@ class DX12Device : public rd::IDevice {
       WaitForSingleObject(event, INFINITE);
     }
   }
+  void wait_for_event(Resource_ID id) override {
+    EventWrapper *ew = NULL;
+    {
+      SCOPED_LOCK;
+      ew = event_table.load(id.id);
+
+      if (ew->fence->GetCompletedValue() == 1) return;
+    }
+    WaitForSingleObject(ew->event, INFINITE);
+  }
   bool get_event_state(Resource_ID id) override {
     SCOPED_LOCK;
     EventWrapper *ew = event_table.load(id.id);
@@ -1084,9 +1105,9 @@ class DX12Device : public rd::IDevice {
     deferred_desc_range_release_iteration();
     deferred_resource_release_iteration();
     // fprintf(stdout, "%i\n", cur_ctx_id);
-    ito(MAX_THREADS) frame_contexts[cur_ctx_id].gfx_cmd_allocs[i]->Reset();
-    ito(MAX_THREADS) frame_contexts[cur_ctx_id].compute_cmd_allocs[i]->Reset();
-    ito(MAX_THREADS) frame_contexts[cur_ctx_id].copy_cmd_allocs[i]->Reset();
+    ito(MAX_THREADS) DX_ASSERT_OK(frame_contexts[cur_ctx_id].gfx_cmd_allocs[i]->Reset());
+    ito(MAX_THREADS) DX_ASSERT_OK(frame_contexts[cur_ctx_id].compute_cmd_allocs[i]->Reset());
+    ito(MAX_THREADS) DX_ASSERT_OK(frame_contexts[cur_ctx_id].copy_cmd_allocs[i]->Reset());
     // Prepare the swap chain image for consumption.
     if (sc.enabled) {
       // Switch to the new swap chain image
@@ -1133,7 +1154,9 @@ class DX12Device : public rd::IDevice {
     u64 fence_value                        = sc.last_fence_signaled_value + 1;
     frame_contexts[cur_ctx_id].fence_value = fence_value;
     sc.last_fence_signaled_value           = fence_value;
-    gfx_cmd_queue->Signal(sc.fence.Get(), frame_contexts[cur_ctx_id].fence_value);
+    gfx_cmd_queue->Signal(gfx_fence.Get(), frame_contexts[cur_ctx_id].fence_value);
+    compute_cmd_queue->Signal(compute_fence.Get(), frame_contexts[cur_ctx_id].fence_value);
+    copy_cmd_queue->Signal(copy_fence.Get(), frame_contexts[cur_ctx_id].fence_value);
     cur_ctx_id = (cur_ctx_id + 1) % NUM_BACK_BUFFERS;
   }
 };

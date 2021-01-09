@@ -130,6 +130,32 @@ using f64 = double;
 #    define snprintf _snprintf
 #  endif //(defined(_MSC_VER) && !defined(snprintf))
 
+inline static void nop() {
+#  if defined(_WIN32)
+  __noop();
+#  else
+  __asm__ __volatile__("nop");
+#  endif
+}
+inline static uint64_t get_thread_hash() {
+  auto id = std::this_thread::get_id();
+  return std::hash<std::thread::id>()(id);
+}
+struct Spin_Lock {
+  std::atomic<u32> rw_flag;
+  void             lock() {
+    ZoneScopedS(16);
+    u32 expected = 0;
+    while (!rw_flag.compare_exchange_strong(expected, 1)) {
+      expected = 0;
+      while (rw_flag.load() != 0) {
+        ito(16) nop(); // yield
+      }
+    }
+  }
+  void unlock() { rw_flag.store(0); }
+};
+
 #  ifdef UTILS_RENDERDOC
 
 #    include "3rdparty/renderdoc_app.h"
@@ -501,7 +527,8 @@ template <typename T = u8> using Temporary_Storage = Pool<T>;
 
 /** Allocates 'size' bytes using thread local allocator
  */
-void *tl_alloc(size_t size);
+void *                   tl_alloc(size_t size);
+template <typename T> T *tl_alloc_typed(size_t size) { return (T *)tl_alloc(size * sizeof(T)); }
 /** Reallocates deleting `ptr` as a result
  */
 void *tl_realloc(void *ptr, size_t oldsize, size_t newsize);
