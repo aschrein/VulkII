@@ -6,8 +6,8 @@ A toy rendering framework for experimentation and fast prototyping. Code is not 
 1) API is just a convinience layer on top of Vulkan or DX12 with the help of the HLSL compiler.
 2) Async compute and copy queues with basic synchronization primitives exposed.
 
-![alt text](readme/shot5.PNG)
-![alt text](readme/shot4.PNG)
+![alt text](readme/shot5.png)
+![alt text](readme/shot4.png)
 
 
 # TODO
