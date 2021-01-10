@@ -81,7 +81,7 @@ D3D12_PRIMITIVE_TOPOLOGY to_dx(rd::Primitive op) {
 }
 D3D12_BLEND to_dx(rd::Blend_Factor factor) {
   switch (factor) {
-  // clang-format off
+    // clang-format off
     case rd::Blend_Factor::ZERO                     : return D3D12_BLEND_ZERO;
     case rd::Blend_Factor::ONE                      : return D3D12_BLEND_ONE;
     case rd::Blend_Factor::SRC_COLOR                : return D3D12_BLEND_SRC_COLOR;
@@ -1311,12 +1311,16 @@ class DX12Binding_Table : public rd::IBinding_Table {
       desc.Flags                      = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
       DX_ASSERT_OK(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&out->cpu_common_heap)));
     }
-    if (signature->num_desc_common)
+    if (signature->num_desc_common) {
       out->common_heap_offset =
           dev_ctx->get_common_desc_heap()->allocate(signature->num_desc_common);
-    if (signature->num_desc_samplers)
+      ASSERT_DEBUG(out->common_heap_offset != -1);
+    }
+    if (signature->num_desc_samplers) {
       out->sampler_heap_offset =
           dev_ctx->get_sampler_desc_heap()->allocate(signature->num_desc_samplers);
+      ASSERT_DEBUG(out->sampler_heap_offset != -1);
+    }
     return out;
   }
   void bind(ComPtr<ID3D12GraphicsCommandList> cmd, rd::Pass_t pass_type) {

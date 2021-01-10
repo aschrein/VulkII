@@ -633,7 +633,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
       }
       factory->end_render_pass(ctx);
       factory->end_frame();
-      //factory->wait_idle();
+      // factory->wait_idle();
       frame_id = (frame_id + 1) % NUM_FRAMES;
     }
     on_release();
@@ -1049,12 +1049,12 @@ struct Raw_Mesh_3p16i_Wrapper {
   u32         num_indices;
   u32         num_vertices;
 
-  void release(rd::IDevice *rm) {
-    rm->release_resource(vertex_buffer);
-    rm->release_resource(index_buffer);
+  void release(rd::IDevice *dev) {
+    dev->release_resource(vertex_buffer);
+    dev->release_resource(index_buffer);
     MEMZERO(*this);
   }
-  void init(rd::IDevice *rm, float3 const *positions, u16 const *indices, u32 num_indices,
+  void init(rd::IDevice *dev, float3 const *positions, u16 const *indices, u32 num_indices,
             u32 num_vertices) {
     this->num_indices  = num_indices;
     this->num_vertices = num_vertices;
@@ -1064,8 +1064,8 @@ struct Raw_Mesh_3p16i_Wrapper {
       buf_info.memory_type = rd::Memory_Type::GPU_LOCAL;
       buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
       buf_info.size        = u32(sizeof(float3) * num_vertices);
-      vertex_buffer        = rm->create_buffer(buf_info);
-      init_buffer(rm, vertex_buffer, &positions[0], sizeof(float3) * num_vertices);
+      vertex_buffer        = dev->create_buffer(buf_info);
+      init_buffer(dev, vertex_buffer, &positions[0], sizeof(float3) * num_vertices);
     }
     {
       rd::Buffer_Create_Info buf_info;
@@ -1073,11 +1073,11 @@ struct Raw_Mesh_3p16i_Wrapper {
       buf_info.memory_type = rd::Memory_Type::GPU_LOCAL;
       buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER;
       buf_info.size        = u32(sizeof(u16) * num_indices);
-      index_buffer         = rm->create_buffer(buf_info);
-      init_buffer(rm, index_buffer, &indices[0], sizeof(u16) * num_indices);
+      index_buffer         = dev->create_buffer(buf_info);
+      init_buffer(dev, index_buffer, &indices[0], sizeof(u16) * num_indices);
     }
   }
-  void init(rd::IDevice *rm, Raw_Mesh_3p16i const &model) {
+  void init(rd::IDevice *dev, Raw_Mesh_3p16i const &model) {
     num_indices  = model.indices.size * 3;
     num_vertices = model.positions.size;
     {
@@ -1086,8 +1086,8 @@ struct Raw_Mesh_3p16i_Wrapper {
       buf_info.memory_type = rd::Memory_Type::GPU_LOCAL;
       buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
       buf_info.size        = u32(sizeof(float3) * model.positions.size);
-      vertex_buffer        = rm->create_buffer(buf_info);
-      init_buffer(rm, vertex_buffer, &model.positions[0], sizeof(float3) * model.positions.size);
+      vertex_buffer        = dev->create_buffer(buf_info);
+      init_buffer(dev, vertex_buffer, &model.positions[0], sizeof(float3) * model.positions.size);
     }
     {
       rd::Buffer_Create_Info buf_info;
@@ -1095,8 +1095,8 @@ struct Raw_Mesh_3p16i_Wrapper {
       buf_info.memory_type = rd::Memory_Type::GPU_LOCAL;
       buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER;
       buf_info.size        = u32(sizeof(u16_face) * model.indices.size);
-      index_buffer         = rm->create_buffer(buf_info);
-      init_buffer(rm, index_buffer, &model.indices[0], sizeof(u16_face) * model.indices.size);
+      index_buffer         = dev->create_buffer(buf_info);
+      init_buffer(dev, index_buffer, &model.indices[0], sizeof(u16_face) * model.indices.size);
     }
   }
   void draw(rd::ICtx *ctx, u32 instances = 1, u32 first_instance = 0) {
@@ -1106,7 +1106,7 @@ struct Raw_Mesh_3p16i_Wrapper {
   }
 };
 #endif
-#if 0
+#if 1
 class Gizmo_Layer;
 
 class Gizmo_Layer {
@@ -1166,79 +1166,86 @@ protected:
   };
 
   private:
-  Array<Gizmo_Instance_Data_CPU, 0x1000> cylinder_draw_cmds;
-  Array<Gizmo_Instance_Data_CPU, 0x1000> sphere_draw_cmds;
-  Array<Gizmo_Instance_Data_CPU, 0x1000> cone_draw_cmds;
-  Array<Gizmo_Line_Vertex, 0x1000>       line_segments;
-  Pool<char>                             char_storage = {};
+  AutoArray<Gizmo_Instance_Data_CPU, 0x1000> cylinder_draw_cmds{};
+  AutoArray<Gizmo_Instance_Data_CPU, 0x1000> sphere_draw_cmds{};
+  AutoArray<Gizmo_Instance_Data_CPU, 0x1000> cone_draw_cmds{};
+  AutoArray<Gizmo_Line_Vertex, 0x1000>       line_segments{};
+  Pool<char>                                 char_storage{};
   struct _String2D {
     char *   c_str;
     uint32_t len;
     float    x, y, z;
     float3   color;
   };
-  Array<_String2D, 0x1000> strings = {};
+  AutoArray<_String2D, 0x1000> strings{};
 
   Raw_Mesh_3p16i_Wrapper icosahedron_wrapper = {};
   Raw_Mesh_3p16i_Wrapper cylinder_wrapper    = {};
   Raw_Mesh_3p16i_Wrapper cone_wrapper        = {};
   Raw_Mesh_3p16i_Wrapper glyph_wrapper       = {};
 
-  Resource_ID gizmo_vs;
-  Resource_ID gizmo_ps;
-  Resource_ID gizmo_lines_vs;
-  Resource_ID gizmo_lines_ps;
-  Resource_ID font_ps      = {};
-  Resource_ID font_vs      = {};
-  Resource_ID font_sampler = {};
-  Resource_ID font_texture = {};
+#  define RESOURCE_LIST                                                                            \
+    RESOURCE(signature);                                                                           \
+    RESOURCE(gizmo_pso);                                                                           \
+    RESOURCE(gizmo_lines_pso);                                                                     \
+    RESOURCE(gizmo_font_pso);                                                                      \
+    RESOURCE(font_sampler);                                                                        \
+    RESOURCE(font_texture);
 
-  rd::IDevice *rm = NULL;
+#  define RESOURCE(name) Resource_ID name{};
+  RESOURCE_LIST
+#  undef RESOURCE
+
+  void release_resources() {
+#  define RESOURCE(name) dev->release_resource(name);
+    RESOURCE_LIST
+#  undef RESOURCE
+  }
+#  undef RESOURCE_LIST
+
+  rd::IDevice *dev = NULL;
   Camera       g_camera;
   bool         update_mouse_ray = true;
-  Ray          mouse_ray;
-  float2       mouse_cursor;
-  float2       resolution;
+  Ray          mouse_ray{};
+  float2       mouse_cursor{};
+  float2       resolution{};
   enum Mode {
     NONE = 0,
     CAMERA_DRAG,
     GIZMO_DRAG,
   };
   Mode               mode = NONE;
-  AutoArray<Gizmo *> gizmos;
-  AutoArray<Gizmo *> selected_gizmos;
+  AutoArray<Gizmo *> gizmos{};
+  AutoArray<Gizmo *> selected_gizmos{};
   Gizmo *            hovered_gizmo = NULL;
   bool               mb[3]         = {};
   bool               last_mb[3]    = {};
   int2               mpos          = {};
   int2               last_mpos     = {};
-  Timer              timer;
+  Timer              timer{};
   bool               keys[0x100]      = {};
   bool               last_keys[0x100] = {};
-
-  void init(rd::IDevice *rm) {
-    this->rm = rm;
+  struct PushConstants {
+    float4x4 viewproj;
+  };
+  void init(rd::IDevice *dev, Resource_ID pass) {
+    this->dev = dev;
     timer.init();
     g_camera.init();
-    cylinder_draw_cmds.init();
     char_storage = Pool<char>::create(1 * (1 << 20));
-    sphere_draw_cmds.init();
-    cone_draw_cmds.init();
-    line_segments.init();
-    strings.init();
     {
       auto mesh = subdivide_cone(8, 1.0f, 1.0f);
-      cone_wrapper.init(rm, mesh);
+      cone_wrapper.init(dev, mesh);
       mesh.release();
     }
     {
       auto mesh = subdivide_icosahedron(2);
-      icosahedron_wrapper.init(rm, mesh);
+      icosahedron_wrapper.init(dev, mesh);
       mesh.release();
     }
     {
       auto mesh = subdivide_cylinder(8, 1.0f, 1.0f);
-      cylinder_wrapper.init(rm, mesh);
+      cylinder_wrapper.init(dev, mesh);
       mesh.release();
     }
     {
@@ -1251,14 +1258,23 @@ protected:
           0.0f, 1.0f, 0.0f, //
       };
       u16 indices[] = {0, 1, 2, 3, 4, 5, 6};
-      glyph_wrapper.init(rm, (float3 *)pos, indices, 6, 6);
+      glyph_wrapper.init(dev, (float3 *)pos, indices, 6, 6);
     }
+    signature = [dev] {
+      rd::Binding_Space_Create_Info set_info{};
+      set_info.bindings.push({rd::Binding_t::TEXTURE, 1});
+      set_info.bindings.push({rd::Binding_t::SAMPLER, 1});
+      rd::Binding_Table_Create_Info table_info{};
+      table_info.spaces.push(set_info);
+      table_info.push_constants_size = sizeof(PushConstants);
+      return dev->create_signature(table_info);
+    }();
     static string_ref            shader    = stref_s(R"(
 struct PushConstants
 {
   float4x4 viewproj;
 };
-[[vk::push_constant]] ConstantBuffer<PushConstants> pc : register(b0, space0);
+[[vk::push_constant]] ConstantBuffer<PushConstants> pc : DX12_PUSH_CONSTANTS_REGISTER;
 
 struct PSInput {
   [[vk::location(0)]] float4 pos            : SV_POSITION;
@@ -1306,14 +1322,12 @@ float4 main(in PSInput input) : SV_TARGET0 {
         {stref_s("VERTEX"), {}},
         {stref_s("PIXEL"), {}},
     };
-    gizmo_vs                       = rm->create_shader(rd::Stage_t::VERTEX, shader, &defines[0], 1);
-    gizmo_ps                       = rm->create_shader(rd::Stage_t::PIXEL, shader, &defines[1], 1);
     static string_ref shader_lines = stref_s(R"(
 struct PushConstants
 {
   float4x4 viewproj;
 };
-[[vk::push_constant]] ConstantBuffer<PushConstants> pc : register(b0, space0);
+[[vk::push_constant]] ConstantBuffer<PushConstants> pc : DX12_PUSH_CONSTANTS_REGISTER;
 
 struct PSInput {
   [[vk::location(0)]] float4 pos            : SV_POSITION;
@@ -1324,7 +1338,7 @@ struct PSInput {
 
 struct VSInput {
   [[vk::location(0)]] float3 in_position    : POSITION;
-  [[vk::location(1)]] float3 in_color       : TEXCOORD4;
+  [[vk::location(1)]] float3 in_color       : TEXCOORD0;
 };
 
 PSInput main(in VSInput input) {
@@ -1346,8 +1360,102 @@ float4 main(in PSInput input) : SV_TARGET0 {
 }
 #endif
 )");
-    gizmo_lines_vs = rm->create_shader(rd::Stage_t::VERTEX, shader_lines, &defines[0], 1);
-    gizmo_lines_ps = rm->create_shader(rd::Stage_t::PIXEL, shader_lines, &defines[1], 1);
+    gizmo_pso                      = [&] {
+      Resource_ID gizmo_vs = dev->create_shader(rd::Stage_t::VERTEX, shader, &defines[0], 1);
+      Resource_ID gizmo_ps = dev->create_shader(rd::Stage_t::PIXEL, shader, &defines[1], 1);
+      dev->release_resource(gizmo_vs);
+      dev->release_resource(gizmo_ps);
+      rd::Graphics_Pipeline_State gfx_state{};
+      setup_default_state(gfx_state);
+      rd::DS_State ds_state{};
+      rd::RS_State rs_state;
+      MEMZERO(rs_state);
+      rs_state.polygon_mode = rd::Polygon_Mode::FILL;
+      rs_state.front_face   = rd::Front_Face::CW;
+      rs_state.cull_mode    = rd::Cull_Mode::NONE;
+      gfx_state.RS_set_state(rs_state);
+      ds_state.cmp_op             = rd::Cmp::GE;
+      ds_state.enable_depth_test  = true;
+      ds_state.enable_depth_write = true;
+      gfx_state.DS_set_state(ds_state);
+      rd::Blend_State bs{};
+      bs.enabled = false;
+      bs.color_write_mask =
+          (u32)rd::Color_Component_Bit::R_BIT | (u32)rd::Color_Component_Bit::G_BIT |
+          (u32)rd::Color_Component_Bit::B_BIT | (u32)rd::Color_Component_Bit::A_BIT;
+      gfx_state.OM_set_blend_state(0, bs);
+      gfx_state.VS_set_shader(gizmo_vs);
+      gfx_state.PS_set_shader(gizmo_ps);
+      rd::Attribute_Info info;
+      MEMZERO(info);
+      info.binding  = 0;
+      info.format   = rd::Format::RGB32_FLOAT;
+      info.location = 0;
+      info.offset   = 0;
+      info.type     = rd::Attriute_t::POSITION;
+      gfx_state.IA_set_attribute(info);
+      ito(5) {
+        MEMZERO(info);
+        info.binding  = 1;
+        info.format   = rd::Format::RGBA32_FLOAT;
+        info.location = 1 + i;
+        info.offset   = 16 * i;
+        info.type     = (rd::Attriute_t)((u32)rd::Attriute_t::TEXCOORD0 + i);
+        gfx_state.IA_set_attribute(info);
+      }
+      gfx_state.IA_set_vertex_binding(0, sizeof(float3), rd::Input_Rate::VERTEX);
+      gfx_state.IA_set_vertex_binding(1, sizeof(Gizmo_Instance_Data_CPU), rd::Input_Rate::INSTANCE);
+      gfx_state.IA_set_topology(rd::Primitive::TRIANGLE_LIST);
+      return dev->create_graphics_pso(signature, pass, gfx_state);
+    }();
+
+    gizmo_lines_pso = [&] {
+      Resource_ID gizmo_lines_vs =
+          dev->create_shader(rd::Stage_t::VERTEX, shader_lines, &defines[0], 1);
+      Resource_ID gizmo_lines_ps =
+          dev->create_shader(rd::Stage_t::PIXEL, shader_lines, &defines[1], 1);
+      dev->release_resource(gizmo_lines_vs);
+      dev->release_resource(gizmo_lines_ps);
+      rd::Graphics_Pipeline_State gfx_state{};
+      setup_default_state(gfx_state);
+      rd::DS_State ds_state{};
+      rd::RS_State rs_state;
+      MEMZERO(rs_state);
+      rs_state.polygon_mode = rd::Polygon_Mode::FILL;
+      rs_state.front_face   = rd::Front_Face::CW;
+      rs_state.cull_mode    = rd::Cull_Mode::NONE;
+      gfx_state.RS_set_state(rs_state);
+      ds_state.cmp_op             = rd::Cmp::GE;
+      ds_state.enable_depth_test  = true;
+      ds_state.enable_depth_write = true;
+      gfx_state.DS_set_state(ds_state);
+      rd::Blend_State bs{};
+      bs.enabled = false;
+      bs.color_write_mask =
+          (u32)rd::Color_Component_Bit::R_BIT | (u32)rd::Color_Component_Bit::G_BIT |
+          (u32)rd::Color_Component_Bit::B_BIT | (u32)rd::Color_Component_Bit::A_BIT;
+      gfx_state.OM_set_blend_state(0, bs);
+      gfx_state.VS_set_shader(gizmo_lines_vs);
+      gfx_state.PS_set_shader(gizmo_lines_ps);
+      rd::Attribute_Info info;
+      MEMZERO(info);
+      info.binding  = 0;
+      info.format   = rd::Format::RGB32_FLOAT;
+      info.location = 0;
+      info.offset   = 0;
+      info.type     = rd::Attriute_t::POSITION;
+      gfx_state.IA_set_attribute(info);
+      MEMZERO(info);
+      info.binding  = 0;
+      info.format   = rd::Format::RGB32_FLOAT;
+      info.location = 1;
+      info.offset   = 12;
+      info.type     = rd::Attriute_t::TEXCOORD0;
+      gfx_state.IA_set_attribute(info);
+      gfx_state.IA_set_vertex_binding(0, sizeof(Gizmo_Line_Vertex), rd::Input_Rate::VERTEX);
+      gfx_state.IA_set_topology(rd::Primitive::LINE_LIST);
+      return dev->create_graphics_pso(signature, pass, gfx_state);
+    }();
     {
       rd::Image_Create_Info info;
       MEMZERO(info);
@@ -1359,30 +1467,31 @@ float4 main(in PSInput input) : SV_TARGET0 {
       info.usage_bits =
           (u32)rd::Image_Usage_Bits::USAGE_SAMPLED | (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
       info.format  = rd::Format::R8_UNORM;
-      font_texture = rm->create_image(info);
+      font_texture = dev->create_image(info);
 
       Resource_ID staging_buf{};
-      defer(rm->release_resource(staging_buf));
+      defer(dev->release_resource(staging_buf));
       // RenderDoc_CTX::get().start();
       {
         rd::Buffer_Create_Info buf_info;
         MEMZERO(buf_info);
         buf_info.memory_type = rd::Memory_Type::CPU_WRITE_GPU_READ;
         buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
-        buf_info.size        = simplefont_bitmap_width * simplefont_bitmap_height;
-        staging_buf          = rm->create_buffer(buf_info);
-        u8 *ptr              = (u8 *)rm->map_buffer(staging_buf);
-        // memcpy(ptr, &simplefont_bitmap[0], buf_info.size);
+        u32 pitch            = rd::IDevice::align_up(simplefont_bitmap_width,
+                                          rd::IDevice::TEXTURE_DATA_PITCH_ALIGNMENT);
+        buf_info.size        = pitch * simplefont_bitmap_height;
+        staging_buf          = dev->create_buffer(buf_info);
+        u8 *ptr              = (u8 *)dev->map_buffer(staging_buf);
         yto(simplefont_bitmap_height) {
           xto(simplefont_bitmap_width) {
-            ptr[simplefont_bitmap_width * y + x] = simplefont_bitmap[y][x] == ' ' ? 0 : 0xffu;
+            ptr[pitch * y + x] = simplefont_bitmap[y][x] == ' ' ? 0 : 0xffu;
           }
         }
-        rm->unmap_buffer(staging_buf);
-        auto ctx = rm->start_compute_pass();
+        dev->unmap_buffer(staging_buf);
+        auto ctx = dev->start_compute_pass();
         ctx->image_barrier(font_texture, rd::Image_Access::TRANSFER_DST);
-        ctx->copy_buffer_to_image(staging_buf, 0, font_texture, rd::Image_Copy::top_level());
-        rm->end_compute_pass(ctx);
+        ctx->copy_buffer_to_image(staging_buf, 0, font_texture, rd::Image_Copy::top_level(pitch));
+        dev->end_compute_pass(ctx);
       }
       // RenderDoc_CTX::get().end();
     }
@@ -1393,7 +1502,7 @@ struct PushConstants
   float2 glyph_size; 
   float2 viewport_size;
 };
-[[vk::push_constant]] ConstantBuffer<PushConstants> pc : register(b0, space0);
+[[vk::push_constant]] ConstantBuffer<PushConstants> pc : DX12_PUSH_CONSTANTS_REGISTER;
 
 struct PSInput {
   [[vk::location(0)]] float4 pos   : SV_POSITION;
@@ -1426,7 +1535,7 @@ PSInput main(in VSInput input) {
 #endif
 #ifdef PIXEL
 [[vk::binding(0, 0)]] Texture2D<float4>   font_texture          : register(t0, space0);
-[[vk::binding(1, 0)]] SamplerState        my_sampler            : register(s2, space0);
+[[vk::binding(1, 0)]] SamplerState        my_sampler            : register(s1, space0);
 
 float4 main(in PSInput input) : SV_TARGET0 {
   if (font_texture.Sample(my_sampler, input.uv).x < 0.5f)
@@ -1436,8 +1545,67 @@ float4 main(in PSInput input) : SV_TARGET0 {
 }
 #endif
 )";
-    font_vs = rm->create_shader(rd::Stage_t::VERTEX, stref_s(font_shader), &defines[0], 1);
-    font_ps = rm->create_shader(rd::Stage_t::PIXEL, stref_s(font_shader), &defines[1], 1);
+    gizmo_font_pso                 = [&] {
+      Resource_ID font_vs =
+          dev->create_shader(rd::Stage_t::VERTEX, stref_s(font_shader), &defines[0], 1);
+      Resource_ID font_ps =
+          dev->create_shader(rd::Stage_t::PIXEL, stref_s(font_shader), &defines[1], 1);
+      dev->release_resource(font_vs);
+      dev->release_resource(font_ps);
+      rd::Graphics_Pipeline_State gfx_state{};
+      setup_default_state(gfx_state);
+      rd::DS_State ds_state{};
+      rd::RS_State rs_state;
+      MEMZERO(rs_state);
+      rs_state.polygon_mode = rd::Polygon_Mode::FILL;
+      rs_state.front_face   = rd::Front_Face::CW;
+      rs_state.cull_mode    = rd::Cull_Mode::NONE;
+      gfx_state.RS_set_state(rs_state);
+      ds_state.cmp_op             = rd::Cmp::GE;
+      ds_state.enable_depth_test  = true;
+      ds_state.enable_depth_write = true;
+      gfx_state.DS_set_state(ds_state);
+      rd::Blend_State bs{};
+      bs.enabled = false;
+      bs.color_write_mask =
+          (u32)rd::Color_Component_Bit::R_BIT | (u32)rd::Color_Component_Bit::G_BIT |
+          (u32)rd::Color_Component_Bit::B_BIT | (u32)rd::Color_Component_Bit::A_BIT;
+      gfx_state.OM_set_blend_state(0, bs);
+      gfx_state.VS_set_shader(font_vs);
+      gfx_state.PS_set_shader(font_ps);
+      rd::Attribute_Info info;
+      MEMZERO(info);
+      info.binding  = 0;
+      info.format   = rd::Format::RGB32_FLOAT;
+      info.location = 0;
+      info.offset   = 0;
+      info.type     = rd::Attriute_t::POSITION;
+      gfx_state.IA_set_attribute(info);
+      MEMZERO(info);
+      info.binding  = 1;
+      info.format   = rd::Format::RGB32_FLOAT;
+      info.location = 1;
+      info.offset   = 0;
+      info.type     = rd::Attriute_t::TEXCOORD0;
+      gfx_state.IA_set_attribute(info);
+      MEMZERO(info);
+      info.binding  = 1;
+      info.format   = rd::Format::RG32_FLOAT;
+      info.location = 2;
+      info.offset   = 12;
+      info.type     = rd::Attriute_t::TEXCOORD1;
+      gfx_state.IA_set_attribute(info);
+      MEMZERO(info);
+      info.binding  = 1;
+      info.format   = rd::Format::RGB32_FLOAT;
+      info.location = 3;
+      info.offset   = 20;
+      info.type     = rd::Attriute_t::TEXCOORD2;
+      gfx_state.IA_set_attribute(info);
+      gfx_state.IA_set_vertex_binding(0, sizeof(Gizmo_Line_Vertex), rd::Input_Rate::VERTEX);
+      gfx_state.IA_set_topology(rd::Primitive::LINE_LIST);
+      return dev->create_graphics_pso(signature, pass, gfx_state);
+    }();
 
     rd::Sampler_Create_Info info;
     MEMZERO(info);
@@ -1449,7 +1617,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
     info.mip_mode       = rd::Filter::NEAREST;
     info.anisotropy     = false;
     info.max_anisotropy = 16.0f;
-    font_sampler        = rm->create_sampler(info);
+    font_sampler        = dev->create_sampler(info);
   }
   Gizmo *pick(Ray const &ray) {
     float  t       = 1.0e6;
@@ -1468,9 +1636,9 @@ float4 main(in PSInput input) : SV_TARGET0 {
   }
 
   public:
-  static Gizmo_Layer *create(rd::IDevice *rm) {
+  static Gizmo_Layer *create(rd::IDevice *dev, Resource_ID pass) {
     Gizmo_Layer *gl = new Gizmo_Layer;
-    gl->init(rm);
+    gl->init(dev, pass);
     return gl;
   }
   void remove_gizmo(Gizmo *g) {
@@ -1506,13 +1674,13 @@ float4 main(in PSInput input) : SV_TARGET0 {
     cone_draw_cmds.release();
     sphere_draw_cmds.release();
     line_segments.release();
-    cylinder_wrapper.release(rm);
-    icosahedron_wrapper.release(rm);
-    cylinder_wrapper.release(rm);
-    rm->release_resource(gizmo_ps);
-    rm->release_resource(gizmo_vs);
+    cylinder_wrapper.release(dev);
+    icosahedron_wrapper.release(dev);
+    cylinder_wrapper.release(dev);
+    release_resources();
     delete this;
   }
+#  undef RESOURCE_LIST
   Camera &get_camera() { return g_camera; }
   void    draw_cylinder(float3 start, float3 end, float radius, float3 color) {
     float3 dr      = end - start;
@@ -1777,7 +1945,15 @@ float4 main(in PSInput input) : SV_TARGET0 {
     sphere_draw_cmds.reset();
     line_segments.reset();
   }
-  void render(rd::IDevice *f, rd::ICtx *ctx, u32 width, u32 height) {
+  void render(rd::ICtx *ctx, u32 width, u32 height) {
+    rd::IBinding_Table *table = dev->create_binding_table(signature);
+    defer(table->release());
+    table->bind_sampler(0, 1, font_sampler);
+    table->bind_texture(0, 0, 0, font_texture, rd::Image_Subresource::top_level(),
+                        rd::Format::NATIVE);
+    ctx->bind_table(table);
+    PushConstants pc{};
+    pc.viewproj = g_camera.viewproj();
     defer(char_storage.reset());
     float4x4 viewproj = g_camera.viewproj();
     if (hovered_gizmo) {
@@ -1792,14 +1968,6 @@ float4 main(in PSInput input) : SV_TARGET0 {
         cone_draw_cmds.size == 0 && line_segments.size == 0)
       return;
     if (cylinder_draw_cmds.size != 0 || sphere_draw_cmds.size != 0 || cone_draw_cmds.size != 0) {
-      ctx->push_state();
-      defer(ctx->pop_state());
-      rd::RS_State rs_state;
-      MEMZERO(rs_state);
-      rs_state.polygon_mode = rd::Polygon_Mode::FILL;
-      rs_state.front_face   = rd::Front_Face::CW;
-      rs_state.cull_mode    = rd::Cull_Mode::NONE;
-      ctx->RS_set_state(rs_state);
       u32                    cylinder_offset = 0;
       u32                    num_cylinders   = cylinder_draw_cmds.size;
       u32                    sphere_offset   = num_cylinders;
@@ -1808,12 +1976,13 @@ float4 main(in PSInput input) : SV_TARGET0 {
       u32                    num_cones       = cone_draw_cmds.size;
       rd::Buffer_Create_Info buf_info;
       MEMZERO(buf_info);
-      buf_info.memory_type   = rd::Memory_Type::CPU_WRITE_GPU_READ;
-      buf_info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
+      buf_info.memory_type = rd::Memory_Type::CPU_WRITE_GPU_READ;
+      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
       buf_info.size = (cylinder_draw_cmds.size + sphere_draw_cmds.size + cone_draw_cmds.size) *
                       sizeof(Gizmo_Instance_Data_CPU);
-      Resource_ID gizmo_instance_buffer = f->create_buffer(buf_info);
-      void *      ptr                   = f->map_buffer(gizmo_instance_buffer);
+      Resource_ID gizmo_instance_buffer = dev->create_buffer(buf_info);
+      dev->release_resource(gizmo_instance_buffer);
+      void *ptr = dev->map_buffer(gizmo_instance_buffer);
       if (cylinder_draw_cmds.size > 0)
         memcpy((u8 *)ptr + cylinder_offset * sizeof(Gizmo_Instance_Data_CPU),
                &cylinder_draw_cmds[0], num_cylinders * sizeof(Gizmo_Instance_Data_CPU));
@@ -1825,48 +1994,19 @@ float4 main(in PSInput input) : SV_TARGET0 {
                num_cones * sizeof(Gizmo_Instance_Data_CPU));
 
       num_cylinders = cylinder_draw_cmds.size;
-      f->unmap_buffer(gizmo_instance_buffer);
+      dev->unmap_buffer(gizmo_instance_buffer);
       cylinder_draw_cmds.reset();
       cone_draw_cmds.reset();
       sphere_draw_cmds.reset();
-      defer(f->release_resource(gizmo_instance_buffer));
-      ctx->PS_set_shader(gizmo_ps);
-      ctx->VS_set_shader(gizmo_vs);
-      ctx->push_constants(&viewproj, 0, sizeof(viewproj));
-      ctx->IA_set_vertex_buffer(1, gizmo_instance_buffer, 0, sizeof(Gizmo_Instance_Data_CPU),
-                                rd::Input_Rate::INSTANCE);
-      rd::Attribute_Info info;
-      MEMZERO(info);
-      info.binding  = 0;
-      info.format   = rd::Format::RGB32_FLOAT;
-      info.location = 0;
-      info.offset   = 0;
-      info.type     = rd::Attriute_t::POSITION;
-      ctx->IA_set_attribute(info);
-      ito(5) {
-        MEMZERO(info);
-        info.binding  = 1;
-        info.format   = rd::Format::RGBA32_FLOAT;
-        info.location = 1 + i;
-        info.offset   = 16 * i;
-        info.type     = (rd::Attriute_t)((u32)rd::Attriute_t::TEXCOORD0 + i);
-        ctx->IA_set_attribute(info);
-      }
-      ctx->IA_set_topology(rd::Primitive::TRIANGLE_LIST);
+      table->push_constants(&pc, 0, sizeof(pc));
+      ctx->bind_graphics_pso(gizmo_pso);
+      ctx->bind_vertex_buffer(1, gizmo_instance_buffer, 0);
       cylinder_wrapper.draw(ctx, num_cylinders, cylinder_offset);
       icosahedron_wrapper.draw(ctx, num_spheres, sphere_offset);
       cone_wrapper.draw(ctx, num_cones, cone_offset);
     }
     if (strings.size != 0) {
-      ctx->push_state();
-      defer(ctx->pop_state());
       defer(strings.reset());
-      rd::RS_State rs_state;
-      MEMZERO(rs_state);
-      rs_state.polygon_mode = rd::Polygon_Mode::FILL;
-      rs_state.front_face   = rd::Front_Face::CW;
-      rs_state.cull_mode    = rd::Cull_Mode::NONE;
-      ctx->RS_set_state(rs_state);
       struct Glyph_Instance {
         float x, y, z;
         float u, v;
@@ -1936,46 +2076,16 @@ float4 main(in PSInput input) : SV_TARGET0 {
       if (num_glyphs != 0) {
         rd::Buffer_Create_Info buf_info;
         MEMZERO(buf_info);
-        buf_info.mem_bits                 = (u32)rd::Memory_Bits::HOST_VISIBLE;
+        buf_info.memory_type              = rd::Memory_Type::CPU_WRITE_GPU_READ;
         buf_info.usage_bits               = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
         buf_info.size                     = num_glyphs * sizeof(Glyph_Instance);
-        Resource_ID gizmo_instance_buffer = f->create_buffer(buf_info);
-        rm->release_resource(gizmo_instance_buffer);
-        Glyph_Instance *ptr = (Glyph_Instance *)f->map_buffer(gizmo_instance_buffer);
+        Resource_ID gizmo_instance_buffer = dev->create_buffer(buf_info);
+        dev->release_resource(gizmo_instance_buffer);
+        Glyph_Instance *ptr = (Glyph_Instance *)dev->map_buffer(gizmo_instance_buffer);
         memcpy(ptr, glyphs, buf_info.size);
-        f->unmap_buffer(gizmo_instance_buffer);
-        ctx->IA_set_topology(rd::Primitive::TRIANGLE_LIST);
-        ctx->IA_set_vertex_buffer(1, gizmo_instance_buffer, 0, sizeof(Glyph_Instance),
-                                  rd::Input_Rate::INSTANCE);
-        rd::Attribute_Info info;
-        MEMZERO(info);
-        info.binding  = 0;
-        info.format   = rd::Format::RGB32_FLOAT;
-        info.location = 0;
-        info.offset   = 0;
-        info.type     = rd::Attriute_t::POSITION;
-        ctx->IA_set_attribute(info);
-        MEMZERO(info);
-        info.binding  = 1;
-        info.format   = rd::Format::RGB32_FLOAT;
-        info.location = 1;
-        info.offset   = 0;
-        info.type     = rd::Attriute_t::TEXCOORD0;
-        ctx->IA_set_attribute(info);
-        MEMZERO(info);
-        info.binding  = 1;
-        info.format   = rd::Format::RG32_FLOAT;
-        info.location = 2;
-        info.offset   = 12;
-        info.type     = rd::Attriute_t::TEXCOORD1;
-        ctx->IA_set_attribute(info);
-        MEMZERO(info);
-        info.binding  = 1;
-        info.format   = rd::Format::RGB32_FLOAT;
-        info.location = 3;
-        info.offset   = 20;
-        info.type     = rd::Attriute_t::TEXCOORD2;
-        ctx->IA_set_attribute(info);
+        dev->unmap_buffer(gizmo_instance_buffer);
+        ctx->bind_graphics_pso(gizmo_font_pso);
+        ctx->bind_vertex_buffer(1, gizmo_instance_buffer, 0);
         struct PC {
           float2 glyph_uv_size;
           float2 glyph_size;
@@ -1984,52 +2094,23 @@ float4 main(in PSInput input) : SV_TARGET0 {
         pc.glyph_uv_size = {glyph_uv_width, glyph_uv_height};
         pc.glyph_size    = {glyphs_screen_width, -glyphs_screen_height};
         pc.viewport_size = {(f32)width, (f32)height};
-        ctx->VS_set_shader(font_vs);
-        ctx->PS_set_shader(font_ps);
-        ctx->push_constants(&pc, 0, sizeof(pc));
-        ctx->bind_sampler(0, 1, font_sampler);
-        ctx->bind_image(0, 0, 0, font_texture, rd::Image_Subresource::top_level(),
-                        rd::Format::NATIVE);
+        table->push_constants(&pc, 0, sizeof(pc));
         glyph_wrapper.draw(ctx, num_glyphs, 0);
       }
     }
     if (line_segments.size != 0) {
-      ctx->push_state();
-      defer(ctx->pop_state());
-      ctx->RS_set_line_width(2.2f);
-      ctx->RS_set_depth_bias(-30.0f);
 
       rd::Buffer_Create_Info buf_info;
       MEMZERO(buf_info);
-      buf_info.mem_bits                 = (u32)rd::Memory_Bits::HOST_VISIBLE;
+      buf_info.memory_type              = rd::Memory_Type::CPU_WRITE_GPU_READ;
       buf_info.usage_bits               = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
       buf_info.size                     = (line_segments.size) * sizeof(Gizmo_Line_Vertex);
-      Resource_ID gizmo_instance_buffer = f->create_buffer(buf_info);
-      void *      ptr                   = f->map_buffer(gizmo_instance_buffer);
+      Resource_ID gizmo_instance_buffer = dev->create_buffer(buf_info);
+      void *      ptr                   = dev->map_buffer(gizmo_instance_buffer);
       memcpy((u8 *)ptr, &line_segments[0], line_segments.size * sizeof(Gizmo_Line_Vertex));
-      f->unmap_buffer(gizmo_instance_buffer);
-      defer(f->release_resource(gizmo_instance_buffer));
-      ctx->IA_set_topology(rd::Primitive::LINE_LIST);
-      ctx->IA_set_vertex_buffer(0, gizmo_instance_buffer, 0, sizeof(Gizmo_Line_Vertex),
-                                rd::Input_Rate::VERTEX);
-      rd::Attribute_Info info;
-      MEMZERO(info);
-      info.binding  = 0;
-      info.format   = rd::Format::RGB32_FLOAT;
-      info.location = 0;
-      info.offset   = 0;
-      info.type     = rd::Attriute_t::POSITION;
-      ctx->IA_set_attribute(info);
-      MEMZERO(info);
-      info.binding  = 0;
-      info.format   = rd::Format::RGB32_FLOAT;
-      info.location = 1;
-      info.offset   = 12;
-      info.type     = rd::Attriute_t::TEXCOORD0;
-      ctx->IA_set_attribute(info);
-      ctx->PS_set_shader(gizmo_lines_ps);
-      ctx->VS_set_shader(gizmo_lines_vs);
-      ctx->push_constants(&viewproj, 0, sizeof(viewproj));
+      dev->unmap_buffer(gizmo_instance_buffer);
+      dev->release_resource(gizmo_instance_buffer);
+      table->push_constants(&pc, 0, sizeof(pc));
       ctx->draw(line_segments.size, 1, 0, 0);
       line_segments.reset();
     }
@@ -2061,7 +2142,7 @@ template <typename T> class GPUBuffer {
   }
   Resource_ID get() { return gpu_buffer; }
   void        reset() { cpu_array.reset(); }
-  void        flush(rd::Imm_Ctx *ctx = NULL) {
+  void        flush(rd::ICtx *ctx = NULL) {
     if (gpu_buffer.is_null() || cpu_array.size * sizeof(T) < gpu_buffer_size) {
       if (cpu_buffer.is_valid()) factory->release_resource(cpu_buffer);
       if (gpu_buffer.is_valid()) factory->release_resource(gpu_buffer);
@@ -2078,10 +2159,10 @@ template <typename T> class GPUBuffer {
       {
         rd::Buffer_Create_Info info;
         MEMZERO(info);
-        info.memory_type   = rd::Memory_Type::CPU_WRITE_GPU_READ;
-        info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
-        info.size       = cpu_array.size * sizeof(T);
-        cpu_array       = factory->create_buffer(info);
+        info.memory_type = rd::Memory_Type::CPU_WRITE_GPU_READ;
+        info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
+        info.size        = cpu_array.size * sizeof(T);
+        cpu_array        = factory->create_buffer(info);
       }
     }
     void *ptr = factory->map_buffer(cpu_buffer);
@@ -2276,11 +2357,12 @@ static float3 transform(float4x4 const &t, float3 const &v) {
   return r.xyz;
 }
 
-template <typename T> static void render_bvh(float4x4 const &t, BVH<T> *bvh, Gizmo_Layer *gl) {
-  ASSERT_DEBUG(bvh);
-  bvh->traverse([&](BVH_Node *node) {
-    gl->render_linebox(transform(t, node->min), transform(t, node->max), float3(1.0f, 0.0f, 0.0f));
-  });
-}
+// template <typename T> static void render_bvh(float4x4 const &t, BVH<T> *bvh, Gizmo_Layer *gl) {
+//  ASSERT_DEBUG(bvh);
+//  bvh->traverse([&](BVH_Node *node) {
+//    gl->render_linebox(transform(t, node->min), transform(t, node->max), float3(1.0f, 0.0f,
+//    0.0f));
+//  });
+//}
 #endif
 #endif // RENDERING_UTILS_HPP

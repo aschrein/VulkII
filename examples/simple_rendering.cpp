@@ -165,12 +165,11 @@ struct CullPushConstants
 
 #if 1
 struct RenderingContext {
-  rd::IDevice *factory = NULL;
-  Config *     config  = NULL;
-  Scene *      scene   = NULL;
-  // Gizmo_Layer * gizmo_layer = NULL;
+  rd::IDevice *factory     = NULL;
+  Config *     config      = NULL;
+  Scene *      scene       = NULL;
+  Gizmo_Layer *gizmo_layer = NULL;
 };
-Camera g_camera;
 class GBufferPass {
   public:
 #  define RESOURCE_LIST                                                                            \
@@ -189,36 +188,7 @@ class GBufferPass {
 
   u32         width  = 0;
   u32         height = 0;
-  BufferThing bthing{};
-
-  void render_once(rd::ICtx *ctx, Scene *scene, float4x4 viewproj, float4x4 world) {
-
-    /* if (rctx.config->get_bool("render_scene_wireframe")) {
-       ctx->PS_set_shader(rctx.factory->create_shader_raw(rd::Stage_t::PIXEL, stref_s(R"(
- struct PSInput {
-   [[vk::location(0)]] float4 pos     : SV_POSITION;
-   [[vk::location(1)]] float3 normal  : TEXCOORD0;
-   [[vk::location(2)]] float2 uv      : TEXCOORD1;
- };
-
- float4 main(in PSInput input) : SV_TARGET0 {
-   return float4_splat(0.0f);
- }
- )"),
-                                                          NULL, 0));
-       rctx.scene->traverse([&](Node *node) {
-         if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
-           GfxSufraceComponent *gs    = mn->getComponent<GfxSufraceComponent>();
-           float4x4             model = mn->get_transform();
-           ctx->push_constants(&model, 64, sizeof(model));
-           ito(gs->getNumSurfaces()) {
-             GfxSurface *s = gs->getSurface(i);
-             s->draw(ctx, attribute_to_location);
-           }
-         }
-       });
-     }*/
-  }
+  //BufferThing bthing{};
 
   rd::Render_Pass_Create_Info info{};
   rd::Graphics_Pipeline_State gfx_state{};
@@ -230,7 +200,7 @@ class GBufferPass {
     float4x4 world_transform;
   };
   void init(RenderingContext rctx) {
-    bthing.init(rctx.factory);
+    //bthing.init(rctx.factory);
     gbuffer_vs = rctx.factory->create_shader(rd::Stage_t::VERTEX, stref_s(R"(
 struct PushConstants
 {
@@ -413,7 +383,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
     // timestamps.update(rctx.factory);
     // float4x4 bvh_visualizer_offset = glm::translate(float4x4(1.0f), float3(-10.0f, 0.0f,
     // 0.0f));
-    bthing.test_buffers(rctx.factory);
+    //bthing.test_buffers(rctx.factory);
     u32 width  = rctx.config->get_u32("g_buffer_width");
     u32 height = rctx.config->get_u32("g_buffer_height");
     if (this->width != width || this->height != height) {
@@ -421,53 +391,26 @@ float4 main(in PSInput input) : SV_TARGET0 {
       this->height = height;
       update_frame_buffer(rctx);
     }
-    // if (rctx.config->get_bool("render_gizmo")) {
-    //  auto g_camera = rctx.gizmo_layer->get_camera();
-    //  {
-    //    float dx = 1.0e-1f * g_camera.distance;
-    //    rctx.gizmo_layer->draw_sphere(g_camera.look_at, dx * 0.04f, float3{1.0f, 1.0f, 1.0f});
-    //    rctx.gizmo_layer->draw_cylinder(g_camera.look_at,
-    //                                    g_camera.look_at + float3{dx, 0.0f, 0.0f}, dx * 0.04f,
-    //                                    float3{1.0f, 0.0f, 0.0f});
-    //    rctx.gizmo_layer->draw_cylinder(g_camera.look_at,
-    //                                    g_camera.look_at + float3{0.0f, dx, 0.0f}, dx * 0.04f,
-    //                                    float3{0.0f, 1.0f, 0.0f});
-    //    rctx.gizmo_layer->draw_cylinder(g_camera.look_at,
-    //                                    g_camera.look_at + float3{0.0f, 0.0f, dx}, dx * 0.04f,
-    //                                    float3{0.0f, 0.0f, 1.0f});
-    //  }
-    //}
-
-    //{
-    //  int          i   = 0;
-    //  rd::ICtx *ctx = rctx.factory->start_render_pass(info);
-
-    //  float4x4 viewproj = rctx.gizmo_layer->get_camera().viewproj();
-    //  // timestamps.insert(rctx.factory, ctx);
-    //  ctx->set_viewport(0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f);
-    //  ctx->set_scissor(0, 0, width, height);
-    //  float    dx    = 1.0f;
-    //  float4x4 model = float4x4(    //
-    //      1.0f, 0.0f, 0.0f, dx * i, //
-    //      0.0f, 1.0f, 0.0f, 0.0f,   //
-    //      0.0f, 0.0f, 1.0f, 0.0f,   //
-    //      0.0f, 0.0f, 0.0f, 1.0f    //
-    //  );
-    //  render_once(ctx, rctx.scene, viewproj, model);
-    //  if (i == 0) {
-    //    rctx.gizmo_layer->render(rctx.factory, ctx, width, height);
-    //  }
-    //  rctx.factory->end_render_pass(ctx);
-    //}
-    // fprintf(stdout, "[START FRAME]\n");
-    // fflush(stdout);
+    if (rctx.config->get_bool("render_gizmo")) {
+      auto g_camera = rctx.gizmo_layer->get_camera();
+      {
+        float dx = 1.0e-1f * g_camera.distance;
+        rctx.gizmo_layer->draw_sphere(g_camera.look_at, dx * 0.04f, float3{1.0f, 1.0f, 1.0f});
+        rctx.gizmo_layer->draw_cylinder(g_camera.look_at, g_camera.look_at + float3{dx, 0.0f, 0.0f},
+                                        dx * 0.04f, float3{1.0f, 0.0f, 0.0f});
+        rctx.gizmo_layer->draw_cylinder(g_camera.look_at, g_camera.look_at + float3{0.0f, dx, 0.0f},
+                                        dx * 0.04f, float3{0.0f, 1.0f, 0.0f});
+        rctx.gizmo_layer->draw_cylinder(g_camera.look_at, g_camera.look_at + float3{0.0f, 0.0f, dx},
+                                        dx * 0.04f, float3{0.0f, 0.0f, 1.0f});
+      }
+    }
 
     struct PushConstants {
       float4x4 viewproj;
       float4x4 world_transform;
     } pc;
 
-    float4x4 viewproj = g_camera.viewproj();
+    float4x4 viewproj = rctx.gizmo_layer->get_camera().viewproj();
 
     rd::ICtx *ctx = rctx.factory->start_render_pass(pass, frame_buffer);
     {
@@ -495,7 +438,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
         if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
           GfxSufraceComponent *gs    = mn->getComponent<GfxSufraceComponent>();
           float4x4             world = mn->get_transform();
-          pc.world_transform         = transpose(world);
+          pc.world_transform         = world;
           table->push_constants(&pc, 0, sizeof(pc));
           ito(gs->getNumSurfaces()) {
             GfxSurface *s = gs->getSurface(i);
@@ -503,8 +446,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
           }
         }
       });
-
-      // rctx.gizmo_layer->render(rctx.factory, ctx, width, height);
+      rctx.gizmo_layer->render(ctx, width, height);
       ctx->end_render_pass();
     }
     rctx.factory->end_render_pass(ctx);
@@ -518,7 +460,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
     // threads.clear();
   }
   void release(rd::IDevice *factory) {
-    bthing.release(factory);
+    //bthing.release(factory);
 #  define RESOURCE(name)                                                                           \
     if (name.is_valid()) factory->release_resource(name);
     RESOURCE_LIST
@@ -538,102 +480,51 @@ class Event_Consumer : public IGUIApp {
       init_traverse(l->child);
       init_traverse(l->next);
     } else {
-      /* if (l->cmp_symbol("camera")) {
-         rctx.gizmo_layer->get_camera().traverse(l->next);
-       } else if (l->cmp_symbol("config")) {
-         rctx.config->traverse(l->next);
-       } else if (l->cmp_symbol("scene")) {
-         rctx.scene->restore(l);
-       }*/
+      if (l->cmp_symbol("camera")) {
+        rctx.gizmo_layer->get_camera().traverse(l->next);
+      } else if (l->cmp_symbol("config")) {
+        rctx.config->traverse(l->next);
+      } else if (l->cmp_symbol("scene")) {
+        rctx.scene->restore(l);
+      }
     }
   }
   void on_gui() override { //
-
-    // bool show = true;
-    // ShowExampleAppCustomNodeGraph(&show);
-    // ImGui::TestNodeGraphEditor();
-    // ImGui::Begin("Text");
-    // te.Render("Editor");
-    // ImGui::End();
-    {
-      static int2 mpos      = {};
-      static int2 last_mpos = {};
-      ImVec2      imguimpos = ImGui::GetMousePos();
-      auto        wpos      = ImGui::GetCursorScreenPos();
-      auto        wsize     = ImGui::GetWindowSize();
-      g_camera.aspect       = float(wsize.x) / wsize.y;
-      imguimpos.x -= wpos.x;
-      imguimpos.y -= wpos.y;
-      last_mpos     = mpos;
-      mpos          = int2(imguimpos.x, imguimpos.y);
-      i32  dx       = mpos.x - last_mpos.x;
-      i32  dy       = mpos.y - last_mpos.y;
-      auto scroll_y = ImGui::GetIO().MouseWheel;
-      if (scroll_y) {
-        g_camera.distance += g_camera.distance * 2.e-1 * scroll_y;
-        g_camera.distance = clamp(g_camera.distance, 1.0e-3f, 1000.0f);
-      }
-      f32 camera_speed = 2.0f * g_camera.distance;
-      if (ImGui::GetIO().KeysDown[SDL_SCANCODE_LSHIFT]) {
-        camera_speed = 10.0f * g_camera.distance;
-      }
-      float3 camera_diff = float3(0.0f, 0.0f, 0.0f);
-      if (ImGui::GetIO().KeysDown[SDL_SCANCODE_W]) {
-        camera_diff += g_camera.look;
-      }
-      if (ImGui::GetIO().KeysDown[SDL_SCANCODE_S]) {
-        camera_diff -= g_camera.look;
-      }
-      if (ImGui::GetIO().KeysDown[SDL_SCANCODE_A]) {
-        camera_diff -= g_camera.right;
-      }
-      if (ImGui::GetIO().KeysDown[SDL_SCANCODE_D]) {
-        camera_diff += g_camera.right;
-      }
-      if (dot(camera_diff, camera_diff) > 1.0e-3f) {
-        g_camera.look_at += glm::normalize(camera_diff) * camera_speed * (float)timer.dt;
-      }
-      if (ImGui::IsMouseDown(0)) {
-        g_camera.phi += (float)(dx)*g_camera.aspect * 5.0e-3f;
-        g_camera.theta -= (float)(dy)*5.0e-3f;
-      }
-    }
     timer.update();
-    g_camera.update();
     ImGui::Begin("Scene");
     {
       String_Builder sb;
       sb.init();
       defer(sb.release());
-      // rctx.scene->save(sb);
+      rctx.scene->save(sb);
       TMP_STORAGE_SCOPE;
       List *cur = List::parse(sb.get_str(), Tmp_List_Allocator());
       if (cur) {
         int id = 0;
         on_gui_traverse_nodes(cur, id);
-        // rctx.scene->restore(cur);
+        rctx.scene->restore(cur);
       }
     }
     ImGui::End();
 
     ImGui::Begin("Config");
-    // rctx.config->on_imgui();
+    rctx.config->on_imgui();
     // ImGui::Text("%fms", gbuffer_pass.timestamps.duration);
     ImGui::End();
 
     ImGui::Begin("main viewport");
-    // rctx.gizmo_layer->per_imgui_window();
+    rctx.gizmo_layer->per_imgui_window();
     auto wsize = get_window_size();
     ImGui::Image(bind_texture(gbuffer_pass.normal_rt, 0, 0, rd::Format::NATIVE),
                  ImVec2(wsize.x, wsize.y));
-    //{ Ray ray = rctx.gizmo_layer->getMouseRay(); }
+    { Ray ray = rctx.gizmo_layer->getMouseRay(); }
     ImGui::End();
   }
   void on_init() override { //
-    g_camera.init();
+
     rctx.factory = this->factory;
     TMP_STORAGE_SCOPE;
-    // rctx.gizmo_layer = Gizmo_Layer::create(factory);
+
     // new XYZDragGizmo(gizmo_layer, &pos);
     rctx.scene  = Scene::create();
     rctx.config = new Config;
@@ -645,35 +536,33 @@ class Event_Consumer : public IGUIApp {
  )"));
     rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/light/scene.gltf"));
     rctx.scene->update();
-    char *state = read_file_tmp("scene_state");
+    gbuffer_pass.init(rctx);
+    rctx.gizmo_layer = Gizmo_Layer::create(factory, gbuffer_pass.pass);
+    char *state      = read_file_tmp("scene_state");
 
     if (state != NULL) {
       TMP_STORAGE_SCOPE;
       List *cur = List::parse(stref_s(state), Tmp_List_Allocator());
       init_traverse(cur);
     }
-
-    gbuffer_pass.init(rctx);
   }
   void on_release() override { //
-    g_camera.release();
-    // thread_pool.release();
     FILE *scene_dump = fopen("scene_state", "wb");
     fprintf(scene_dump, "(\n");
     defer(fclose(scene_dump));
-    // rctx.gizmo_layer->get_camera().dump(scene_dump);
-    // rctx.config->dump(scene_dump);
+    rctx.gizmo_layer->get_camera().dump(scene_dump);
+    rctx.config->dump(scene_dump);
     {
       String_Builder sb;
       sb.init();
-      // rctx.scene->save(sb);
+      rctx.scene->save(sb);
       fwrite(sb.get_str().ptr, 1, sb.get_str().len, scene_dump);
       sb.release();
     }
     fprintf(scene_dump, ")\n");
-    // rctx.gizmo_layer->release();
-    // rctx.scene->release();
-    // delete rctx.config;
+    rctx.gizmo_layer->release();
+    rctx.scene->release();
+    delete rctx.config;
   }
   void on_frame() override { //
     /*rctx.scene->traverse([&](Node *node) {
@@ -692,11 +581,11 @@ int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
 
-  auto        window_loop   = [](rd::Impl_t impl) { IGUIApp::start<Event_Consumer>(impl); };
-  //std::thread vulkan_thread = std::thread([window_loop] { window_loop(rd::Impl_t::VULKAN); });
-   std::thread dx12_thread = std::thread([window_loop] { window_loop(rd::Impl_t::DX12); });
-  //vulkan_thread.join();
-   dx12_thread.join();
+  auto window_loop = [](rd::Impl_t impl) { IGUIApp::start<Event_Consumer>(impl); };
+  // std::thread vulkan_thread = std::thread([window_loop] { window_loop(rd::Impl_t::VULKAN); });
+  std::thread dx12_thread = std::thread([window_loop] { window_loop(rd::Impl_t::DX12); });
+  // vulkan_thread.join();
+  dx12_thread.join();
 
   return 0;
 }
