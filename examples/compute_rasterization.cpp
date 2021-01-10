@@ -117,7 +117,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
 
       info.depth_target.enabled           = true;
       info.depth_target.clear_depth.clear = true;
-      info.depth_target.format            = rd::Format::D32_FLOAT;
+      info.depth_target.format            = rd::Format::D32_OR_R32_FLOAT;
       return rctx.factory->create_render_pass(info);
     }();
 
@@ -205,7 +205,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
     }();
     depth_rt = [=] {
       rd::Image_Create_Info rt0_info{};
-      rt0_info.format     = rd::Format::D32_FLOAT;
+      rt0_info.format     = rd::Format::D32_OR_R32_FLOAT;
       rt0_info.width      = width;
       rt0_info.height     = height;
       rt0_info.depth      = 1;
@@ -223,7 +223,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
 
       info.depth_target.enabled = true;
       info.depth_target.image   = depth_rt;
-      info.depth_target.format  = rd::Format::D32_FLOAT;
+      info.depth_target.format  = rd::Format::D32_OR_R32_FLOAT;
       return rctx.factory->create_frame_buffer(pass, info);
     }();
   }
@@ -619,7 +619,7 @@ class GBufferPass {
       rd::Image_Create_Info rt0_info;
 
       MEMZERO(rt0_info);
-      rt0_info.format     = rd::Format::D32_FLOAT;
+      rt0_info.format     = rd::Format::D32_OR_R32_FLOAT;
       rt0_info.width      = width;
       rt0_info.height     = height;
       rt0_info.depth      = 1;

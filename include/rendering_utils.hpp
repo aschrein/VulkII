@@ -590,7 +590,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
               clip_rect.z  = (pcmd->ClipRect.z - clip_off.x) * clip_scale.x;
               clip_rect.w  = (pcmd->ClipRect.w - clip_off.y) * clip_scale.y;
               ImGui_ID img = image_bindings[(size_t)pcmd->TextureId];
-              if (img.format == rd::Format::D32_FLOAT) {
+              if (img.format == rd::Format::D32_OR_R32_FLOAT) {
                 control = 1;
               }
               if (img.format == rd::Format::R32_UINT) {

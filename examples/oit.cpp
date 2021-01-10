@@ -525,7 +525,7 @@ struct Hair_Renderer {
       {
         rd::Image_Create_Info ci;
         MEMZERO(ci);
-        ci.format     = rd::Format::D32_FLOAT;
+        ci.format     = rd::Format::D32_OR_R32_FLOAT;
         ci.depth      = 1;
         ci.width      = width;
         ci.height     = height;

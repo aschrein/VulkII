@@ -126,7 +126,7 @@ DXGI_FORMAT to_dx(rd::Format format) {
   case rd::Format::R16_FLOAT       : return DXGI_FORMAT_R16_FLOAT          ;
   case rd::Format::R16_UNORM       : return DXGI_FORMAT_R16_UNORM;
   case rd::Format::R8_UNORM        : return DXGI_FORMAT_R8_UNORM;
-  case rd::Format::D32_FLOAT       : return DXGI_FORMAT_D32_FLOAT          ;
+  case rd::Format::D32_OR_R32_FLOAT : return DXGI_FORMAT_R32_TYPELESS;
   case rd::Format::R32_UINT        : return DXGI_FORMAT_R32_UINT;
   case rd::Format::R16_UINT        : return DXGI_FORMAT_R16_UINT            ;
   default: UNIMPLEMENTED;
@@ -149,7 +149,7 @@ rd::Format from_dx(DXGI_FORMAT format) {
   case DXGI_FORMAT_R16_FLOAT          : return rd::Format::R16_FLOAT   ;
   case DXGI_FORMAT_R16_UNORM          : return rd::Format::R16_UNORM   ;
   case DXGI_FORMAT_R8_UNORM           : return rd::Format::R8_UNORM    ;
-  case DXGI_FORMAT_D32_FLOAT          : return rd::Format::D32_FLOAT   ;
+  case DXGI_FORMAT_R32_TYPELESS          : return rd::Format::D32_OR_R32_FLOAT   ;
   case DXGI_FORMAT_R32_UINT           : return rd::Format::R32_UINT    ;
   case DXGI_FORMAT_R16_UINT           : return rd::Format::R16_UINT    ;
   default: UNIMPLEMENTED;
@@ -360,8 +360,10 @@ struct GraphicsPSOWrapper {
   D3D_PRIMITIVE_TOPOLOGY      topology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
 };
 struct ResourceWrapper {
-  ID3D12Resource *      res           = NULL;
-  D3D12_RESOURCE_STATES default_state = D3D12_RESOURCE_STATES::D3D12_RESOURCE_STATE_COMMON;
+  ID3D12Resource *       res           = NULL;
+  D3D12_RESOURCE_STATES  default_state = D3D12_RESOURCE_STATES::D3D12_RESOURCE_STATE_COMMON;
+  rd::Image_Create_Info  image_info{};
+  rd::Buffer_Create_Info buffer_info{};
 };
 #ifdef TRACY_ENABLE
 struct TracyContext {
@@ -857,7 +859,8 @@ class DX12Device : public rd::IDevice {
     auto state              = D3D12_RESOURCE_STATE_COMMON;
     DX_ASSERT_OK(
         device->CreateCommittedResource(&prop, flags, &desc, state, NULL, IID_PPV_ARGS(&buf)));
-    return {resource_table.push(new ResourceWrapper{buf, state}), (u32)Resource_Type::TEXTURE};
+    return {resource_table.push(new ResourceWrapper{buf, state, info, {}}),
+            (u32)Resource_Type::TEXTURE};
   }
   Resource_ID create_buffer(rd::Buffer_Create_Info info) override {
     ID3D12Resource *      buf   = NULL;
@@ -893,7 +896,8 @@ class DX12Device : public rd::IDevice {
     /*if (state != D3D12_RESOURCE_STATE_COMMON) {
       sync_transition_barrier(buf, state, D3D12_RESOURCE_STATE_COMMON);
     }*/
-    return {resource_table.push(new ResourceWrapper{buf, state}), (u32)Resource_Type::BUFFER};
+    return {resource_table.push(new ResourceWrapper{buf, state, {}, info}),
+            (u32)Resource_Type::BUFFER};
   }
   Resource_ID create_shader(rd::Stage_t type, string_ref text,
                             Pair<string_ref, string_ref> *defines, size_t num_defines) override {
@@ -1603,8 +1607,9 @@ class DX12Binding_Table : public rd::IBinding_Table {
   }
   void bind_texture(u32 space, u32 binding, u32 index, Resource_ID image_id,
                     rd::Image_Subresource const &_range, rd::Format format) override {
-    ID3D12Resource *res = dev_ctx->get_resource(image_id.id)->res;
-    u32             binding_offset =
+    ResourceWrapper *wres = dev_ctx->get_resource(image_id.id);
+    ID3D12Resource * res  = wres->res;
+    u32              binding_offset =
         signature->space_descs[space].bindings[binding].OffsetInDescriptorsFromTableStart + index;
     D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
     auto                            res_desc = res->GetDesc();
@@ -1612,10 +1617,16 @@ class DX12Binding_Table : public rd::IBinding_Table {
     if (range.num_layers == -1) range.num_layers = res_desc.DepthOrArraySize;
     if (range.num_levels == -1) range.num_levels = res_desc.MipLevels;
     desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    if (format == rd::Format::NATIVE)
-      desc.Format = res_desc.Format;
+    if (format == rd::Format::NATIVE) {
+      if (wres->image_info.format == rd::Format::D32_OR_R32_FLOAT)
+        desc.Format = DXGI_FORMAT_R32_FLOAT;
+      else
+        desc.Format = res_desc.Format;
+    } else if (format == rd::Format::D32_OR_R32_FLOAT)
+      desc.Format = DXGI_FORMAT_R32_FLOAT;
     else
       desc.Format = to_dx(format);
+
     if (res_desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D) {
       if (res_desc.DepthOrArraySize == 1) {
         desc.ViewDimension             = D3D12_SRV_DIMENSION_TEXTURE1D;
@@ -1776,10 +1787,20 @@ class FrameBuffer {
       }
     }
     if (info.depth_target.enabled) {
-      dsv_offset          = dev_ctx->get_dsv_desc_heap()->allocate(1);
-      ID3D12Resource *res = dev_ctx->get_resource(info.depth_target.image.id)->res;
+      dsv_offset            = dev_ctx->get_dsv_desc_heap()->allocate(1);
+      ResourceWrapper *wres = dev_ctx->get_resource(info.depth_target.image.id);
+      ID3D12Resource * res  = wres->res;
       // Initialize DSV
-      dev_ctx->get_device()->CreateDepthStencilView(res, NULL, get_dsv_handle());
+      {
+        D3D12_DEPTH_STENCIL_VIEW_DESC desc{};
+        if (wres->image_info.format == rd::Format::D32_OR_R32_FLOAT)
+          desc.Format = DXGI_FORMAT_D32_FLOAT;
+        else {
+          TRAP;
+        }
+        desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+        dev_ctx->get_device()->CreateDepthStencilView(res, &desc, get_dsv_handle());
+      }
     }
   }
   void bind(ComPtr<ID3D12GraphicsCommandList> cmd, RenderPass *pass) {
@@ -2331,7 +2352,12 @@ Resource_ID DX12Device::create_graphics_pso(Resource_ID signature, Resource_ID r
       ID3D12Resource *res = get_resource(rp->get_info().depth_target.image.id);
       desc.DSVFormat      = res->GetDesc().Format;
     } else*/
-    desc.DSVFormat = to_dx(rp->get_info().depth_target.format);
+    auto fmt = rp->get_info().depth_target.format;
+    if (fmt == rd::Format::D32_OR_R32_FLOAT) {
+      desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    } else {
+      TRAP;
+    }
   }
   desc.SampleDesc.Count   = 1;
   desc.SampleDesc.Quality = 0;

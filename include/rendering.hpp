@@ -67,7 +67,7 @@ enum class Format : u32 {
   R16_UNORM,
   R8_UNORM,
   R16_UINT,
-  D32_FLOAT,
+  D32_OR_R32_FLOAT,
 };
 
 static inline char const *format_to_cstr(Format format) {
@@ -87,7 +87,7 @@ static inline char const *format_to_cstr(Format format) {
       case Format::R32_FLOAT   : return "R32_FLOAT";
       case Format::R32_UINT    : return "R32_UINT";
       case Format::R16_UINT    : return "R16_UINT";
-      case Format::D32_FLOAT   : return "D32_FLOAT";
+      case Format::D32_OR_R32_FLOAT   : return "D32_OR_R32_FLOAT";
   // clang-format on
   default: TRAP;
   }
@@ -95,7 +95,7 @@ static inline char const *format_to_cstr(Format format) {
 
 static inline bool is_depth_format(Format format) {
   switch (format) {
-  case Format::D32_FLOAT: return true;
+  case Format::D32_OR_R32_FLOAT: return true;
   default: return false;
   }
 }

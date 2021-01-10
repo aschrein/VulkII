@@ -1653,7 +1653,7 @@ float3 eval_normal(float3 pos) {
       rd::Image_Create_Info rt0_info;
 
       MEMZERO(rt0_info);
-      rt0_info.format     = rd::Format::D32_FLOAT;
+      rt0_info.format     = rd::Format::D32_OR_R32_FLOAT;
       rt0_info.width      = width;
       rt0_info.height     = height;
       rt0_info.depth      = 1;

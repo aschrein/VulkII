@@ -15,6 +15,18 @@
 
 #include <embree3/rtcore_builder.h>
 
+struct RenderingContext {
+  rd::IDevice *factory     = NULL;
+  Config *     config      = NULL;
+  Scene *      scene       = NULL;
+  Gizmo_Layer *gizmo_layer = NULL;
+};
+
+struct GBuffer {
+  Resource_ID normal;
+  Resource_ID depth;
+};
+
 class BufferThing {
 #define RESOURCE_LIST                                                                              \
   RESOURCE(cs0);                                                                                   \
@@ -164,14 +176,12 @@ struct CullPushConstants
 };
 
 #if 1
-struct RenderingContext {
-  rd::IDevice *factory     = NULL;
-  Config *     config      = NULL;
-  Scene *      scene       = NULL;
-  Gizmo_Layer *gizmo_layer = NULL;
-};
+
 class GBufferPass {
   public:
+  static constexpr char const *NAME = "GBuffer Pass";
+  Pair<double, char const *>   get_duration() { return {timestamps.duration, NAME}; }
+
 #  define RESOURCE_LIST                                                                            \
     RESOURCE(signature);                                                                           \
     RESOURCE(pso);                                                                                 \
@@ -239,14 +249,7 @@ struct PSInput {
 };
 
 float4 main(in PSInput input) : SV_TARGET0 {
-  return float4_splat(
-          abs(
-              dot(
-                input.normal,
-                normalize(float3(1.0, 1.0, 1.0))
-              )
-            )
-         );
+  return float4(input.normal.xyz, 1.0f);
 }
 )"),
                                              NULL, 0);
@@ -270,7 +273,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
 
       info.depth_target.enabled           = true;
       info.depth_target.clear_depth.clear = true;
-      info.depth_target.format            = rd::Format::D32_FLOAT;
+      info.depth_target.format            = rd::Format::D32_OR_R32_FLOAT;
       return rctx.factory->create_render_pass(info);
     }();
 
@@ -358,13 +361,14 @@ float4 main(in PSInput input) : SV_TARGET0 {
     }();
     depth_rt = [=] {
       rd::Image_Create_Info rt0_info{};
-      rt0_info.format     = rd::Format::D32_FLOAT;
-      rt0_info.width      = width;
-      rt0_info.height     = height;
-      rt0_info.depth      = 1;
-      rt0_info.layers     = 1;
-      rt0_info.levels     = 1;
-      rt0_info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_DT;
+      rt0_info.format = rd::Format::D32_OR_R32_FLOAT;
+      rt0_info.width  = width;
+      rt0_info.height = height;
+      rt0_info.depth  = 1;
+      rt0_info.layers = 1;
+      rt0_info.levels = 1;
+      rt0_info.usage_bits =
+          (u32)rd::Image_Usage_Bits::USAGE_DT | (u32)rd::Image_Usage_Bits::USAGE_SAMPLED;
       return rctx.factory->create_image(rt0_info);
     }();
     frame_buffer = [=] {
@@ -376,7 +380,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
 
       info.depth_target.enabled = true;
       info.depth_target.image   = depth_rt;
-      info.depth_target.format  = rd::Format::D32_FLOAT;
+      info.depth_target.format  = rd::Format::D32_OR_R32_FLOAT;
       return rctx.factory->create_frame_buffer(pass, info);
     }();
   }
@@ -391,19 +395,6 @@ float4 main(in PSInput input) : SV_TARGET0 {
       this->width  = width;
       this->height = height;
       update_frame_buffer(rctx);
-    }
-    if (rctx.config->get_bool("render_gizmo")) {
-      auto g_camera = rctx.gizmo_layer->get_camera();
-      {
-        float dx = 1.0e-1f * g_camera.distance;
-        rctx.gizmo_layer->draw_sphere(g_camera.look_at, dx * 0.04f, float3{1.0f, 1.0f, 1.0f});
-        rctx.gizmo_layer->draw_cylinder(g_camera.look_at, g_camera.look_at + float3{dx, 0.0f, 0.0f},
-                                        dx * 0.04f, float3{1.0f, 0.0f, 0.0f});
-        rctx.gizmo_layer->draw_cylinder(g_camera.look_at, g_camera.look_at + float3{0.0f, dx, 0.0f},
-                                        dx * 0.04f, float3{0.0f, 1.0f, 0.0f});
-        rctx.gizmo_layer->draw_cylinder(g_camera.look_at, g_camera.look_at + float3{0.0f, 0.0f, dx},
-                                        dx * 0.04f, float3{0.0f, 0.0f, 1.0f});
-      }
     }
 
     struct PushConstants {
@@ -440,22 +431,21 @@ float4 main(in PSInput input) : SV_TARGET0 {
           }
         }
       });
-      rctx.gizmo_layer->render(ctx, width, height);
       ctx->end_render_pass();
       timestamps.end_range(ctx);
     }
 
     Resource_ID e = rctx.factory->end_render_pass(ctx);
     timestamps.commit(e);
-    // rctx.gizmo_layer->reset();
-    // fprintf(stdout, "[END FRAME]\n");
-    // fflush(stdout);
-    // for (auto &th : threads) th.join();
-    // threads.clear();
+  }
+  GBuffer get_gbuffer() {
+    GBuffer out{};
+    out.normal = normal_rt;
+    out.depth  = depth_rt;
+    return out;
   }
   void release(rd::IDevice *factory) {
     timestamps.release(factory);
-    // bthing.release(factory);
 #  define RESOURCE(name)                                                                           \
     if (name.is_valid()) factory->release_resource(name);
     RESOURCE_LIST
@@ -464,10 +454,282 @@ float4 main(in PSInput input) : SV_TARGET0 {
 #  undef RESOURCE_LIST
 };
 #endif
+
+class GizmoPass {
+  public:
+  static constexpr char const *NAME = "Gizmo Pass";
+  Pair<double, char const *>   get_duration() { return {timestamps.duration, NAME}; }
+
+#define RESOURCE_LIST                                                                              \
+  RESOURCE(signature);                                                                             \
+  RESOURCE(pso);                                                                                   \
+  RESOURCE(pass);                                                                                  \
+  RESOURCE(frame_buffer);                                                                          \
+  RESOURCE(rt);
+
+#define RESOURCE(name) Resource_ID name{};
+  RESOURCE_LIST
+#undef RESOURCE
+  void release(rd::IDevice *factory) {
+    timestamps.release(factory);
+#define RESOURCE(name)                                                                             \
+  if (name.is_valid()) factory->release_resource(name);
+    RESOURCE_LIST
+#undef RESOURCE
+  }
+#undef RESOURCE_LIST
+
+  u32         width  = 0;
+  u32         height = 0;
+  Resource_ID last_depth_rt{};
+
+  public:
+  TimeStamp_Pool timestamps = {};
+  struct PushConstants {
+    float4x4 viewproj;
+    float4x4 world_transform;
+  };
+  void init(RenderingContext rctx) {
+    timestamps.init(rctx.factory);
+    pass = [=] {
+      rd::Render_Pass_Create_Info info{};
+      rd::RT_Ref                  rt0{};
+      rt0.format            = rd::Format::RGBA32_FLOAT;
+      rt0.clear_color.clear = true;
+      rt0.clear_color.r     = 0.0f;
+      rt0.clear_color.g     = 0.0f;
+      rt0.clear_color.b     = 0.0f;
+      rt0.clear_color.a     = 0.0f;
+      info.rts.push(rt0);
+
+      info.depth_target.enabled           = true;
+      info.depth_target.clear_depth.clear = false;
+      info.depth_target.format            = rd::Format::D32_OR_R32_FLOAT;
+      return rctx.factory->create_render_pass(info);
+    }();
+  }
+  void update_frame_buffer(RenderingContext rctx, Resource_ID depth_rt) {
+    if (frame_buffer.is_valid()) rctx.factory->release_resource(frame_buffer);
+    if (rt.is_valid()) rctx.factory->release_resource(rt);
+
+    rt = [=] {
+      rd::Image_Create_Info rt0_info{};
+      rt0_info.format     = rd::Format::RGBA32_FLOAT;
+      rt0_info.width      = width;
+      rt0_info.height     = height;
+      rt0_info.depth      = 1;
+      rt0_info.layers     = 1;
+      rt0_info.levels     = 1;
+      rt0_info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_RT |      //
+                            (u32)rd::Image_Usage_Bits::USAGE_SAMPLED | //
+                            (u32)rd::Image_Usage_Bits::USAGE_UAV;
+      return rctx.factory->create_image(rt0_info);
+    }();
+
+    frame_buffer = [=] {
+      rd::Frame_Buffer_Create_Info info{};
+      rd::RT_View                  rt0{};
+      rt0.image  = rt;
+      rt0.format = rd::Format::RGBA32_FLOAT;
+      info.rts.push(rt0);
+
+      info.depth_target.enabled = true;
+      info.depth_target.image   = depth_rt;
+      info.depth_target.format  = rd::Format::D32_OR_R32_FLOAT;
+      return rctx.factory->create_frame_buffer(pass, info);
+    }();
+  }
+  void render(RenderingContext rctx, Resource_ID depth_rt) {
+    timestamps.update(rctx.factory);
+    u32 width  = rctx.config->get_u32("g_buffer_width");
+    u32 height = rctx.config->get_u32("g_buffer_height");
+    if (this->width != width || this->height != height || last_depth_rt.data != depth_rt.data) {
+      this->width   = width;
+      this->height  = height;
+      last_depth_rt = depth_rt;
+      update_frame_buffer(rctx, depth_rt);
+    }
+    if (rctx.config->get_bool("render_gizmo")) {
+      auto g_camera = rctx.gizmo_layer->get_camera();
+      {
+        float dx = 1.0e-1f * g_camera.distance;
+        rctx.gizmo_layer->draw_sphere(g_camera.look_at, dx * 0.04f, float3{1.0f, 1.0f, 1.0f});
+        rctx.gizmo_layer->draw_cylinder(g_camera.look_at, g_camera.look_at + float3{dx, 0.0f, 0.0f},
+                                        dx * 0.04f, float3{1.0f, 0.0f, 0.0f});
+        rctx.gizmo_layer->draw_cylinder(g_camera.look_at, g_camera.look_at + float3{0.0f, dx, 0.0f},
+                                        dx * 0.04f, float3{0.0f, 1.0f, 0.0f});
+        rctx.gizmo_layer->draw_cylinder(g_camera.look_at, g_camera.look_at + float3{0.0f, 0.0f, dx},
+                                        dx * 0.04f, float3{0.0f, 0.0f, 1.0f});
+      }
+    }
+
+    struct PushConstants {
+      float4x4 viewproj;
+      float4x4 world_transform;
+    } pc;
+
+    float4x4 viewproj = rctx.gizmo_layer->get_camera().viewproj();
+
+    rd::ICtx *ctx = rctx.factory->start_render_pass(pass, frame_buffer);
+    {
+      TracyVulkIINamedZone(ctx, "Gizmo Pass");
+      timestamps.begin_range(ctx);
+      ctx->start_render_pass();
+
+      ctx->set_viewport(0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f);
+      ctx->set_scissor(0, 0, width, height);
+      rctx.gizmo_layer->render(ctx, width, height);
+      ctx->end_render_pass();
+      timestamps.end_range(ctx);
+    }
+    rctx.gizmo_layer->reset();
+    Resource_ID e = rctx.factory->end_render_pass(ctx);
+    timestamps.commit(e);
+  }
+};
+
+class ComposePass {
+  public:
+  static constexpr char const *NAME = "Compose Pass";
+  Pair<double, char const *>   get_duration() { return {timestamps.duration, NAME}; }
+
+#define RESOURCE_LIST                                                                              \
+  RESOURCE(signature);                                                                             \
+  RESOURCE(sampler_state);                                                                         \
+  RESOURCE(rt);                                                                                    \
+  RESOURCE(pso);
+
+#define RESOURCE(name) Resource_ID name{};
+  RESOURCE_LIST
+#undef RESOURCE
+
+  u32 width  = 0;
+  u32 height = 0;
+
+  public:
+  TimeStamp_Pool timestamps = {};
+  struct PushConstants {};
+  void init(RenderingContext rctx) {
+    timestamps.init(rctx.factory);
+
+    signature = [=] {
+      rd::Binding_Space_Create_Info set_info{};
+      set_info.bindings.push({rd::Binding_t::UAV_TEXTURE, 1});
+      set_info.bindings.push({rd::Binding_t::SAMPLER, 1});
+      set_info.bindings.push({rd::Binding_t::TEXTURE, 16});
+      rd::Binding_Table_Create_Info table_info{};
+      table_info.spaces.push(set_info);
+      table_info.push_constants_size = 0; // sizeof(PushConstants);
+      return rctx.factory->create_signature(table_info);
+    }();
+    sampler_state = [&] {
+      rd::Sampler_Create_Info info;
+      MEMZERO(info);
+      info.address_mode_u = rd::Address_Mode::CLAMP_TO_EDGE;
+      info.address_mode_v = rd::Address_Mode::CLAMP_TO_EDGE;
+      info.address_mode_w = rd::Address_Mode::CLAMP_TO_EDGE;
+      info.mag_filter     = rd::Filter::LINEAR;
+      info.min_filter     = rd::Filter::LINEAR;
+      info.mip_mode       = rd::Filter::LINEAR;
+      info.max_lod        = 1000.0f;
+      info.anisotropy     = true;
+      info.max_anisotropy = 16.0f;
+      return rctx.factory->create_sampler(info);
+    }();
+    pso = [&] {
+      Resource_ID cs{};
+      defer(rctx.factory->release_resource(cs));
+      return rctx.factory->create_compute_pso(
+          signature, cs = rctx.factory->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
+[[vk::binding(0, 0)]] RWTexture2D<float4> compose        : register(u0, space0);
+[[vk::binding(1, 0)]] SamplerState        ss             : register(s1, space0);
+
+[[vk::binding(2, 0)]] Texture2D<float4>   inputs[16] : register(t2, space0);
+
+#define GBUFFER_NORMAL 0
+#define GBUFFER_DEPTH 1
+#define GIZMO_LAYER 2
+
+[numthreads(16, 16, 1)]
+void main(uint3 tid : SV_DispatchThreadID)
+{
+  uint width, height;
+  compose.GetDimensions(width, height);
+  if (tid.x >= width || tid.y >= height)
+    return;
+  float2 uv = (float2(tid.xy) + float2(0.5f, 0.5f)) / float2(width, height);
+  float3 normal = inputs[GBUFFER_NORMAL].Load(int3(tid.xy, 0)).xyz;
+  float3 gizmo  = inputs[GIZMO_LAYER].Load(int3(tid.xy, 0)).xyz;
+  float3 color = float3_splat(abs(dot(normal, normalize(float3(1.0, 1.0, 1.0)))));
+  compose[tid.xy] = float4(gizmo + pow(color, 0.5f), 1.0f);
+}
+)"),
+                                                      NULL, 0));
+    }();
+  }
+  void update_frame_buffer(RenderingContext rctx) {
+    if (rt.is_valid()) rctx.factory->release_resource(rt);
+    rt = [=] {
+      rd::Image_Create_Info rt0_info{};
+      rt0_info.format     = rd::Format::RGBA32_FLOAT;
+      rt0_info.width      = width;
+      rt0_info.height     = height;
+      rt0_info.depth      = 1;
+      rt0_info.layers     = 1;
+      rt0_info.levels     = 1;
+      rt0_info.usage_bits =                          //
+          (u32)rd::Image_Usage_Bits::USAGE_SAMPLED | //
+          (u32)rd::Image_Usage_Bits::USAGE_UAV;
+      return rctx.factory->create_image(rt0_info);
+    }();
+  }
+  void render(RenderingContext rctx, GBuffer gbuffer, Resource_ID gizmo_layer) {
+    timestamps.update(rctx.factory);
+    u32 width  = rctx.config->get_u32("g_buffer_width");
+    u32 height = rctx.config->get_u32("g_buffer_height");
+    if (this->width != width || this->height != height) {
+      this->width  = width;
+      this->height = height;
+      update_frame_buffer(rctx);
+    }
+    rd::IBinding_Table *table = rctx.factory->create_binding_table(signature);
+    defer(table->release());
+    table->bind_texture(0, 2, 0, gbuffer.normal, rd::Image_Subresource::top_level(),
+                        rd::Format::NATIVE);
+    table->bind_texture(0, 2, 1, gbuffer.depth, rd::Image_Subresource::top_level(),
+                        rd::Format::NATIVE);
+    table->bind_texture(0, 2, 2, gizmo_layer, rd::Image_Subresource::top_level(),
+                        rd::Format::NATIVE);
+    table->bind_UAV_texture(0, 0, 0, rt, rd::Image_Subresource::top_level(), rd::Format::NATIVE);
+    table->bind_sampler(0, 1, sampler_state);
+    rd::ICtx *ctx = rctx.factory->start_compute_pass();
+    {
+      TracyVulkIINamedZone(ctx, NAME);
+      timestamps.begin_range(ctx);
+      ctx->bind_compute(pso);
+      ctx->bind_table(table);
+      ctx->dispatch((width + 15) / 16, (height + 15) / 16, 1);
+      timestamps.end_range(ctx);
+    }
+    Resource_ID e = rctx.factory->end_compute_pass(ctx);
+    timestamps.commit(e);
+  }
+  void release(rd::IDevice *factory) {
+    timestamps.release(factory);
+#define RESOURCE(name)                                                                             \
+  if (name.is_valid()) factory->release_resource(name);
+    RESOURCE_LIST
+#undef RESOURCE
+  }
+#undef RESOURCE_LIST
+};
 #if 1
 class Event_Consumer : public IGUIApp {
   public:
-  GBufferPass      gbuffer_pass;
+  GBufferPass gbuffer_pass;
+  GizmoPass   gizmo_pass;
+  ComposePass compose_pass;
+
   RenderingContext rctx{};
   void             init_traverse(List *l) {
     if (l == NULL) return;
@@ -504,15 +766,38 @@ class Event_Consumer : public IGUIApp {
 
     ImGui::Begin("Config");
     rctx.config->on_imgui();
-    ImGui::Text("%fms", gbuffer_pass.timestamps.duration);
+    ImGui::Text("%s %fms", gbuffer_pass.get_duration().second, gbuffer_pass.get_duration().first);
+    ImGui::Text("%s %fms", gizmo_pass.get_duration().second, gizmo_pass.get_duration().first);
+    ImGui::Text("%s %fms", compose_pass.get_duration().second, compose_pass.get_duration().first);
     ImGui::End();
 
-    ImGui::Begin("main viewport");
+    ImGui::Begin("Gbuffer normal");
     rctx.gizmo_layer->per_imgui_window();
-    auto wsize = get_window_size();
-    ImGui::Image(bind_texture(gbuffer_pass.normal_rt, 0, 0, rd::Format::NATIVE),
-                 ImVec2(wsize.x, wsize.y));
-    { Ray ray = rctx.gizmo_layer->getMouseRay(); }
+    {
+      auto wsize = get_window_size();
+      ImGui::Image(bind_texture(gbuffer_pass.normal_rt, 0, 0, rd::Format::NATIVE),
+                   ImVec2(wsize.x, wsize.y));
+      { Ray ray = rctx.gizmo_layer->getMouseRay(); }
+    }
+    ImGui::End();
+    ImGui::Begin("Gbuffer depth");
+    {
+      auto wsize = get_window_size();
+      ImGui::Image(bind_texture(gbuffer_pass.depth_rt, 0, 0, rd::Format::NATIVE), ImVec2(wsize.x, wsize.y));
+    }
+    ImGui::End();
+    ImGui::Begin(gizmo_pass.NAME);
+    {
+      auto wsize = get_window_size();
+      ImGui::Image(bind_texture(gizmo_pass.rt, 0, 0, rd::Format::NATIVE), ImVec2(wsize.x, wsize.y));
+    }
+    ImGui::End();
+    ImGui::Begin(compose_pass.NAME);
+    {
+      auto wsize = get_window_size();
+      ImGui::Image(bind_texture(compose_pass.rt, 0, 0, rd::Format::NATIVE),
+                   ImVec2(wsize.x, wsize.y));
+    }
     ImGui::End();
   }
   void on_init() override { //
@@ -532,7 +817,9 @@ class Event_Consumer : public IGUIApp {
     rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/light/scene.gltf"));
     rctx.scene->update();
     gbuffer_pass.init(rctx);
-    rctx.gizmo_layer = Gizmo_Layer::create(factory, gbuffer_pass.pass);
+    gizmo_pass.init(rctx);
+    compose_pass.init(rctx);
+    rctx.gizmo_layer = Gizmo_Layer::create(factory, gizmo_pass.pass);
     char *state      = read_file_tmp("scene_state");
 
     if (state != NULL) {
@@ -557,18 +844,16 @@ class Event_Consumer : public IGUIApp {
     fprintf(scene_dump, ")\n");
     rctx.gizmo_layer->release();
     rctx.scene->release();
+    compose_pass.release(rctx.factory);
+    gizmo_pass.release(rctx.factory);
+    compose_pass.release(rctx.factory);
     delete rctx.config;
   }
   void on_frame() override { //
-    /*rctx.scene->traverse([&](Node *node) {
-      if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
-        if (mn->getComponent<GizmoComponent>() == NULL) {
-          GizmoComponent::create(rctx.gizmo_layer, mn);
-        }
-      }
-    });*/
     rctx.scene->get_root()->update();
     gbuffer_pass.render(rctx);
+    gizmo_pass.render(rctx, gbuffer_pass.get_gbuffer().depth);
+    compose_pass.render(rctx, gbuffer_pass.get_gbuffer(), gizmo_pass.rt);
   }
 };
 #endif
@@ -576,11 +861,11 @@ int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
 
-  auto window_loop = [](rd::Impl_t impl) { IGUIApp::start<Event_Consumer>(impl); };
-   //std::thread vulkan_thread = std::thread([window_loop] { window_loop(rd::Impl_t::VULKAN); });
-  std::thread dx12_thread = std::thread([window_loop] { window_loop(rd::Impl_t::DX12); });
-   //vulkan_thread.join();
-  dx12_thread.join();
+  auto        window_loop   = [](rd::Impl_t impl) { IGUIApp::start<Event_Consumer>(impl); };
+  //std::thread vulkan_thread = std::thread([window_loop] { window_loop(rd::Impl_t::VULKAN); });
+   std::thread dx12_thread = std::thread([window_loop] { window_loop(rd::Impl_t::DX12); });
+  //vulkan_thread.join();
+   dx12_thread.join();
 
   return 0;
 }

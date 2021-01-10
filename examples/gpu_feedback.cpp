@@ -146,7 +146,7 @@ class Feedback_Pass : public rd::IPass {
       cl.d     = 0.0f;
       rd::Image_Create_Info info;
       MEMZERO(info);
-      info.format     = rd::Format::D32_FLOAT;
+      info.format     = rd::Format::D32_OR_R32_FLOAT;
       info.width      = width;
       info.height     = height;
       info.depth      = 1;
