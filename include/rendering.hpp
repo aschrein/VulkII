@@ -370,7 +370,7 @@ struct Clear_Depth {
 
 enum class Fence_Position { PASS_FINISED };
 
-enum class Pass_t { COMPUTE, RENDER, ASYNC_COMPUTE, ASYNC_COPY };
+enum class Pass_t { UNKNOWN, COMPUTE, RENDER, ASYNC_COMPUTE, ASYNC_COPY };
 
 struct RT_Ref {
   bool   enabled;
@@ -557,7 +557,7 @@ class IDevice {
   virtual Resource_ID create_sampler(Sampler_Create_Info const &info)                          = 0;
   // Deferred release. Must call new_frame 3-6 times for the actual release to make sure it's not
   // used by the GPU.
-  virtual void release_resource(Resource_ID id) = 0;
+  virtual void release_resource(Resource_ID id, u32 delay = 6) = 0;
   // virtual Resource_ID     create_event()                                            = 0;
   virtual Resource_ID     create_timestamp()                                        = 0;
   virtual Resource_ID     get_swapchain_image()                                     = 0;
@@ -574,10 +574,11 @@ class IDevice {
                                               Graphics_Pipeline_State const &)      = 0;
   virtual Resource_ID     create_signature(Binding_Table_Create_Info const &info)   = 0;
   virtual IBinding_Table *create_binding_table(Resource_ID signature)               = 0;
-  virtual bool            get_timestamp_state(Resource_ID)                          = 0;
-  virtual double          get_timestamp_ms(Resource_ID t0, Resource_ID t1)          = 0;
-  virtual void            wait_idle()                                               = 0;
-  virtual bool            get_event_state(Resource_ID id)                           = 0;
+  // virtual bool            get_timestamp_state(Resource_ID)                          = 0;
+  // virtual void            reset_timestamp(Resource_ID)                              = 0;
+  virtual double get_timestamp_ms(Resource_ID t0, Resource_ID t1) = 0;
+  virtual void   wait_idle()                                      = 0;
+  virtual bool   get_event_state(Resource_ID id)                  = 0;
   // Halts current thread
   virtual void   wait_for_event(Resource_ID id) = 0;
   virtual Impl_t getImplType()                  = 0;

@@ -283,6 +283,7 @@ enum class Resource_Type : u32 {
   GRAPHICS_PSO,
   RENDER_PASS,
   FRAME_BUFFER,
+  TIMESTAMP,
 };
 
 template <typename T> class Resource_Array {
@@ -376,6 +377,124 @@ struct EventWrapper {
   void                release() { CloseHandle(event); }
 };
 
+class QueryHeap {
+  private:
+  ComPtr<ID3D12Resource>  readback_buffer;
+  ComPtr<ID3D12QueryHeap> heap;
+  D3D12_QUERY_HEAP_TYPE   type        = D3D12_QUERY_HEAP_TYPE_OCCLUSION;
+  Util_Allocator *        ul          = NULL;
+  size_t                  num_queries = 0;
+  u64 *                   mapping     = NULL;
+  QueryHeap()                         = default;
+  ~QueryHeap()                        = default;
+
+  public:
+  static QueryHeap *create(ID3D12Device *device, D3D12_QUERY_HEAP_TYPE type, size_t size) {
+    QueryHeap *out   = new QueryHeap;
+    out->ul          = new Util_Allocator(size);
+    out->type        = type;
+    out->num_queries = size;
+    D3D12_QUERY_HEAP_DESC heapDesc{};
+    heapDesc.Type     = type;
+    heapDesc.Count    = size;
+    heapDesc.NodeMask = 0;
+
+    DX_ASSERT_OK(device->CreateQueryHeap(&heapDesc, IID_PPV_ARGS(&out->heap)));
+
+    D3D12_RESOURCE_DESC readbackBufferDesc{};
+    readbackBufferDesc.Alignment          = 0;
+    readbackBufferDesc.Dimension          = D3D12_RESOURCE_DIMENSION_BUFFER;
+    readbackBufferDesc.Width              = size * sizeof(uint64_t);
+    readbackBufferDesc.Height             = 1;
+    readbackBufferDesc.DepthOrArraySize   = 1;
+    readbackBufferDesc.Format             = DXGI_FORMAT_UNKNOWN;
+    readbackBufferDesc.Layout             = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    readbackBufferDesc.MipLevels          = 1;
+    readbackBufferDesc.SampleDesc.Count   = 1;
+    readbackBufferDesc.SampleDesc.Quality = 0;
+    readbackBufferDesc.Flags              = D3D12_RESOURCE_FLAG_NONE;
+
+    D3D12_HEAP_PROPERTIES readbackHeapProps{};
+    readbackHeapProps.Type                 = D3D12_HEAP_TYPE_READBACK;
+    readbackHeapProps.CPUPageProperty      = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+    readbackHeapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+    readbackHeapProps.CreationNodeMask     = 0;
+    readbackHeapProps.VisibleNodeMask      = 0;
+    DX_ASSERT_OK(device->CreateCommittedResource(
+        &readbackHeapProps, D3D12_HEAP_FLAG_NONE, &readbackBufferDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&out->readback_buffer)));
+    D3D12_RANGE range{0, sizeof(u64) * size};
+    void *      data = NULL;
+    DX_ASSERT_OK(out->readback_buffer->Map(0, &range, &data));
+    out->mapping = (u64 *)data;
+    return out;
+  }
+  void update(ComPtr<ID3D12GraphicsCommandList> cmd) {
+    cmd->ResolveQueryData(heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, num_queries,
+                          readback_buffer.Get(), 0);
+  }
+  // ComPtr<ID3D12Resource>  get_readback() { return readback_buffer; }
+  u64 *                   get_results() { return mapping; }
+  ComPtr<ID3D12QueryHeap> get_heap() { return heap; }
+  ptrdiff_t               allocate(size_t cnt) { return ul->alloc(1, cnt); }
+  void                    free(size_t offset, size_t cnt) { ul->free(offset, cnt); }
+  void                    release() {
+    D3D12_RANGE range{0, sizeof(u64) * num_queries};
+    readback_buffer->Unmap(0, &range);
+    delete ul;
+    delete this;
+  }
+};
+
+class Timestamp {
+  private:
+  u32 query_id = 0;
+  // ComPtr<ID3D12Fence> fence;
+  QueryHeap *common_heap = NULL;
+  QueryHeap *copy_heap   = NULL;
+  rd::Pass_t last_type   = rd::Pass_t::UNKNOWN;
+
+  public:
+  Timestamp(ID3D12Device *device, QueryHeap *common_heap, QueryHeap *copy_heap)
+      : query_id(query_id), common_heap(common_heap), copy_heap(copy_heap) {
+    // DX_ASSERT_OK(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)));
+    ptrdiff_t offset0 = common_heap->allocate(1);
+    ptrdiff_t offset1 = copy_heap->allocate(1);
+    ASSERT_DEBUG(offset0 == offset1 && offset0 >= 0);
+    query_id = (u32)offset0;
+  }
+  rd::Pass_t get_last_type() { return last_type; }
+  void       place(ComPtr<ID3D12GraphicsCommandList> cmd, rd::Pass_t type) {
+    // ASSERT_DEBUG(last_type == rd::Pass_t::UNKNOWN);
+    last_type = type;
+    if (type == rd::Pass_t::ASYNC_COPY) {
+      cmd->EndQuery(copy_heap->get_heap().Get(), D3D12_QUERY_TYPE_TIMESTAMP, query_id);
+
+    } else {
+      cmd->EndQuery(common_heap->get_heap().Get(), D3D12_QUERY_TYPE_TIMESTAMP, query_id);
+    }
+  }
+  // bool is_ready() { return fence->GetCompletedValue() == 1; }
+  /*void reset() {
+    fence->Signal(0);
+    last_type = rd::Pass_t::UNKNOWN;
+  }*/
+  u64 get_value() {
+    QueryHeap *heap = last_type == rd::Pass_t::ASYNC_COPY ? copy_heap : common_heap;
+    return heap->get_results()[query_id];
+    /* D3D12_RANGE range{sizeof(u64) * query_id, sizeof(u64) * (query_id + 1)};
+     void *      data = NULL;
+     DX_ASSERT_OK(heap->get_readback()->Map(0, &range, &data));
+     u64 val = *(u64 *)data;
+     heap->get_readback()->Unmap(0, &range);
+     return val;*/
+  }
+  ~Timestamp() {
+    common_heap->free(query_id, 1);
+    copy_heap->free(query_id, 1);
+  }
+};
+
 class DX12Device : public rd::IDevice {
   static constexpr u32 NUM_BACK_BUFFERS = 3;
 
@@ -439,8 +558,11 @@ class DX12Device : public rd::IDevice {
   Resource_Array<RenderPass *>         renderpass_table;
   Resource_Array<FrameBuffer *>        fb_table;
   Resource_Array<EventWrapper *>       event_table;
+  Resource_Array<Timestamp *>          timestamp_table;
+  QueryHeap *                          common_timestamp_heap = NULL;
+  QueryHeap *                          copy_timestamp_heap   = NULL;
 
-  AutoArray<Pair<Resource_ID, i32>> deferred_release;
+  AutoArray<Pair<Resource_ID, u32>> deferred_release;
   struct Deferred_Descriptor_Range_Release {
     D3D12_DESCRIPTOR_HEAP_TYPE type;
     u32                        offset;
@@ -511,6 +633,7 @@ class DX12Device : public rd::IDevice {
     deferred_desc_range_release.push({type, offset, size, 6});
   }
   ResourceWrapper *      get_resource(ID id) { return resource_table.load(id); }
+  Timestamp *            get_timestamp(ID id) { return timestamp_table.load(id); }
   EventWrapper *         get_event(ID id) { return event_table.load(id); }
   DX12Binding_Signature *get_signature(ID id) { return signature_table.load(id); }
   ID3D12PipelineState *  get_compute_pso(ID id) { return compute_pso_table.load(id); }
@@ -556,6 +679,8 @@ class DX12Device : public rd::IDevice {
   GPU_Desc_Heap *get_common_desc_heap() { return common_desc_heap; }
   GPU_Desc_Heap *get_rtv_desc_heap() { return rtv_desc_heap; }
   GPU_Desc_Heap *get_dsv_desc_heap() { return dsv_desc_heap; }
+  QueryHeap *    get_common_timestamp_heap() { return common_timestamp_heap; }
+  QueryHeap *    get_copy_timestamp_heap() { return copy_timestamp_heap; }
   DX12Device(void *hdl) {
 #ifdef DEBUG_BUILD
     {
@@ -595,6 +720,10 @@ class DX12Device : public rd::IDevice {
       }
     }
 #endif
+    common_timestamp_heap =
+        QueryHeap::create(device.Get(), D3D12_QUERY_HEAP_TYPE_TIMESTAMP, 1 << 10);
+    copy_timestamp_heap =
+        QueryHeap::create(device.Get(), D3D12_QUERY_HEAP_TYPE_COPY_QUEUE_TIMESTAMP, 1 << 10);
     dsv_desc_heap     = new GPU_Desc_Heap(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 2048,
                                       D3D12_DESCRIPTOR_HEAP_FLAG_NONE);
     rtv_desc_heap     = new GPU_Desc_Heap(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 2048,
@@ -882,9 +1011,9 @@ class DX12Device : public rd::IDevice {
        + sampler_desc_heap->get_element_size() * id});*/
     return {sampler_table.push(new D3D12_SAMPLER_DESC(desc)), (u32)Resource_Type::SAMPLER};
   } // namespace
-  void release_resource(Resource_ID id) override {
+  void release_resource(Resource_ID id, u32 delay = 6) override {
     SCOPED_LOCK;
-    deferred_release.push({id, 6});
+    deferred_release.push({id, delay});
     // if (id.type == (u32)Resource_Type::BUFFER) {
     //  // get_resource(id.id)->Release();
     //
@@ -909,7 +1038,9 @@ class DX12Device : public rd::IDevice {
   }
   Resource_ID create_timestamp() override {
     SCOPED_LOCK;
-    TRAP;
+    return {timestamp_table.push(
+                new Timestamp(device.Get(), common_timestamp_heap, copy_timestamp_heap)),
+            (u32)Resource_Type::TIMESTAMP};
   }
   Resource_ID get_swapchain_image() override {
     return {sc.images[frame_contexts[cur_ctx_id].sc_image_id], (u32)Resource_Type::TEXTURE};
@@ -1002,14 +1133,38 @@ class DX12Device : public rd::IDevice {
   rd::ICtx *  start_async_copy_pass() override;
   Resource_ID end_async_copy_pass(rd::ICtx *ctx) override;
 
-  bool get_timestamp_state(Resource_ID) override {
+  /* bool get_timestamp_state(Resource_ID id) override {
+     SCOPED_LOCK;
+     Timestamp *t = timestamp_table.load(id.id);
+     return t->is_ready();
+   }*/
+  double get_timestamp_ms(Resource_ID tid0, Resource_ID tid1) override {
     SCOPED_LOCK;
-    TRAP;
+    Timestamp *t0   = timestamp_table.load(tid0.id);
+    Timestamp *t1   = timestamp_table.load(tid1.id);
+    u64        val0 = t0->get_value();
+    u64        val1 = t1->get_value();
+
+    u64  cpuTimestamp       = 0;
+    u64  gpuTimestamp       = 0;
+    u64  timestampFrequency = 0;
+    auto last_type          = t0->get_last_type();
+    ASSERT_DEBUG(t0->get_last_type() == t1->get_last_type() &&
+                 t0->get_last_type() != rd::Pass_t::UNKNOWN);
+    ComPtr<ID3D12CommandQueue> queue = gfx_cmd_queue;
+    if (last_type == rd::Pass_t::ASYNC_COMPUTE)
+      queue = compute_cmd_queue;
+    else if (last_type == rd::Pass_t::ASYNC_COPY)
+      queue = copy_cmd_queue;
+    DX_ASSERT_OK(queue->GetTimestampFrequency(&timestampFrequency));
+    DX_ASSERT_OK(queue->GetClockCalibration(&gpuTimestamp, &cpuTimestamp));
+    return double(val1 - val0) / double(timestampFrequency) * 1000.0;
   }
-  double get_timestamp_ms(Resource_ID t0, Resource_ID t1) override {
+  /*void reset_timestamp(Resource_ID id) override {
     SCOPED_LOCK;
-    TRAP;
-  }
+    Timestamp *t = timestamp_table.load(id.id);
+    t->reset();
+  }*/
   void wait_idle() override {
     for (auto q : {gfx_cmd_queue, compute_cmd_queue, copy_cmd_queue}) {
       ComPtr<ID3D12Fence> fence;
@@ -1059,6 +1214,8 @@ class DX12Device : public rd::IDevice {
     if (sampler_desc_heap) delete sampler_desc_heap;
     if (rtv_desc_heap) delete rtv_desc_heap;
     if (dsv_desc_heap) delete dsv_desc_heap;
+    if (common_timestamp_heap) common_timestamp_heap->release();
+    if (copy_timestamp_heap) copy_timestamp_heap->release();
     delete this;
   }
   void start_frame() override {
@@ -1132,23 +1289,23 @@ class DX12Device : public rd::IDevice {
     TracyD3D12Collect(tracy_ctx.compute_queue_context);
     TracyD3D12Collect(tracy_ctx.copy_queue_context);
 #endif
-    ASSERT_DEBUG(in_frame);
-    in_frame = false;
+
     ASSERT_SINGLE_THREAD_SCOPE; // not a reentrant scope.
+    {
+      auto cmd = alloc_graphics_cmd();
+      common_timestamp_heap->update(cmd);
+      DX_ASSERT_OK(cmd->Close());
+      gfx_cmd_queue->ExecuteCommandLists(1, (ID3D12CommandList **)cmd.GetAddressOf());
+    }
+    {
+      auto cmd = alloc_copy_cmd();
+      copy_timestamp_heap->update(cmd);
+      DX_ASSERT_OK(cmd->Close());
+      copy_cmd_queue->ExecuteCommandLists(1, (ID3D12CommandList **)cmd.GetAddressOf());
+    }
     // Prepare the swapchain image for presentation.
     if (sc.enabled) {
-      /* auto cmd = alloc_graphics_cmd();
-       D3D12_RESOURCE_BARRIER barrier = {};
-        barrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-        barrier.Transition.pResource =
-            get_resource(sc.images[frame_contexts[cur_ctx_id].sc_image_id]);
-        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
-        barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PRESENT;
-        cmd->ResourceBarrier(1, &barrier);
-        DX_ASSERT_OK(cmd->Close());
-        cmd_queue->ExecuteCommandLists(1, (ID3D12CommandList **)cmd.GetAddressOf());*/
+
       sc.sc->Present(0, 0);
     }
     u64 fence_value                        = sc.last_fence_signaled_value + 1;
@@ -1157,6 +1314,8 @@ class DX12Device : public rd::IDevice {
     gfx_cmd_queue->Signal(gfx_fence.Get(), frame_contexts[cur_ctx_id].fence_value);
     compute_cmd_queue->Signal(compute_fence.Get(), frame_contexts[cur_ctx_id].fence_value);
     copy_cmd_queue->Signal(copy_fence.Get(), frame_contexts[cur_ctx_id].fence_value);
+    ASSERT_DEBUG(in_frame);
+    in_frame   = false;
     cur_ctx_id = (cur_ctx_id + 1) % NUM_BACK_BUFFERS;
   }
 };
@@ -2047,8 +2206,10 @@ class DX12Context : public rd::ICtx {
   void buffer_barrier(Resource_ID buf_id, rd::Buffer_Access access) override {
     _buffer_barrier(buf_id, to_dx(access));
   }
-  // void insert_event(Resource_ID id) override { TRAP; }
-  void insert_timestamp(Resource_ID timestamp_id) override { TRAP; }
+  void insert_timestamp(Resource_ID id) override {
+    Timestamp *t = dev_ctx->get_timestamp(id.id);
+    t->place(cmd, type);
+  }
 };
 rd::ICtx *DX12Device::start_async_compute_pass() {
   SCOPED_LOCK;
@@ -2318,7 +2479,7 @@ void DX12Device::deferred_desc_range_release_iteration() {
   }
 }
 void DX12Device::deferred_resource_release_iteration() {
-  AutoArray<Pair<Resource_ID, i32>> new_deferred_release;
+  AutoArray<Pair<Resource_ID, u32>> new_deferred_release;
   ito(deferred_release.size) {
     auto item = deferred_release[i];
     item.second -= 1;
@@ -2363,6 +2524,10 @@ void DX12Device::deferred_resource_release_iteration() {
         s->release();
         delete s;
         event_table.free(item.first.id);
+      } else if (item.first.type == (u32)Resource_Type::TIMESTAMP) {
+        auto s = timestamp_table.load(item.first.id);
+        delete s;
+        timestamp_table.free(item.first.id);
       } else {
         TRAP;
       }

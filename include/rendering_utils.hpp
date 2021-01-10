@@ -412,7 +412,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
           if (event.type == SDL_WINDOWEVENT) {
             if (event.window.windowID != window_id) continue;
             if (event.window.event == SDL_WINDOWEVENT_CLOSE) {
-              return;
+              goto exit_loop;
             } else if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED ||
                        event.window.event == SDL_WINDOWEVENT_ENTER) {
               focus_events = true;
@@ -636,6 +636,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
       // factory->wait_idle();
       frame_id = (frame_id + 1) % NUM_FRAMES;
     }
+  exit_loop:
     on_release();
     ImGui_ImplSDL2_Shutdown();
     ImGui::DestroyContext(imgui_ctx);
@@ -687,18 +688,17 @@ static void init_buffer(rd::IDevice *factory, Resource_ID buf, void const *src, 
   factory->release_resource(staging);
 }
 
-#if 0
-
+#if 1
 
 template <typename T> static Resource_ID create_uniform(rd::IDevice *factory, T const &src) {
 
   rd::Buffer_Create_Info info;
   MEMZERO(info);
-  info.memory_type   = rd::Memory_Type::CPU_WRITE_GPU_READ;
-  info.usage_bits = (u32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER;
-  info.size       = sizeof(T);
-  Resource_ID out = factory->create_buffer(info);
-  void *      dst = factory->map_buffer(out);
+  info.memory_type = rd::Memory_Type::CPU_WRITE_GPU_READ;
+  info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER;
+  info.size        = sizeof(T);
+  Resource_ID out  = factory->create_buffer(info);
+  void *      dst  = factory->map_buffer(out);
   memcpy(dst, &src, sizeof(src));
   factory->unmap_buffer(out);
   return out;
@@ -721,43 +721,81 @@ static Resource_ID get_or_create_image(rd::IDevice *factory, rd::Image_Create_In
 }
 
 struct TimeStamp_Pool {
-  InlineArray<Resource_ID, 0x10> timestamps;
-  double                         duration;
-  void                           init() { timestamps.init(); }
-  void                           insert(rd::IDevice *factory, rd::Imm_Ctx *ctx) {
-    if (timestamps.size == 0x10) {
-      ito(0x10) { factory->release_resource(timestamps[i]); }
-      timestamps[0]   = ctx->insert_timestamp();
-      timestamps.size = 1;
-    } else {
-      timestamps.push(ctx->insert_timestamp());
+  static constexpr u32 NUM_TIMESTAMPS = 0x10;
+
+  u64 head = 0;
+  u64 tail = 0;
+  struct Query {
+    bool        in_fly = false;
+    Resource_ID t0;
+    Resource_ID t1;
+    Resource_ID e;
+  };
+  i32    cur_query_id = -1;
+  Query  timestamps[NUM_TIMESTAMPS]{};
+  double duration = 0.0;
+
+  void init(rd::IDevice *factory) {
+    ito(NUM_TIMESTAMPS) {
+      timestamps[i].in_fly = false;
+      timestamps[i].t0     = factory->create_timestamp();
+      timestamps[i].t1     = factory->create_timestamp();
     }
   }
-  void update(rd::IDevice *factory) {
-    if (timestamps.size < 2) return;
-    u32 cnt = 0;
-    ito(timestamps.size / 2) {
-      bool ready = factory->get_timestamp_state(timestamps[i * 2]) &&
-                   factory->get_timestamp_state(timestamps[i * 2 + 1]);
-      if (ready) {
-        cnt++;
-        duration +=
-            (factory->get_timestamp_ms(timestamps[i * 2], timestamps[i * 2 + 1]) - duration) * 0.05;
-      } else {
-        break;
+  void begin_range(rd::ICtx *ctx) {
+    ito(NUM_TIMESTAMPS) {
+      if (timestamps[i].in_fly == false) {
+        cur_query_id = i;
+        ctx->insert_timestamp(timestamps[cur_query_id].t0);
+        return;
       }
     }
-    ito(cnt) {
-      factory->release_resource(timestamps[i * 2]);
-      factory->release_resource(timestamps[i * 2 + 1]);
+    cur_query_id = -1;
+  }
+  void end_range(rd::ICtx *ctx) {
+    if (cur_query_id == -1) return;
+    ctx->insert_timestamp(timestamps[cur_query_id].t1);
+  }
+  void commit(Resource_ID e) {
+    if (cur_query_id == -1) return;
+    timestamps[cur_query_id].e      = e;
+    timestamps[cur_query_id].in_fly = true;
+  }
+  void update(rd::IDevice *factory) {
+    ito(NUM_TIMESTAMPS) {
+      if (timestamps[i].in_fly) {
+        bool ready = factory->get_event_state(timestamps[i].e);
+        if (ready) {
+          timestamps[i].in_fly = false;
+          double cur_dur       = factory->get_timestamp_ms(timestamps[i].t0, timestamps[i].t1);
+          duration += (cur_dur - duration) * 0.05;
+        }
+      }
     }
-    for (u32 i = cnt * 2; i < timestamps.size; i++) {
-      timestamps[i - cnt * 2] = timestamps[i];
-    }
-    timestamps.size -= cnt * 2;
+    // if (tail + 1 >= head) return;
+    // u32 cnt = 0;
+    // while (tail + 1 <= head) {
+    //  bool ready = factory->get_event_state(timestamps[(tail) % NUM_TIMESTAMPS].e);
+    //  if (ready) {
+    //    tail++;
+    //    cnt++;
+    //    double cur_dur = factory->get_timestamp_ms(timestamps[(tail) % NUM_TIMESTAMPS].t0,
+    //                                               timestamps[(tail) % NUM_TIMESTAMPS].t1);
+    //    fprintf(stdout, "cur duration : %f\n", cur_dur);
+    //    duration += (cur_dur - duration) * 0.05;
+
+    //  } else {
+    //    fprintf(stdout, "Not Ready!\n");
+    //    break;
+    //  }
+    //  tail += 1;
+    //}
   }
   void release(rd::IDevice *factory) {
-    ito(0x10) { factory->release_resource(timestamps[i]); }
+    ito(NUM_TIMESTAMPS) {
+      factory->release_resource(timestamps[i].t0);
+      factory->release_resource(timestamps[i].t1);
+    }
   }
 };
 #endif // 0
@@ -983,7 +1021,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     MEMZERO(pc);
     pc.op = filter;
     switch (image->format) {
-      // clang-format off
+    // clang-format off
       case rd::Format::RGBA8_SRGBA:  {  pc.format = 0; } break;
       case rd::Format::RGBA8_UNORM:  {  pc.format = 1; } break;
       case rd::Format::RGB32_FLOAT:  {  pc.format = 2; } break;

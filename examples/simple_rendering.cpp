@@ -186,21 +186,22 @@ class GBufferPass {
   RESOURCE_LIST
 #  undef RESOURCE
 
-  u32         width  = 0;
-  u32         height = 0;
-  //BufferThing bthing{};
+  u32 width  = 0;
+  u32 height = 0;
+  // BufferThing bthing{};
 
   rd::Render_Pass_Create_Info info{};
   rd::Graphics_Pipeline_State gfx_state{};
 
   public:
-  // TimeStamp_Pool timestamps = {};
+  TimeStamp_Pool timestamps = {};
   struct PushConstants {
     float4x4 viewproj;
     float4x4 world_transform;
   };
   void init(RenderingContext rctx) {
-    //bthing.init(rctx.factory);
+    timestamps.init(rctx.factory);
+    // bthing.init(rctx.factory);
     gbuffer_vs = rctx.factory->create_shader(rd::Stage_t::VERTEX, stref_s(R"(
 struct PushConstants
 {
@@ -380,10 +381,10 @@ float4 main(in PSInput input) : SV_TARGET0 {
     }();
   }
   void render(RenderingContext rctx) {
-    // timestamps.update(rctx.factory);
+    timestamps.update(rctx.factory);
     // float4x4 bvh_visualizer_offset = glm::translate(float4x4(1.0f), float3(-10.0f, 0.0f,
     // 0.0f));
-    //bthing.test_buffers(rctx.factory);
+    // bthing.test_buffers(rctx.factory);
     u32 width  = rctx.config->get_u32("g_buffer_width");
     u32 height = rctx.config->get_u32("g_buffer_height");
     if (this->width != width || this->height != height) {
@@ -415,18 +416,11 @@ float4 main(in PSInput input) : SV_TARGET0 {
     rd::ICtx *ctx = rctx.factory->start_render_pass(pass, frame_buffer);
     {
       TracyVulkIINamedZone(ctx, "GBuffer Pass");
+      timestamps.begin_range(ctx);
       ctx->start_render_pass();
 
-      // timestamps.insert(rctx.factory, ctx);
       ctx->set_viewport(0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f);
       ctx->set_scissor(0, 0, width, height);
-      float dx = 0.0f;
-      // float4x4 world = float4x4(  //
-      //    1.0f, 0.0f, 0.0f, dx,   //
-      //    0.0f, 1.0f, 0.0f, 0.0f, //
-      //    0.0f, 0.0f, 1.0f, 0.0f, //
-      //    0.0f, 0.0f, 0.0f, 1.0f  //
-      //);
       pc.viewproj = viewproj;
 
       rd::IBinding_Table *table = rctx.factory->create_binding_table(signature);
@@ -448,11 +442,11 @@ float4 main(in PSInput input) : SV_TARGET0 {
       });
       rctx.gizmo_layer->render(ctx, width, height);
       ctx->end_render_pass();
+      timestamps.end_range(ctx);
     }
-    rctx.factory->end_render_pass(ctx);
 
-    // timestamps.insert(rctx.factory, ctx);
-
+    Resource_ID e = rctx.factory->end_render_pass(ctx);
+    timestamps.commit(e);
     // rctx.gizmo_layer->reset();
     // fprintf(stdout, "[END FRAME]\n");
     // fflush(stdout);
@@ -460,7 +454,8 @@ float4 main(in PSInput input) : SV_TARGET0 {
     // threads.clear();
   }
   void release(rd::IDevice *factory) {
-    //bthing.release(factory);
+    timestamps.release(factory);
+    // bthing.release(factory);
 #  define RESOURCE(name)                                                                           \
     if (name.is_valid()) factory->release_resource(name);
     RESOURCE_LIST
@@ -509,7 +504,7 @@ class Event_Consumer : public IGUIApp {
 
     ImGui::Begin("Config");
     rctx.config->on_imgui();
-    // ImGui::Text("%fms", gbuffer_pass.timestamps.duration);
+    ImGui::Text("%fms", gbuffer_pass.timestamps.duration);
     ImGui::End();
 
     ImGui::Begin("main viewport");
@@ -582,9 +577,9 @@ int main(int argc, char *argv[]) {
   (void)argv;
 
   auto window_loop = [](rd::Impl_t impl) { IGUIApp::start<Event_Consumer>(impl); };
-  // std::thread vulkan_thread = std::thread([window_loop] { window_loop(rd::Impl_t::VULKAN); });
+   //std::thread vulkan_thread = std::thread([window_loop] { window_loop(rd::Impl_t::VULKAN); });
   std::thread dx12_thread = std::thread([window_loop] { window_loop(rd::Impl_t::DX12); });
-  // vulkan_thread.join();
+   //vulkan_thread.join();
   dx12_thread.join();
 
   return 0;

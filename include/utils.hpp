@@ -2,7 +2,7 @@
 #ifndef UTILS_H
 #define UTILS_H
 
-#define TRACY_ENABLE
+//#define TRACY_ENABLE
 
 #include <codecvt>
 #include <cstdlib>
@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <thread>
 #include <time.h>
 #include <type_traits>
 
@@ -144,7 +145,9 @@ inline static uint64_t get_thread_hash() {
 struct Spin_Lock {
   std::atomic<u32> rw_flag;
   void             lock() {
+#  ifdef TRACY_ENABLE
     ZoneScopedS(16);
+#  endif
     u32 expected = 0;
     while (!rw_flag.compare_exchange_strong(expected, 1)) {
       expected = 0;

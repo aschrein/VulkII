@@ -451,6 +451,7 @@ u32 get_format_size(VkFormat format) {
   switch (format) {
   case VK_FORMAT_B8G8R8A8_UNORM      : return 4     ;
   case VK_FORMAT_B8G8R8_UNORM        : return 4     ;
+  case VK_FORMAT_R8_UNORM            : return 1     ;
                                               
   case VK_FORMAT_R8G8B8A8_UNORM      : return 4     ;
   case VK_FORMAT_R8G8B8A8_SNORM      : return 4     ;
@@ -2208,13 +2209,13 @@ struct VkDeviceContext {
       // vkResetEvent(device, event.event);
     }
     {
-      // VkSemaphoreTypeCreateInfo tinfo{};
-      // tinfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
-      // tinfo.initialValue = 0;
-      // tinfo.semaphoreType = VK_SEMAPHORE_TYPE_BINARY;
+      VkSemaphoreTypeCreateInfo tinfo{};
+      tinfo.sType         = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+      tinfo.initialValue  = 0;
+      tinfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
       VkSemaphoreCreateInfo info{};
       info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-      info.pNext = NULL;
+      info.pNext = &tinfo;
       info.flags = 0;
       VK_ASSERT_OK(vkCreateSemaphore(device, &info, 0, &event.sem));
     }
@@ -2464,55 +2465,55 @@ struct VkDeviceContext {
     return info;
   }
 
-  void release_resource(Resource_ID res_id) {
+  void release_resource(Resource_ID res_id, u32 delay = 6) {
     std::lock_guard<std::mutex> _lock(mutex2);
     if (res_id.type == (u32)Resource_Type::FRAME_BUFFER) {
       // Render_Pass pass = render_passes.read(res_id.id);
-      frame_buffers.remove(res_id.id, 4);
+      frame_buffers.remove(res_id.id, delay);
       // if (pass_cache.contains(pass.create_info)) pass_cache.remove(pass.create_info);
     } else if (res_id.type == (u32)Resource_Type::PASS) {
       // Render_Pass pass = render_passes.read(res_id.id);
-      render_passes.remove(res_id.id, 4);
+      render_passes.remove(res_id.id, delay);
       // if (pass_cache.contains(pass.create_info)) pass_cache.remove(pass.create_info);
     } else if (res_id.type == (u32)Resource_Type::SET) {
-      sets.remove(res_id.id, 4);
+      sets.remove(res_id.id, delay);
     } else if (res_id.type == (u32)Resource_Type::BUFFER) {
       Buffer buf = buffers.read(res_id.id);
       // buf.rem_reference();
-      ito(buf.views.size) buffer_views.remove(buf.views[i], 4);
-      buffers.remove(res_id.id, 4);
+      ito(buf.views.size) buffer_views.remove(buf.views[i], delay);
+      buffers.remove(res_id.id, delay);
     } else if (res_id.type == (u32)Resource_Type::BUFFER_VIEW) {
       BufferView view = buffer_views.read(res_id.id);
       Buffer     buf  = buffers.read(view.buf_id);
       buf.views.remove(res_id.id);
-      buffer_views.remove(res_id.id, 4);
+      buffer_views.remove(res_id.id, delay);
     } else if (res_id.type == (u32)Resource_Type::IMAGE_VIEW) {
       ImageView view = image_views.read(res_id.id);
       Image     img  = images.read(view.img_id);
       img.views.remove(res_id.id);
-      image_views.remove(res_id.id, 4);
+      image_views.remove(res_id.id, delay);
     } else if (res_id.type == (u32)Resource_Type::IMAGE) {
       Image img = images.read(res_id.id);
-      images.remove(res_id.id, 4);
+      images.remove(res_id.id, delay);
       // img.rem_reference();
       ito(img.views.size) image_views.remove(img.views[i], 3);
     } else if (res_id.type == (u32)Resource_Type::SHADER) {
-      shaders.remove(res_id.id, 4);
+      shaders.remove(res_id.id, delay);
     } else if (res_id.type == (u32)Resource_Type::FENCE) {
-      fences.remove(res_id.id, 4);
+      fences.remove(res_id.id, delay);
     } else if (res_id.type == (u32)Resource_Type::EVENT) {
-      events.remove(res_id.id, 4);
+      events.remove(res_id.id, delay);
     } else if (res_id.type == (u32)Resource_Type::COMMAND_BUFFER) {
-      cmd_buffers.remove(res_id.id, 4);
+      cmd_buffers.remove(res_id.id, delay);
     } else if (res_id.type == (u32)Resource_Type::SAMPLER) {
-      samplers.remove(res_id.id, 4);
+      samplers.remove(res_id.id, delay);
     } else if (res_id.type == (u32)Resource_Type::TIMESTAMP) {
     } else if (res_id.type == (u32)Resource_Type::GRAPHICS_PSO) {
-      pipelines.remove(res_id.id, 4);
+      pipelines.remove(res_id.id, delay);
     } else if (res_id.type == (u32)Resource_Type::SIGNATURE) {
-      signatures.remove(res_id.id, 4);
+      signatures.remove(res_id.id, delay);
     } else if (res_id.type == (u32)Resource_Type::COMPUTE_PSO) {
-      compute_pipelines.remove(res_id.id, 4);
+      compute_pipelines.remove(res_id.id, delay);
     } else {
       TRAP;
     }
@@ -3015,6 +3016,14 @@ struct VkDeviceContext {
     submit_info.pCommandBuffers      = &cmd.cmd;
     submit_info.signalSemaphoreCount = 1;
     submit_info.pSignalSemaphores    = &raw_sem;
+
+    u64                           signal_values[1] = {1};
+    VkTimelineSemaphoreSubmitInfo info{};
+    info.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    info.pSignalSemaphoreValues    = signal_values;
+    info.signalSemaphoreValueCount = 1;
+    submit_info.pNext              = &info;
+
     vkQueueSubmit(gfx_queue, 1, &submit_info, VK_NULL_HANDLE);
     return sem;
   }
@@ -3204,6 +3213,9 @@ struct VkDeviceContext {
     release_resource(cmd_id);
     VkPipelineStageFlags stage_flags[0x10]{};
     ito(0x10) stage_flags[i] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    u64 signal_values[0x10]{};
+    ito(0x10) signal_values[i] = 1;
+
     VkSubmitInfo submit_info{};
     VkSemaphore  sems[4]  = {};
     u32          num_sems = 0;
@@ -3217,10 +3229,20 @@ struct VkDeviceContext {
     submit_info.pWaitDstStageMask  = stage_flags;
     submit_info.commandBufferCount = 1;
     submit_info.pCommandBuffers    = &cmd.cmd;
+
+    VkTimelineSemaphoreSubmitInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
     if (surface != VK_NULL_HANDLE) {
       submit_info.signalSemaphoreCount = 1;
       submit_info.pSignalSemaphores    = &render_finish_sem[cmd_index];
+      info.pSignalSemaphoreValues      = signal_values;
+      info.signalSemaphoreValueCount   = 1;
     }
+
+    info.pWaitSemaphoreValues    = signal_values;
+    info.waitSemaphoreValueCount = num_sems;
+    submit_info.pNext            = &info;
+
     vkQueueSubmit(gfx_queue, 1, &submit_info, frame_fences[cmd_index]);
     // fprintf(stdout, "Signaling fence #%i...\n", cmd_index);
     if (surface != VK_NULL_HANDLE) {
@@ -3467,19 +3489,31 @@ class Vk_Ctx : public rd::ICtx {
     // vkCmdSetEvent(cmd, event.event, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
     vkEndCommandBuffer(cmd);
     VkPipelineStageFlags stage_flags[0x10]{};
-    ito(0x10) stage_flags[i] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    u64                  signal_values[0x10]{};
+    ito(0x10) signal_values[i] = 1;
+    ito(0x10) stage_flags[i]   = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     VkSubmitInfo submit_info;
     MEMZERO(submit_info);
+
     submit_info.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit_info.waitSemaphoreCount = external_wait_sems.size;
     submit_info.pWaitSemaphores    = external_wait_sems.size ? external_wait_sems.elems : NULL;
     submit_info.pWaitDstStageMask  = stage_flags;
     submit_info.commandBufferCount = 1;
     submit_info.pCommandBuffers    = &cmd;
-    InlineArray<VkSemaphore, 0x10> signal_sems{};
-    ito(external_wait_sems.size) signal_sems.push(external_wait_sems[i]);
 
+    InlineArray<VkSemaphore, 0x10> signal_sems{};
+    // ito(external_wait_sems.size) signal_sems.push(external_wait_sems[i]);
     signal_sems.push(event.sem);
+
+    VkTimelineSemaphoreSubmitInfo info{};
+    info.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    info.pSignalSemaphoreValues    = signal_values;
+    info.signalSemaphoreValueCount = signal_sems.size;
+    info.pWaitSemaphoreValues      = signal_values;
+    info.waitSemaphoreValueCount   = external_wait_sems.size;
+    submit_info.pNext              = &info;
+
     submit_info.signalSemaphoreCount = signal_sems.size;
     submit_info.pSignalSemaphores    = signal_sems.elems;
     if (type == rd::Pass_t::RENDER || type == rd::Pass_t::COMPUTE)
@@ -3662,10 +3696,10 @@ class Vk_Ctx : public rd::ICtx {
 }; // namespace
 
 class VkFactory : public rd::IDevice {
-  VkDeviceContext *  dev_ctx;
-  Array<Resource_ID> release_queue;
-  ID                 last_sem[3]{};
-  std::mutex         mutex;
+  VkDeviceContext *             dev_ctx;
+  Array<Pair<Resource_ID, u32>> release_queue;
+  ID                            last_sem[3]{};
+  std::mutex                    mutex;
 
   void on_frame_begin() { ito(3) last_sem[i] = {0}; }
   void on_frame_end() {
@@ -3675,7 +3709,8 @@ class VkFactory : public rd::IDevice {
       }
       last_sem[i] = {0};
     }*/
-    ito(release_queue.size) dev_ctx->release_resource(release_queue[i]);
+    ito(release_queue.size)
+        dev_ctx->release_resource(release_queue[i].first, release_queue[i].second);
     release_queue.release();
   }
 
@@ -3691,20 +3726,20 @@ class VkFactory : public rd::IDevice {
     dev_ctx->release();
     delete this;
   }
-
-  bool get_timestamp_state(Resource_ID t0) override {
-    std::lock_guard<std::mutex> _lock(mutex);
-    u64                         timestamp_results[1];
-    VkResult res = vkGetQueryPoolResults(dev_ctx->device, dev_ctx->query_pool, t0.id._id, 1, 8,
-                                         timestamp_results, 8, VK_QUERY_RESULT_64_BIT);
-    return res == VK_SUCCESS;
-  }
+  /* void reset_timestamp(Resource_ID id) override { TRAP; }
+   bool get_timestamp_state(Resource_ID t0) override {
+     std::lock_guard<std::mutex> _lock(mutex);
+     u64                         timestamp_results[1];
+     VkResult res = vkGetQueryPoolResults(dev_ctx->device, dev_ctx->query_pool, t0.id._id, 1, 8,
+                                          timestamp_results, 8, VK_QUERY_RESULT_64_BIT);
+     return res == VK_SUCCESS;
+   }*/
   double get_timestamp_ms(Resource_ID t0, Resource_ID t1) override {
     std::lock_guard<std::mutex> _lock(mutex);
     u64                         timestamp_results[2];
-    VkResult res0 = vkGetQueryPoolResults(dev_ctx->device, dev_ctx->query_pool, t0.id._id, 1, 8,
+    VkResult res0 = vkGetQueryPoolResults(dev_ctx->device, dev_ctx->query_pool, t0.id.index(), 1, 8,
                                           timestamp_results + 0, 8, VK_QUERY_RESULT_64_BIT);
-    VkResult res1 = vkGetQueryPoolResults(dev_ctx->device, dev_ctx->query_pool, t1.id._id, 1, 8,
+    VkResult res1 = vkGetQueryPoolResults(dev_ctx->device, dev_ctx->query_pool, t1.id.index(), 1, 8,
                                           timestamp_results + 1, 8, VK_QUERY_RESULT_64_BIT);
     if (res0 == VK_SUCCESS && res1 == VK_SUCCESS) {
       u64 diff = timestamp_results[1] - timestamp_results[0];
@@ -3743,31 +3778,30 @@ class VkFactory : public rd::IDevice {
     return dev_ctx->create_buffer(info);
   }
   void wait_for_event(Resource_ID id) override {
-    VkSemaphore sem = VK_NULL_HANDLE;
+    if (get_event_state(id)) return;
+    VkSemaphore sem            = VK_NULL_HANDLE;
+    u64         wait_values[1] = {1};
     {
       std::lock_guard<std::mutex> _lock(mutex);
       sem = dev_ctx->events.read(id.id).sem;
-      VkSemaphoreWaitInfo info{};
-      info.sType          = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-      info.pSemaphores    = &sem;
-      info.semaphoreCount = 1;
-      VkResult res        = vkWaitSemaphores(dev_ctx->device, &info, 0);
-      if (res != VK_SUCCESS) return;
     }
     VkSemaphoreWaitInfo info{};
     info.sType          = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
     info.pSemaphores    = &sem;
     info.semaphoreCount = 1;
+    info.pValues        = wait_values;
     VK_ASSERT_OK(vkWaitSemaphores(dev_ctx->device, &info, -1));
   }
   bool get_event_state(Resource_ID id) override {
     std::lock_guard<std::mutex> _lock(mutex);
     VkSemaphore                 sem = dev_ctx->events.read(id.id).sem;
     VkSemaphoreWaitInfo         info{};
-    info.sType          = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-    info.pSemaphores    = &sem;
-    info.semaphoreCount = 1;
-    VkResult res        = vkWaitSemaphores(dev_ctx->device, &info, 0);
+    u64                         wait_values[1] = {1};
+    info.sType                                 = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+    info.pSemaphores                           = &sem;
+    info.semaphoreCount                        = 1;
+    info.pValues                               = wait_values;
+    VkResult res                               = vkWaitSemaphores(dev_ctx->device, &info, 0);
     return res == VK_SUCCESS;
   }
   Resource_ID create_shader(rd::Stage_t type, string_ref body,
@@ -3787,9 +3821,9 @@ class VkFactory : public rd::IDevice {
     std::lock_guard<std::mutex> _lock(mutex);
     return dev_ctx->create_sampler(info);
   }
-  void release_resource(Resource_ID id) override {
+  void release_resource(Resource_ID id, u32 delay = 6) override {
     std::lock_guard<std::mutex> _lock(mutex);
-    release_queue.push(id);
+    release_queue.push({id, delay});
     // ASSERT_DEBUG(id.type != (u32)Resource_Type::PASS);
   }
   u32         get_num_swapchain_images() override { return dev_ctx->sc_image_count; }
@@ -4056,7 +4090,7 @@ class VkFactory : public rd::IDevice {
   }
   // Resource_ID create_event() override { return dev_ctx->create_event(); }
   Resource_ID create_timestamp() override {
-    return {dev_ctx->allocate_timestamp_id(), (u32)Resource_Type::TIMESTAMP};
+    return {dev_ctx->allocate_timestamp_id() + 1, (u32)Resource_Type::TIMESTAMP};
   }
   Resource_ID create_signature(rd::Binding_Table_Create_Info const &infos) override {
     return {dev_ctx->signatures.push({VK_Binding_Signature::create(dev_ctx, infos)}),

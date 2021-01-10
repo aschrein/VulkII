@@ -1,3 +1,20 @@
+# About
+A toy rendering framework for experimentation and fast prototyping. Code is not of production quality, rather, this project is to experiment with approaches and learn the hard way. As of now, it has Vulkan and Dx12 backends.
+
+# Features
+
+1) API is just a convinience layer on top of Vulkan or DX12 with the help of the HLSL compiler.
+2) Async compute and copy queues with basic synchronization primitives exposed.
+
+![alt text](readme/shot5.PNG)
+![alt text](readme/shot4.PNG)
+
+
+# TODO
+
+1) Ray tracing API.
+2) Async memory defragmentation. 
+
 # Dependencies
 
 1) [ISPC](https://github.com/ispc/ispc/releases) in PATH.
@@ -11,9 +28,6 @@ Tested on Windows 10 and Ubuntu 20.
 mkdir build && cd build
 cmake ../
 ```
-
-## About
-A toy rendering framework for experementation and fast prototyping. As of now it has Vulkan and Dx12 backends.
 
 Example:
 
