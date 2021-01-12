@@ -1021,7 +1021,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     MEMZERO(pc);
     pc.op = filter;
     switch (image->format) {
-      // clang-format off
+    // clang-format off
       case rd::Format::RGBA8_SRGBA:  {  pc.format = 0; } break;
       case rd::Format::RGBA8_UNORM:  {  pc.format = 1; } break;
       case rd::Format::RGB32_FLOAT:  {  pc.format = 2; } break;
@@ -1221,6 +1221,11 @@ protected:
   Raw_Mesh_3p16i_Wrapper cylinder_wrapper    = {};
   Raw_Mesh_3p16i_Wrapper cone_wrapper        = {};
   Raw_Mesh_3p16i_Wrapper glyph_wrapper       = {};
+  struct Glyph_Instance {
+    float x, y, z;
+    float u, v;
+    float r, g, b;
+  };
 
 #  define RESOURCE_LIST                                                                            \
     RESOURCE(signature);                                                                           \
@@ -1560,7 +1565,7 @@ struct VSInput {
 PSInput main(in VSInput input) {
   PSInput output;
   output.color = input.instance_color;
-  output.uv = input.instance_uv_offset + (input.vertex_position.xy * float2(1.0, -1.0) + float2(0.0, 1.0)) * pc.glyph_uv_size;
+  output.uv = input.instance_uv_offset + (input.vertex_position.xy * float2(1.0, 1.0) + float2(0.0, 0.0)) * pc.glyph_uv_size;
   float4 sspos =  float4(input.vertex_position.xy * pc.glyph_size + input.instance_offset.xy, 0.0, 1.0);
   int pixel_x = int(pc.viewport_size.x * (sspos.x * 0.5 + 0.5));
   int pixel_y = int(pc.viewport_size.y * (sspos.y * 0.5 + 0.5));
@@ -1640,8 +1645,9 @@ float4 main(in PSInput input) : SV_TARGET0 {
       info.offset   = 20;
       info.type     = rd::Attriute_t::TEXCOORD2;
       gfx_state.IA_set_attribute(info);
-      gfx_state.IA_set_vertex_binding(0, sizeof(Gizmo_Line_Vertex), rd::Input_Rate::VERTEX);
-      gfx_state.IA_set_topology(rd::Primitive::LINE_LIST);
+            gfx_state.IA_set_vertex_binding(0, sizeof(float3), rd::Input_Rate::VERTEX);
+      gfx_state.IA_set_vertex_binding(1, sizeof(Glyph_Instance), rd::Input_Rate::INSTANCE);
+      gfx_state.IA_set_topology(rd::Primitive::TRIANGLE_LIST);
       return dev->create_graphics_pso(signature, pass, gfx_state);
     }();
 
@@ -2046,11 +2052,6 @@ float4 main(in PSInput input) : SV_TARGET0 {
     }
     if (strings.size != 0) {
       defer(strings.reset());
-      struct Glyph_Instance {
-        float x, y, z;
-        float u, v;
-        float r, g, b;
-      };
       float    glyph_uv_width  = (float)simplefont_bitmap_glyphs_width / simplefont_bitmap_width;
       float    glyph_uv_height = (float)simplefont_bitmap_glyphs_height / simplefont_bitmap_height;
       float4x4 viewproj        = g_camera.viewproj();
@@ -2400,8 +2401,7 @@ static float3 transform(float4x4 const &t, float3 const &v) {
 static void render_bvh(float4x4 const &t, bvh::Node *bvh, Gizmo_Layer *gl) {
   ASSERT_DEBUG(bvh);
   bvh->traverse([&](bvh::Node *node) {
-    if (node->is_leaf())
-      return;
+    if (node->is_leaf()) return;
     gl->render_linebox(transform(t, node->aabb.min), transform(t, node->aabb.max),
                        float3(1.0f, 0.0f, 0.0f));
   });

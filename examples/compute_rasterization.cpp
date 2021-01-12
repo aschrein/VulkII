@@ -45,7 +45,7 @@ struct GBuffer {
 
 class BakerPass {
   public:
-  static constexpr char const *NAME = "GBuffer Pass";
+  static constexpr char const *NAME = "Baking Pass";
   Pair<double, char const *>   get_duration() { return {timestamps.duration, NAME}; }
 
 #define RESOURCE_LIST                                                                              \
@@ -53,10 +53,8 @@ class BakerPass {
   RESOURCE(pso);                                                                                   \
   RESOURCE(pass);                                                                                  \
   RESOURCE(frame_buffer);                                                                          \
-  RESOURCE(normal_rt);                                                                             \
-  RESOURCE(depth_rt);                                                                              \
-  RESOURCE(gbuffer_vs);                                                                            \
-  RESOURCE(gbuffer_ps);
+  RESOURCE(position_rt);                                                                           \
+  RESOURCE(normal_rt);
 
 #define RESOURCE(name) Resource_ID name{};
   RESOURCE_LIST
@@ -64,12 +62,19 @@ class BakerPass {
 
   u32 width  = 0;
   u32 height = 0;
-  // BufferThing bthing{};
 
   rd::Render_Pass_Create_Info info{};
   rd::Graphics_Pipeline_State gfx_state{};
 
   public:
+  void release(rd::IDevice *factory) {
+    timestamps.release(factory);
+#define RESOURCE(name)                                                                             \
+  if (name.is_valid()) factory->release_resource(name);
+    RESOURCE_LIST
+#undef RESOURCE
+  }
+#undef RESOURCE_LIST
   TimeStamp_Pool timestamps = {};
   struct PushConstants {
     float4x4 viewproj;
@@ -78,8 +83,7 @@ class BakerPass {
   void init(RenderingContext rctx) {
     auto dev = rctx.factory;
     timestamps.init(dev);
-    // bthing.init(dev);
-    gbuffer_vs = dev->create_shader(rd::Stage_t::VERTEX, stref_s(R"(
+    Resource_ID vs = dev->create_shader(rd::Stage_t::VERTEX, stref_s(R"(
 struct PushConstants
 {
   float4x4 viewproj;
@@ -90,37 +94,50 @@ struct PushConstants
 struct PSInput {
   [[vk::location(0)]] float4 pos     : SV_POSITION;
   [[vk::location(1)]] float3 normal  : TEXCOORD0;
-  //[[vk::location(2)]] float2 uv      : TEXCOORD1;
+  [[vk::location(2)]] float2 uv      : TEXCOORD1;
+  [[vk::location(3)]] float3 src_pos : TEXCOORD2;
 };
 
 struct VSInput {
   [[vk::location(0)]] float3 pos     : POSITION;
   [[vk::location(1)]] float3 normal  : NORMAL;
-  //[[vk::location(4)]] float2 uv      : TEXCOORD0;
+  [[vk::location(2)]] float2 uv      : TEXCOORD0;
 };
 
 PSInput main(in VSInput input) {
   PSInput output;
-  output.normal = mul(pc.world_transform, float4(input.normal.xyz, 0.0f)).xyz;
-  //output.uv     = input.uv;
-  output.pos    = mul(pc.viewproj, mul(pc.world_transform, float4(input.pos, 1.0f)));
+  output.normal  = mul(pc.world_transform, float4(input.normal.xyz, 0.0f)).xyz;
+  output.uv      = input.uv;
+  output.pos     = float4(input.uv * 2.0 - 1.0, 0.0f, 1.0f);
+  output.src_pos = input.pos;
   return output;
 }
 )"),
-                                    NULL, 0);
-    gbuffer_ps = dev->create_shader(rd::Stage_t::PIXEL, stref_s(R"(
+                                        NULL, 0);
+    Resource_ID ps = dev->create_shader(rd::Stage_t::PIXEL, stref_s(R"(
 struct PSInput {
   [[vk::location(0)]] float4 pos     : SV_POSITION;
   [[vk::location(1)]] float3 normal  : TEXCOORD0;
-  //[[vk::location(2)]] float2 uv      : TEXCOORD1;
+  [[vk::location(2)]] float2 uv      : TEXCOORD1;
+  [[vk::location(3)]] float3 src_pos : TEXCOORD2;
 };
 
-float4 main(in PSInput input) : SV_TARGET0 {
-  return float4(input.normal.xyz, 1.0f);
+struct PSOut {
+  float4 rt0 : SV_TARGET0;
+  float4 rt1 : SV_TARGET1;
+};
+
+PSOut main(in PSInput input) {
+  PSOut ps_out;
+  ps_out.rt0 = float4(input.src_pos.xyz, 1.0f);
+  ps_out.rt1 = float4(input.normal.xyz, 1.0f);
+  return ps_out;
 }
 )"),
-                                    NULL, 0);
-    signature  = [=] {
+                                        NULL, 0);
+    dev->release_resource(vs);
+    dev->release_resource(ps);
+    signature = [=] {
       rd::Binding_Space_Create_Info set_info{};
       rd::Binding_Table_Create_Info table_info{};
       table_info.spaces.push(set_info);
@@ -138,9 +155,15 @@ float4 main(in PSInput input) : SV_TARGET0 {
       rt0.clear_color.a     = 0.0f;
       info.rts.push(rt0);
 
-      info.depth_target.enabled           = true;
-      info.depth_target.clear_depth.clear = true;
-      info.depth_target.format            = rd::Format::D32_OR_R32_FLOAT;
+      rt0.format            = rd::Format::RGBA32_FLOAT;
+      rt0.clear_color.clear = true;
+      rt0.clear_color.r     = 0.0f;
+      rt0.clear_color.g     = 0.0f;
+      rt0.clear_color.b     = 0.0f;
+      rt0.clear_color.a     = 0.0f;
+      info.rts.push(rt0);
+
+      info.depth_target.enabled = false;
       return dev->create_render_pass(info);
     }();
 
@@ -149,8 +172,8 @@ float4 main(in PSInput input) : SV_TARGET0 {
       rd::DS_State ds_state{};
       rd::RS_State rs_state{};
       ds_state.cmp_op             = rd::Cmp::GE;
-      ds_state.enable_depth_test  = true;
-      ds_state.enable_depth_write = true;
+      ds_state.enable_depth_test  = false;
+      ds_state.enable_depth_write = false;
       gfx_state.DS_set_state(ds_state);
       rd::Blend_State bs{};
       bs.enabled = false;
@@ -158,8 +181,9 @@ float4 main(in PSInput input) : SV_TARGET0 {
           (u32)rd::Color_Component_Bit::R_BIT | (u32)rd::Color_Component_Bit::G_BIT |
           (u32)rd::Color_Component_Bit::B_BIT | (u32)rd::Color_Component_Bit::A_BIT;
       gfx_state.OM_set_blend_state(0, bs);
-      gfx_state.VS_set_shader(gbuffer_vs);
-      gfx_state.PS_set_shader(gbuffer_ps);
+      gfx_state.OM_set_blend_state(1, bs);
+      gfx_state.VS_set_shader(vs);
+      gfx_state.PS_set_shader(ps);
       {
         rd::Attribute_Info info;
         MEMZERO(info);
@@ -180,7 +204,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
         info.type     = rd::Attriute_t::NORMAL;
         gfx_state.IA_set_attribute(info);
       }
-      /*{
+      {
         rd::Attribute_Info info;
         MEMZERO(info);
         info.binding  = 2;
@@ -189,10 +213,10 @@ float4 main(in PSInput input) : SV_TARGET0 {
         info.offset   = 0;
         info.type     = rd::Attriute_t::TEXCOORD0;
         gfx_state.IA_set_attribute(info);
-      }*/
+      }
       gfx_state.IA_set_vertex_binding(0, 12, rd::Input_Rate::VERTEX);
       gfx_state.IA_set_vertex_binding(1, 12, rd::Input_Rate::VERTEX);
-      // gfx_state.IA_set_vertex_binding(2, 8, rd::Input_Rate::VERTEX);
+      gfx_state.IA_set_vertex_binding(2, 8, rd::Input_Rate::VERTEX);
       gfx_state.IA_set_topology(rd::Primitive::TRIANGLE_LIST);
       return dev->create_graphics_pso(signature, pass, gfx_state);
     }();
@@ -200,8 +224,22 @@ float4 main(in PSInput input) : SV_TARGET0 {
   void update_frame_buffer(RenderingContext rctx) {
     auto dev = rctx.factory;
     if (frame_buffer.is_valid()) dev->release_resource(frame_buffer);
+    if (position_rt.is_valid()) dev->release_resource(position_rt);
     if (normal_rt.is_valid()) dev->release_resource(normal_rt);
-    if (depth_rt.is_valid()) dev->release_resource(depth_rt);
+
+    position_rt = [=] {
+      rd::Image_Create_Info rt0_info{};
+      rt0_info.format     = rd::Format::RGBA32_FLOAT;
+      rt0_info.width      = width;
+      rt0_info.height     = height;
+      rt0_info.depth      = 1;
+      rt0_info.layers     = 1;
+      rt0_info.levels     = 1;
+      rt0_info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_RT |      //
+                            (u32)rd::Image_Usage_Bits::USAGE_SAMPLED | //
+                            (u32)rd::Image_Usage_Bits::USAGE_UAV;
+      return dev->create_image(rt0_info);
+    }();
 
     normal_rt = [=] {
       rd::Image_Create_Info rt0_info{};
@@ -216,39 +254,24 @@ float4 main(in PSInput input) : SV_TARGET0 {
                             (u32)rd::Image_Usage_Bits::USAGE_UAV;
       return dev->create_image(rt0_info);
     }();
-    depth_rt = [=] {
-      rd::Image_Create_Info rt0_info{};
-      rt0_info.format = rd::Format::D32_OR_R32_FLOAT;
-      rt0_info.width  = width;
-      rt0_info.height = height;
-      rt0_info.depth  = 1;
-      rt0_info.layers = 1;
-      rt0_info.levels = 1;
-      rt0_info.usage_bits =
-          (u32)rd::Image_Usage_Bits::USAGE_DT | (u32)rd::Image_Usage_Bits::USAGE_SAMPLED;
-      return dev->create_image(rt0_info);
-    }();
     frame_buffer = [=] {
       rd::Frame_Buffer_Create_Info info{};
       rd::RT_View                  rt0{};
-      rt0.image  = normal_rt;
+      rt0.image  = position_rt;
       rt0.format = rd::Format::RGBA32_FLOAT;
       info.rts.push(rt0);
+      rt0.image = normal_rt;
+      info.rts.push(rt0);
 
-      info.depth_target.enabled = true;
-      info.depth_target.image   = depth_rt;
-      info.depth_target.format  = rd::Format::D32_OR_R32_FLOAT;
+      info.depth_target.enabled = false;
       return dev->create_frame_buffer(pass, info);
     }();
   }
   void render(RenderingContext rctx) {
     auto dev = rctx.factory;
     timestamps.update(dev);
-    // float4x4 bvh_visualizer_offset = glm::translate(float4x4(1.0f), float3(-10.0f, 0.0f,
-    // 0.0f));
-    // bthing.test_buffers(dev);
-    u32 width  = rctx.config->get_u32("g_buffer_width");
-    u32 height = rctx.config->get_u32("g_buffer_height");
+    u32 width  = rctx.config->get_u32("baking.size");
+    u32 height = rctx.config->get_u32("baking.size");
     if (this->width != width || this->height != height) {
       this->width  = width;
       this->height = height;
@@ -264,7 +287,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
 
     rd::ICtx *ctx = dev->start_render_pass(pass, frame_buffer);
     {
-      TracyVulkIINamedZone(ctx, "GBuffer Pass");
+      TracyVulkIINamedZone(ctx, "Baking Pass");
       timestamps.begin_range(ctx);
       ctx->start_render_pass();
 
@@ -296,20 +319,6 @@ float4 main(in PSInput input) : SV_TARGET0 {
     Resource_ID e = dev->end_render_pass(ctx);
     timestamps.commit(e);
   }
-  GBuffer get_gbuffer() {
-    GBuffer out{};
-    out.normal = normal_rt;
-    out.depth  = depth_rt;
-    return out;
-  }
-  void release(rd::IDevice *factory) {
-    timestamps.release(factory);
-#define RESOURCE(name)                                                                             \
-  if (name.is_valid()) factory->release_resource(name);
-    RESOURCE_LIST
-#undef RESOURCE
-  }
-#undef RESOURCE_LIST
 };
 
 class BufferThing {
@@ -452,6 +461,231 @@ struct CullPushConstants
     }
   }
   void release(rd::IDevice *factory) {
+#define RESOURCE(name)                                                                             \
+  if (name.is_valid()) factory->release_resource(name);
+    RESOURCE_LIST
+#undef RESOURCE
+  }
+#undef RESOURCE_LIST
+};
+
+class GIComputeGBufferPass {
+  public:
+  static constexpr char const *NAME = "G.I. Compute GBuffer Pass";
+  Pair<double, char const *>   get_duration() { return {timestamps.duration, NAME}; }
+
+#define RESOURCE_LIST                                                                              \
+  RESOURCE(signature);                                                                             \
+  RESOURCE(sampler_state);                                                                         \
+  RESOURCE(clear_pso);                                                                             \
+  RESOURCE(pso);                                                                                   \
+  RESOURCE(normal_rt);                                                                             \
+  RESOURCE(depth_rt);
+
+#define RESOURCE(name) Resource_ID name{};
+  RESOURCE_LIST
+#undef RESOURCE
+
+  u32 width  = 0;
+  u32 height = 0;
+
+  public:
+#include "examples/shaders/gi_compute_rasterization.hlsl"
+
+  TimeStamp_Pool timestamps = {};
+
+  void init(RenderingContext rctx) {
+    TMP_STORAGE_SCOPE;
+    auto dev = rctx.factory;
+    timestamps.init(dev);
+    sampler_state = [&] {
+      rd::Sampler_Create_Info info;
+      MEMZERO(info);
+      info.address_mode_u = rd::Address_Mode::CLAMP_TO_EDGE;
+      info.address_mode_v = rd::Address_Mode::CLAMP_TO_EDGE;
+      info.address_mode_w = rd::Address_Mode::CLAMP_TO_EDGE;
+      info.mag_filter     = rd::Filter::LINEAR;
+      info.min_filter     = rd::Filter::LINEAR;
+      info.mip_mode       = rd::Filter::LINEAR;
+      info.max_lod        = 1000.0f;
+      info.anisotropy     = true;
+      info.max_anisotropy = 16.0f;
+      return dev->create_sampler(info);
+    }();
+    signature = [=] {
+      rd::Binding_Table_Create_Info table_info{};
+      {
+        rd::Binding_Space_Create_Info set_info{};
+        set_info.bindings.push({rd::Binding_t::TEXTURE, 1});
+        set_info.bindings.push({rd::Binding_t::TEXTURE, 1});
+        set_info.bindings.push({rd::Binding_t::UAV_TEXTURE, 1});
+        set_info.bindings.push({rd::Binding_t::UAV_TEXTURE, 1});
+        set_info.bindings.push({rd::Binding_t::SAMPLER, 1});
+        table_info.spaces.push(set_info);
+      }
+      {
+        rd::Binding_Space_Create_Info set_info{};
+        set_info.bindings.push({rd::Binding_t::UNIFORM_BUFFER, 1});
+        table_info.spaces.push(set_info);
+      }
+      {
+        rd::Binding_Space_Create_Info set_info{};
+        set_info.bindings.push({rd::Binding_t::UAV_BUFFER, 1});
+        table_info.spaces.push(set_info);
+      }
+      table_info.push_constants_size = sizeof(PushConstants);
+      return dev->create_signature(table_info);
+    }();
+
+    Resource_ID cs{};
+    pso = dev->create_compute_pso(
+        signature,
+        cs = dev->create_shader(
+            rd::Stage_t::COMPUTE,
+            read_file_tmp_stref("examples/shaders/gi_compute_rasterization.hlsl"), NULL, 0));
+    dev->release_resource(cs);
+
+    cs        = {};
+    clear_pso = dev->create_compute_pso(signature,
+                                        cs = dev->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
+
+[[vk::binding(2, 0)]] RWTexture2D<float4> normal_target   : register(u2, space0);
+[[vk::binding(3, 0)]] RWTexture2D<uint>  depth_target    : register(u3, space0);
+
+[numthreads(16, 16, 1)]
+  void main(uint3 tid : SV_DispatchThreadID)
+{
+  uint width, height;
+  normal_target.GetDimensions(width, height);
+  if (tid.x >= width || tid.y >= height)
+    return;
+  normal_target[tid.xy] = float4_splat(0.0f);
+  depth_target[tid.xy]  = 0;
+}
+)"),
+                                                                NULL, 0));
+    dev->release_resource(cs);
+  }
+  void update_frame_buffer(RenderingContext rctx) {
+    auto dev = rctx.factory;
+    if (normal_rt.is_valid()) dev->release_resource(normal_rt);
+    if (depth_rt.is_valid()) dev->release_resource(depth_rt);
+
+    normal_rt = [=] {
+      rd::Image_Create_Info rt0_info{};
+      rt0_info.format     = rd::Format::RGBA32_FLOAT;
+      rt0_info.width      = width;
+      rt0_info.height     = height;
+      rt0_info.depth      = 1;
+      rt0_info.layers     = 1;
+      rt0_info.levels     = 1;
+      rt0_info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_SAMPLED | //
+                            (u32)rd::Image_Usage_Bits::USAGE_UAV;
+      return dev->create_image(rt0_info);
+    }();
+    depth_rt = [=] {
+      rd::Image_Create_Info rt0_info{};
+      rt0_info.format     = rd::Format::R32_UINT;
+      rt0_info.width      = width;
+      rt0_info.height     = height;
+      rt0_info.depth      = 1;
+      rt0_info.layers     = 1;
+      rt0_info.levels     = 1;
+      rt0_info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_SAMPLED | //
+                            (u32)rd::Image_Usage_Bits::USAGE_UAV;
+      return dev->create_image(rt0_info);
+    }();
+  }
+  void render(RenderingContext rctx, Resource_ID pos_tex, Resource_ID normal_tex) {
+    auto dev = rctx.factory;
+    timestamps.update(dev);
+    u32 width  = rctx.config->get_u32("g_buffer_width");
+    u32 height = rctx.config->get_u32("g_buffer_height");
+    if (this->width != width || this->height != height) {
+      this->width  = width;
+      this->height = height;
+      update_frame_buffer(rctx);
+    }
+
+    float4x4       viewproj = rctx.gizmo_layer->get_camera().viewproj();
+    FrameConstants fc{};
+    fc.viewproj         = viewproj;
+    Resource_ID cbuffer = [&] {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.memory_type = rd::Memory_Type::CPU_WRITE_GPU_READ;
+      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER;
+      buf_info.size        = sizeof(fc);
+      return dev->create_buffer(buf_info);
+    }();
+    dev->release_resource(cbuffer);
+    {
+      memcpy(dev->map_buffer(cbuffer), &fc, sizeof(fc));
+      dev->unmap_buffer(cbuffer);
+    }
+    PushConstants pc{};
+    {
+      rd::ICtx *ctx = dev->start_compute_pass();
+      {
+        TracyVulkIINamedZone(ctx, "G.I. Compute Clear GBuffer Pass");
+        ctx->bind_compute(clear_pso);
+        rd::IBinding_Table *table = dev->create_binding_table(signature);
+        defer(table->release());
+        table->bind_UAV_texture(0, 2, 0, this->normal_rt, rd::Image_Subresource::top_level(),
+                                rd::Format::NATIVE);
+        table->bind_UAV_texture(0, 3, 0, this->depth_rt, rd::Image_Subresource::top_level(),
+                                rd::Format::NATIVE);
+        ctx->bind_table(table);
+        ctx->dispatch((width + 15) / 16, (height + 15) / 16, 1);
+      }
+      dev->end_compute_pass(ctx);
+    }
+    Resource_ID feedback_buffer = [&] {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.memory_type = rd::Memory_Type::GPU_LOCAL;
+      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_UAV;
+      buf_info.size        = 1 << 20;
+      return dev->create_buffer(buf_info);
+    }();
+    dev->release_resource(feedback_buffer);
+    rd::ICtx *ctx = dev->start_compute_pass();
+    {
+      TracyVulkIINamedZone(ctx, "G.I. Compute GBuffer Pass");
+      timestamps.begin_range(ctx);
+      ctx->bind_compute(pso);
+      rd::IBinding_Table *table = dev->create_binding_table(signature);
+      defer(table->release());
+      table->bind_cbuffer(1, 0, cbuffer, 0, 0);
+      table->bind_texture(0, 0, 0, pos_tex, rd::Image_Subresource::top_level(), rd::Format::NATIVE);
+      table->bind_texture(0, 1, 0, normal_tex, rd::Image_Subresource::top_level(),
+                          rd::Format::NATIVE);
+
+      table->bind_UAV_texture(0, 2, 0, this->normal_rt, rd::Image_Subresource::top_level(),
+                              rd::Format::NATIVE);
+      table->bind_UAV_texture(0, 3, 0, this->depth_rt, rd::Image_Subresource::top_level(),
+                              rd::Format::NATIVE);
+      table->bind_sampler(0, 4, sampler_state);
+      pc.grid_size = rctx.config->get_u32("G.I.grid_size");
+      pc.model     = float4x4(1.0f);
+      table->push_constants(&pc, 0, sizeof(pc));
+      ctx->bind_table(table);
+      ctx->dispatch((pc.grid_size + RASTERIZATION_GROUP_SIZE - 1) / RASTERIZATION_GROUP_SIZE,
+                    (pc.grid_size + RASTERIZATION_GROUP_SIZE - 1) / RASTERIZATION_GROUP_SIZE, 1);
+      timestamps.end_range(ctx);
+    }
+
+    Resource_ID e = dev->end_compute_pass(ctx);
+    timestamps.commit(e);
+  }
+  GBuffer get_gbuffer() {
+    GBuffer out{};
+    out.normal = normal_rt;
+    out.depth  = depth_rt;
+    return out;
+  }
+  void release(rd::IDevice *factory) {
+    timestamps.release(factory);
 #define RESOURCE(name)                                                                             \
   if (name.is_valid()) factory->release_resource(name);
     RESOURCE_LIST
@@ -660,7 +894,8 @@ class ComputeGBufferPass {
             pc.model           = mn->get_transform();
             table->push_constants(&pc, 0, sizeof(pc));
             ctx->bind_table(table);
-            ctx->dispatch((s->total_indices + 255) / 256, 1, 1);
+            ctx->dispatch(
+                (s->total_indices + RASTERIZATION_GROUP_SIZE - 1) / RASTERIZATION_GROUP_SIZE, 1, 1);
           }
         }
       });
@@ -733,19 +968,19 @@ struct PushConstants
 struct PSInput {
   [[vk::location(0)]] float4 pos     : SV_POSITION;
   [[vk::location(1)]] float3 normal  : TEXCOORD0;
-  //[[vk::location(2)]] float2 uv      : TEXCOORD1;
+  [[vk::location(2)]] float2 uv      : TEXCOORD1;
 };
 
 struct VSInput {
   [[vk::location(0)]] float3 pos     : POSITION;
   [[vk::location(1)]] float3 normal  : NORMAL;
-  //[[vk::location(4)]] float2 uv      : TEXCOORD0;
+  [[vk::location(4)]] float2 uv      : TEXCOORD0;
 };
 
 PSInput main(in VSInput input) {
   PSInput output;
   output.normal = mul(pc.world_transform, float4(input.normal.xyz, 0.0f)).xyz;
-  //output.uv     = input.uv;
+  output.uv     = input.uv;
   output.pos    = mul(pc.viewproj, mul(pc.world_transform, float4(input.pos, 1.0f)));
   return output;
 }
@@ -755,7 +990,7 @@ PSInput main(in VSInput input) {
 struct PSInput {
   [[vk::location(0)]] float4 pos     : SV_POSITION;
   [[vk::location(1)]] float3 normal  : TEXCOORD0;
-  //[[vk::location(2)]] float2 uv      : TEXCOORD1;
+  [[vk::location(2)]] float2 uv      : TEXCOORD1;
 };
 
 float4 main(in PSInput input) : SV_TARGET0 {
@@ -827,7 +1062,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
         info.type     = rd::Attriute_t::NORMAL;
         gfx_state.IA_set_attribute(info);
       }
-      /*{
+      {
         rd::Attribute_Info info;
         MEMZERO(info);
         info.binding  = 2;
@@ -836,10 +1071,10 @@ float4 main(in PSInput input) : SV_TARGET0 {
         info.offset   = 0;
         info.type     = rd::Attriute_t::TEXCOORD0;
         gfx_state.IA_set_attribute(info);
-      }*/
+      }
       gfx_state.IA_set_vertex_binding(0, 12, rd::Input_Rate::VERTEX);
       gfx_state.IA_set_vertex_binding(1, 12, rd::Input_Rate::VERTEX);
-      // gfx_state.IA_set_vertex_binding(2, 8, rd::Input_Rate::VERTEX);
+      gfx_state.IA_set_vertex_binding(2, 8, rd::Input_Rate::VERTEX);
       gfx_state.IA_set_topology(rd::Primitive::TRIANGLE_LIST);
       return dev->create_graphics_pso(signature, pass, gfx_state);
     }();
@@ -1258,10 +1493,12 @@ void main(uint3 tid : SV_DispatchThreadID)
 #if 1
 class Event_Consumer : public IGUIApp {
   public:
-  GBufferPass        gbuffer_pass;
-  GizmoPass          gizmo_pass;
-  ComposePass        compose_pass;
-  ComputeGBufferPass compute_gbuffer_pass;
+  BakerPass            baker_pass;
+  GIComputeGBufferPass gi_compute_gbuffer_pass;
+  GBufferPass          gbuffer_pass;
+  GizmoPass            gizmo_pass;
+  ComposePass          compose_pass;
+  ComputeGBufferPass   compute_gbuffer_pass;
 
   RenderingContext rctx{};
   void             init_traverse(List *l) {
@@ -1299,6 +1536,9 @@ class Event_Consumer : public IGUIApp {
 
     ImGui::Begin("Config");
     if (rctx.config->on_imgui()) rctx.dump();
+    ImGui::Text("%s %fms", baker_pass.get_duration().second, baker_pass.get_duration().first);
+    ImGui::Text("%s %fms", gi_compute_gbuffer_pass.get_duration().second,
+                gi_compute_gbuffer_pass.get_duration().first);
     ImGui::Text("%s %fms", gbuffer_pass.get_duration().second, gbuffer_pass.get_duration().first);
     ImGui::Text("%s %fms", compute_gbuffer_pass.get_duration().second,
                 compute_gbuffer_pass.get_duration().first);
@@ -1315,8 +1555,25 @@ class Event_Consumer : public IGUIApp {
     }
     ImGui::End();
 
+    ImGui::Begin(gi_compute_gbuffer_pass.NAME);
+    {
+      rctx.gizmo_layer->per_imgui_window();
+      auto wsize = get_window_size();
+      ImGui::Image(bind_texture(gi_compute_gbuffer_pass.normal_rt, 0, 0, rd::Format::NATIVE),
+                   ImVec2(wsize.x, wsize.y));
+      { Ray ray = rctx.gizmo_layer->getMouseRay(); }
+    }
+    ImGui::End();
+    ImGui::Begin("Baking Pass");
+    {
+      rctx.gizmo_layer->per_imgui_window();
+      auto wsize = get_window_size();
+      ImGui::Image(bind_texture(baker_pass.normal_rt, 0, 0, rd::Format::NATIVE),
+                   ImVec2(wsize.x, wsize.y));
+      { Ray ray = rctx.gizmo_layer->getMouseRay(); }
+    }
+    ImGui::End();
     ImGui::Begin("Gbuffer normal");
-
     {
       rctx.gizmo_layer->per_imgui_window();
       auto wsize = get_window_size();
@@ -1371,11 +1628,13 @@ class Event_Consumer : public IGUIApp {
  (
   (add u32  g_buffer_width 512 (min 4) (max 2048))
   (add u32  g_buffer_height 512 (min 4) (max 2048))
+  (add u32  baking.size 512 (min 4) (max 4096))
+  (add u32  G.I.grid_size 512 (min 4) (max 4096))
  )
  )"));
-    // rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/human_bust_sculpt/low.gltf"));
+    rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/human_bust_sculpt/cut.gltf"));
     // rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/human_bust_sculpt/untitled.gltf"));
-    rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/light/scene.gltf"));
+    // rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/light/scene.gltf"));
     rctx.scene->update();
     rctx.scene->traverse([&](Node *node) {
       if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
@@ -1384,6 +1643,8 @@ class Event_Consumer : public IGUIApp {
         }
       }
     });
+    baker_pass.init(rctx);
+    gi_compute_gbuffer_pass.init(rctx);
     gbuffer_pass.init(rctx);
     compute_gbuffer_pass.init(rctx);
     gizmo_pass.init(rctx);
@@ -1402,6 +1663,8 @@ class Event_Consumer : public IGUIApp {
     rctx.gizmo_layer->release();
     rctx.scene->release();
     rctx.config->release();
+    baker_pass.release(rctx.factory);
+    gi_compute_gbuffer_pass.release(rctx.factory);
     gbuffer_pass.release(rctx.factory);
     compute_gbuffer_pass.release(rctx.factory);
     gizmo_pass.release(rctx.factory);
@@ -1410,6 +1673,8 @@ class Event_Consumer : public IGUIApp {
   }
   void on_frame() override { //
     rctx.scene->get_root()->update();
+    baker_pass.render(rctx);
+    gi_compute_gbuffer_pass.render(rctx, baker_pass.position_rt, baker_pass.normal_rt);
     gbuffer_pass.render(rctx);
     compute_gbuffer_pass.render(rctx);
     gizmo_pass.render(rctx, gbuffer_pass.get_gbuffer().depth);

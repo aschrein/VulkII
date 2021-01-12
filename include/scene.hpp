@@ -1778,6 +1778,7 @@ struct Config_Item {
     u32 v_u32_max;
     f32 v_f32_max;
   };
+  bool               used = false;
   static Config_Item make_f32(f32 v, f32 min, f32 max) {
     Config_Item out;
     out.type      = F32;
@@ -1880,6 +1881,7 @@ struct Config {
     AutoArray<string_t> to_remove{};
     bool                modified = false;
     items.iter_pairs([&](string_t const &name, Config_Item &item) {
+      if (item.used == false) return;
       char buf[0x100];
       snprintf(buf, sizeof(buf), "%.*s", STRF(name.ref()));
       u64 hash = hash_of(name.ref());
@@ -1921,7 +1923,9 @@ struct Config {
       items.insert(_name, Config_Item::make_u32(def, min, max));
     }
     ASSERT_DEBUG(items.contains(_name));
-    return items.get_ref(_name).v_u32;
+    auto &ref = items.get_ref(_name);
+    ref.used  = true;
+    return ref.v_u32;
   }
 
   f32 &get_f32(char const *name, f32 def = 0.0f, f32 min = -10.0f, f32 max = 10.0f) {
@@ -1931,7 +1935,9 @@ struct Config {
       items.insert(_name, Config_Item::make_f32(def, min, max));
     }
     ASSERT_DEBUG(items.contains(_name));
-    return items.get_ref(_name).v_f32;
+    auto &ref = items.get_ref(_name);
+    ref.used  = true;
+    return ref.v_f32;
   }
 
   bool &get_bool(char const *name) {
@@ -1941,7 +1947,9 @@ struct Config {
       items.insert(_name, {Config_Item::BOOL});
     }
     ASSERT_DEBUG(items.contains(_name));
-    return items.get_ref(_name).v_bool;
+    auto &ref = items.get_ref(_name);
+    ref.used  = true;
+    return ref.v_bool;
   }
 
   void dump(FILE *file) {
@@ -2420,7 +2428,13 @@ class GfxSufraceComponent : public Node::Component {
   }
 };
 
-struct Topo_Mesh {
+class Topo_Mesh {
+  private:
+  Topo_Mesh()  = default;
+  ~Topo_Mesh() = default;
+
+  public:
+  static Topo_Mesh *create() { return new Topo_Mesh; }
   struct Vertex;
   struct Edge;
   struct TriFace {
@@ -2596,6 +2610,36 @@ struct Topo_Mesh {
     // edge_map.release();
     seam_edges.release();
     nonmanifold_edges.release();
+    delete this;
+  }
+};
+
+class TopomeshComponent : public Node::Component {
+  AutoArray<Topo_Mesh *> topo_meshes{};
+
+  public:
+  DECLARE_TYPE(TopomeshComponent, Component)
+
+  ~TopomeshComponent() override {}
+  TopomeshComponent(Node *n) : Component(n) {}
+  static TopomeshComponent *create(Node *n) {
+    ASSERT_DEBUG(n->isa<MeshNode>());
+    TopomeshComponent *s  = new TopomeshComponent(n);
+    MeshNode *         mn = n->dyn_cast<MeshNode>();
+    ito(mn->getNumSurfaces()) {
+      auto topo_mesh = Topo_Mesh::create();
+      topo_mesh->init(mn->getSurface(i)->mesh);
+      s->topo_meshes.push(topo_mesh);
+    }
+
+    n->addComponent(s);
+    return s;
+  }
+  u32        get_num_meshes() { return topo_meshes.size; }
+  Topo_Mesh *get_topo(u32 i) { return topo_meshes[i]; }
+  void       release() override {
+    ito(topo_meshes.size) { topo_meshes[i]->release(); }
+    Component::release();
   }
 };
 

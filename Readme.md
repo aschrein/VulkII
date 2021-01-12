@@ -15,7 +15,7 @@ A toy rendering framework for experimentation and fast prototyping. Code is not 
 1) Ray tracing API.
 2) Async memory defragmentation. 
 
-# Dependencies
+# Optional Dependencies
 
 1) [ISPC](https://github.com/ispc/ispc/releases) in PATH.
 2) [embree](https://github.com/embree/embree/releases) in embree_DIR.

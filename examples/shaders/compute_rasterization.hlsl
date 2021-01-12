@@ -12,6 +12,7 @@ struct PushConstants {
 };
 
 #define RASTERIZATION_FLAG_CULL_PIXELS 0x1
+#define RASTERIZATION_GROUP_SIZE 64
 
 struct FrameConstants {
   float4x4 viewproj;
@@ -55,7 +56,7 @@ bool in_bounds(float4 p) { return p.w > 0.0 && p.z > 0.0 && abs(p.x) < p.w && ab
 
 bool outside(int2 e1, int2 e2) { return e2.x * e1.y - e2.y * e1.x < 0; }
 
-[numthreads(256, 1, 1)] void main(uint3 DTid
+[numthreads(RASTERIZATION_GROUP_SIZE, 1, 1)] void main(uint3 DTid
                                   : SV_DispatchThreadID) {
   uint width, height;
   normal_target.GetDimensions(width, height);
