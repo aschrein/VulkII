@@ -951,7 +951,7 @@ struct Graphics_Pipeline_State {
     rs_create_info.frontFace       = to_vk(rs_state.front_face);
     rs_create_info.lineWidth       = 1.0f;
     rs_create_info.polygonMode     = to_vk(rs_state.polygon_mode);
-    rs_create_info.depthBiasEnable = true;
+    rs_create_info.depthBiasEnable = false;
     return rs_create_info;
   }
   VkPipelineMultisampleStateCreateInfo get_ms_create_info() {
@@ -2389,6 +2389,7 @@ struct VkDeviceContext {
 #define u32 uint
 #define i32 int
 #define f32 float
+#define HLSL
 #define f64 double
 #define float2_splat(x)  float2(x, x)
 #define float3_splat(x)  float3(x, x, x)

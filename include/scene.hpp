@@ -1242,8 +1242,8 @@ template <typename T> struct BVH_Helper {
     ito(3) max[i] = MAX(max[i], tmax[i]);
   }
   u32 split(u32 max_items, u32 depth = 0) {
-    ASSERT_DEBUG(depth < BVH_Node::MAX_DEPTH);
-    if (items.size > max_items && depth < BVH_Node::MAX_DEPTH) {
+    ASSERT_DEBUG(depth < Packed_BVH_Node::MAX_DEPTH);
+    if (items.size > max_items && depth < Packed_BVH_Node::MAX_DEPTH) {
       left = new BVH_Helper;
       left->init();
       left->reserve(items.size / 2);
@@ -1307,15 +1307,21 @@ template <typename T> struct BVH_Helper {
 
 static float dot2(float3 a) { return dot(a, a); }
 
-struct Tri {
-  u32    surface_id;
-  u32    triangle_id;
+struct Triangle {
   float3 a;
+  u32    surface_id;
   float3 b;
+  u32    triangle_id;
   float3 c;
+  u32    padding0;
   void   get_aabb(float3 &min, float3 &max) const {
     ito(3) min[i] = MIN(a[i], MIN(b[i], c[i]));
     ito(3) max[i] = MAX(a[i], MAX(b[i], c[i]));
+  }
+  AABB get_aabb() const {
+    AABB out{};
+    get_aabb(out.min, out.max);
+    return out;
   }
   float2 get_end_points(u8 dim, float3 min, float3 max) const {
     float3 sp;
@@ -1359,8 +1365,12 @@ struct Tri {
                    dot(nor, p1) * dot(nor, p1) / dot2(nor));
   }
 };
+static_assert(sizeof(Triangle) == 48, "Blamey!");
 
-struct BVH_Node {
+#ifdef VULKII_EMBREE
+namespace bvh {
+
+struct Packed_BVH_Node {
   static constexpr f32 EPS       = 1.0e-3f;
   static constexpr u32 NULL_NODE = 0xffffffffu;
   float3               min;
@@ -1428,7 +1438,7 @@ struct BVH_Node {
     return true;
   }
 };
-static_assert(sizeof(BVH_Node) == 32, "Blamey!");
+static_assert(sizeof(Packed_BVH_Node) == 32, "Blamey!");
 
 // Based off
 // https://github.com/kayru/RayTracedShadows/blob/master/Source/Shaders/RayTracedShadows.comp
@@ -1440,7 +1450,7 @@ struct BVH_Triangle {
   float3 e1;
   u32    next_on_miss;
   float3 v0;
-  u32    padding1;
+  u32    next_on_hit;
 
   bool intersects_ray(float3 ro, float3 rd, float &min_t) const {
     const float3 s1   = cross(rd, e1);
@@ -1462,7 +1472,7 @@ struct BVH_Triangle {
 
 static_assert(sizeof(BVH_Triangle) == 48, "Blamey!");
 
-#if 1 // Switching to embree
+#  if 1 // Switching to embree
 class Tri_BVH {
   AutoArray<float4> bvh_nodes{};
   Tri_BVH()  = default;
@@ -1471,13 +1481,13 @@ class Tri_BVH {
     Tri_BVH *out = new Tri_BVH;
     return out;
   }
-#  ifdef VULKII_EMBREE
+#    ifdef VULKII_EMBREE
   friend class Embree_BVH_Builder;
-#  endif
+#    endif
   public:
-  BVH_Node load_node(u32 index) {
+  Packed_BVH_Node load_node(u32 index) {
     float4 *ptr = (float4 *)bvh_nodes.ptr + index * 2;
-    return *(BVH_Node *)ptr;
+    return *(Packed_BVH_Node *)ptr;
   }
   BVH_Triangle load_triangle(u32 index) {
     float4 *     ptr          = bvh_nodes.ptr + index * 2;
@@ -1492,10 +1502,10 @@ class Tri_BVH {
     u32 cur_node_id = 0;
     // Closest hit on triangle
     f32 min_t    = 1.0e10f;
-    u32 inter_id = BVH_Node::NULL_NODE;
-    while (cur_node_id != BVH_Node::NULL_NODE) {
-      BVH_Node cur_node = load_node(cur_node_id);
-      if (cur_node.primitive_id != BVH_Node::NULL_NODE) { // Leaf Node
+    u32 inter_id = Packed_BVH_Node::NULL_NODE;
+    while (cur_node_id != Packed_BVH_Node::NULL_NODE) {
+      Packed_BVH_Node cur_node = load_node(cur_node_id);
+      if (cur_node.primitive_id != Packed_BVH_Node::NULL_NODE) { // Leaf Node
         BVH_Triangle tri{};
         tri.e0 = cur_node.min;
         tri.e1 = cur_node.max;
@@ -1515,6 +1525,164 @@ class Tri_BVH {
     return inter_id;
   }
 };
+#  endif
+// Based off
+// https://github.com/embree/embree/blob/master/tutorials/bvh_builder/bvh_builder_device.cpp
+// https://interplayoflight.wordpress.com/2020/07/21/using-embree-generated-bvh-trees-for-gpu-raytracing/
+struct Node {
+  AABB          aabb{};
+  virtual float sah() = 0;
+  virtual ~Node() {}
+  virtual Node *             get_child(u32 i) { return NULL; }
+  virtual bool               is_leaf() { return false; }
+  template <typename F> void traverse(F fn) {
+    fn(this);
+    if (get_child(0)) get_child(0)->traverse(fn);
+    if (get_child(1)) get_child(1)->traverse(fn);
+  }
+};
+struct InnerNode : public Node {
+  Node *children[2]{};
+  InnerNode() {}
+  ~InnerNode() override {
+    if (children[0]) delete children[0];
+    if (children[1]) delete children[1];
+  }
+  Node *get_child(u32 i) override { return children[i]; }
+  float sah() override {
+    AABB &bounds0 = children[0]->aabb;
+    AABB &bounds1 = children[1]->aabb;
+    AABB  uni     = bounds0;
+    uni.unite(bounds1);
+    return 1.0f +
+           (bounds0.area() * children[0]->sah() + bounds1.area() * children[1]->sah()) / uni.area();
+  }
+};
+struct LeafNode : public Node {
+  u32   surface_id  = 0;
+  u32   triangle_id = 0;
+  bool  is_leaf() override { return true; }
+  float sah() override { return 1.0f; }
+  ~LeafNode() override {}
+  LeafNode(u32 surface_id, u32 triangle_id, const AABB &aabb)
+      : surface_id(surface_id), triangle_id(triangle_id) {
+    this->aabb = aabb;
+  }
+};
+class Embree_BVH_Builder {
+  public:
+  private:
+  RTCDevice device = NULL;
+  // RTCScene  scene       = NULL;
+  ~Embree_BVH_Builder() = default;
+  Embree_BVH_Builder()  = default;
+
+  static void *create_leaf(RTCThreadLocalAllocator alloc, const RTCBuildPrimitive *prims,
+                           size_t numPrims, void *userPtr) {
+    assert(numPrims == 1);
+    void *ptr = rtcThreadLocalAlloc(alloc, sizeof(LeafNode), 16);
+    return (void *)new (ptr) LeafNode(prims->primID, prims->geomID, *(AABB *)prims);
+  }
+
+  static void *create_node(RTCThreadLocalAllocator alloc, unsigned int numChildren, void *userPtr) {
+    assert(numChildren == 2);
+    void *ptr = rtcThreadLocalAlloc(alloc, sizeof(InnerNode), 16);
+    return (void *)new (ptr) InnerNode;
+  }
+
+  static void setChildren(void *nodePtr, void **childPtr, unsigned int numChildren, void *userPtr) {
+    assert(numChildren == 2);
+    for (size_t i = 0; i < 2; i++) ((InnerNode *)nodePtr)->children[i] = (Node *)childPtr[i];
+  }
+
+  static void setBounds(void *nodePtr, const RTCBounds **bounds, unsigned int numChildren,
+                        void *userPtr) {
+    assert(numChildren == 2);
+    ((Node *)nodePtr)->aabb = *(const AABB *)bounds[0];
+    ((Node *)nodePtr)->aabb.unite(*(const AABB *)bounds[1]);
+  }
+  static void splitPrimitive(const RTCBuildPrimitive *prim, unsigned int dim, float pos,
+                             RTCBounds *lprim, RTCBounds *rprim, void *userPtr) {
+    assert(dim < 3);
+    // assert(prim->geomID == 0);
+    *(RTCBuildPrimitive *)lprim = *(RTCBuildPrimitive *)prim;
+    *(RTCBuildPrimitive *)rprim = *(RTCBuildPrimitive *)prim;
+    (&lprim->upper_x)[dim]      = pos;
+    (&rprim->lower_x)[dim]      = pos;
+  }
+
+  public:
+  static Embree_BVH_Builder *create() {
+    Embree_BVH_Builder *out = new Embree_BVH_Builder;
+    out->device             = rtcNewDevice(NULL);
+    return out;
+  }
+  void release() {
+    rtcReleaseDevice(device);
+    delete this;
+  }
+  struct BVH_Result {
+    RTCBVH bvh  = NULL;
+    Node * root = NULL;
+    void   release() {
+      if (bvh) {
+        rtcReleaseBVH(bvh);
+        // delete root;
+      }
+      MEMZERO(*this);
+    }
+  };
+  BVH_Result build(Triangle *elems, size_t num_elems) {
+    size_t             extra_nodes = num_elems;
+    size_t             num_nodes   = num_elems;
+    size_t             capacity    = num_elems + extra_nodes;
+    RTCBuildPrimitive *prims       = tl_alloc_typed<RTCBuildPrimitive>(capacity);
+    defer(tl_free(prims));
+    ito(num_elems) {
+      RTCBuildPrimitive prim{};
+      AABB              aabb = elems[i].get_aabb();
+      prim.lower_x           = aabb.min.x;
+      prim.lower_y           = aabb.min.y;
+      prim.lower_z           = aabb.min.z;
+      prim.upper_x           = aabb.max.x;
+      prim.upper_y           = aabb.max.y;
+      prim.upper_z           = aabb.max.z;
+      prim.geomID            = elems[i].triangle_id;
+      prim.primID            = elems[i].surface_id;
+      prims[i]               = prim;
+    }
+
+    RTCBVH bvh = rtcNewBVH(device);
+    // defer(rtcReleaseBVH(bvh));
+    RTCBuildArguments arguments      = rtcDefaultBuildArguments();
+    arguments.byteSize               = sizeof(arguments);
+    arguments.buildFlags             = RTC_BUILD_FLAG_NONE;
+    arguments.buildQuality           = RTC_BUILD_QUALITY_HIGH;
+    arguments.maxBranchingFactor     = 2;
+    arguments.maxDepth               = 1024;
+    arguments.sahBlockSize           = 1;
+    arguments.minLeafSize            = 1;
+    arguments.maxLeafSize            = 1;
+    arguments.traversalCost          = 1.0f;
+    arguments.intersectionCost       = 1.0f;
+    arguments.bvh                    = bvh;
+    arguments.primitives             = prims;
+    arguments.primitiveCount         = num_nodes;
+    arguments.primitiveArrayCapacity = capacity;
+    arguments.createNode             = create_node;
+    arguments.setNodeChildren        = setChildren;
+    arguments.setNodeBounds          = setBounds;
+    arguments.createLeaf             = create_leaf;
+    arguments.splitPrimitive         = splitPrimitive;
+    arguments.buildProgress          = nullptr;
+    arguments.userPtr                = nullptr;
+    BVH_Result out{};
+    out.bvh  = bvh;
+    out.root = (Node *)rtcBuildBVH(&arguments);
+    return out;
+  }
+};
+} // namespace bvh
 #endif
 
 struct GPU_Meshlet {
@@ -1708,28 +1876,42 @@ struct Config {
     }
   }
 
-  void on_imgui() {
+  bool on_imgui() {
+    AutoArray<string_t> to_remove{};
+    bool                modified = false;
     items.iter_pairs([&](string_t const &name, Config_Item &item) {
       char buf[0x100];
       snprintf(buf, sizeof(buf), "%.*s", STRF(name.ref()));
+      u64 hash = hash_of(name.ref());
+      ImGui::PushID((i32)hash);
+      defer(ImGui::PopID());
       if (item.type == Config_Item::U32) {
         if (item.v_u32_min != item.v_u32_max) {
-          ImGui::SliderInt(buf, (int *)&item.v_u32, item.v_u32_min, item.v_u32_max);
+          modified = ImGui::SliderInt(buf, (int *)&item.v_u32, item.v_u32_min, item.v_u32_max);
         } else {
-          ImGui::InputInt(buf, (int *)&item.v_u32);
+          modified = ImGui::InputInt(buf, (int *)&item.v_u32);
         }
       } else if (item.type == Config_Item::F32) {
         if (item.v_f32_min != item.v_f32_max) {
-          ImGui::SliderFloat(buf, (float *)&item.v_f32, item.v_f32_min, item.v_f32_max);
+          modified = ImGui::SliderFloat(buf, (float *)&item.v_f32, item.v_f32_min, item.v_f32_max);
         } else {
-          ImGui::InputFloat(buf, (float *)&item.v_f32);
+          modified = ImGui::InputFloat(buf, (float *)&item.v_f32);
         }
       } else if (item.type == Config_Item::BOOL) {
-        ImGui::Checkbox(buf, &item.v_bool);
+        modified = ImGui::Checkbox(buf, &item.v_bool);
       } else {
         TRAP;
       }
+      ImGui::SameLine();
+      if (ImGui::Button("Remove")) {
+        to_remove.push(name);
+      }
     });
+    ito(to_remove.size) {
+      modified = true;
+      items.remove(to_remove[i]);
+    }
+    return modified;
   }
 
   u32 &get_u32(char const *name, u32 def = 0, u32 min = 0, u32 max = 10) {
@@ -2026,20 +2208,22 @@ public:
 };
 
 class GfxSurface {
-  InlineArray<size_t, 16>    attribute_offsets;
-  InlineArray<size_t, 16>    attribute_sizes;
-  InlineArray<Attribute, 16> attributes;
-
-  size_t total_memory_needed;
-  u32    total_indices;
-  size_t index_offset;
-
-  Resource_ID buffer;
-
   rd::IDevice *factory;
   Surface *    surface;
-  rd::Index_t  index_type;
 
+  public:
+  InlineArray<size_t, 16>    attribute_offsets{};
+  InlineArray<size_t, 16>    attribute_sizes{};
+  InlineArray<Attribute, 16> attributes{};
+
+  size_t total_memory_needed = 0;
+  u32    total_indices       = 0;
+  size_t index_offset        = 0;
+
+  Resource_ID buffer{};
+  rd::Index_t index_type{};
+
+  private:
   void init(rd::IDevice *factory, Surface *surface) {
     MEMZERO(*this);
     this->index_type    = surface->mesh.index_type;
@@ -2087,6 +2271,7 @@ class GfxSurface {
     auto *ctx = factory->start_compute_pass();
     ctx->copy_buffer(stagin_buffer, 0, buffer, 0, (u32)get_needed_memory());
     factory->end_compute_pass(ctx);
+    total_indices += surface->mesh.num_indices;
   }
   size_t get_needed_memory() {
     if (total_memory_needed == 0) {
@@ -2104,20 +2289,34 @@ class GfxSurface {
         attribute_offsets[i] = rd::IDevice::align_up(attribute_offsets[i]);
         total_memory_needed  = attribute_offsets[i] + attribute_sizes[i];
       }
-      total_memory_needed = rd::IDevice::align_up(total_memory_needed);
-      index_offset        = total_memory_needed;
+      total_memory_needed =
+          rd::IDevice::align_up(total_memory_needed, rd::IDevice::BUFFER_ALIGNMENT);
+      index_offset = total_memory_needed;
       total_memory_needed += surface->mesh.get_bytes_per_index() * surface->mesh.num_indices;
     }
     return total_memory_needed;
   }
-  u32 get_num_indices() {
-    if (total_indices == 0) {
-      total_indices += surface->mesh.num_indices;
-    }
-    return total_indices;
-  }
+
+  u32 get_num_indices() { return total_indices; }
 
   public:
+  size_t get_bytes_per_index() { return surface->mesh.get_bytes_per_index(); }
+  size_t get_attribute_offset(rd::Attriute_t type) {
+    ito(attributes.size) {
+      if (attributes[i].type == type) {
+        return attribute_offsets[i];
+      }
+    }
+    TRAP;
+  }
+  size_t get_attribute_stride(rd::Attriute_t type) {
+    ito(attributes.size) {
+      if (attributes[i].type == type) {
+        return attributes[i].stride;
+      }
+    }
+    TRAP;
+  }
   static GfxSurface *create(rd::IDevice *factory, Surface *surface) {
     GfxSurface *out = new GfxSurface;
     out->init(factory, surface);
@@ -2161,12 +2360,17 @@ class GfxSurface {
 
 class GfxSufraceComponent : public Node::Component {
   Array<GfxSurface *> gfx_surfaces;
-  Tri_BVH *          bvh = NULL;
-
+#ifdef VULKII_EMBREE
+  bvh::Embree_BVH_Builder::BVH_Result bvh{};
+#endif
   public:
   DECLARE_TYPE(GfxSufraceComponent, Component)
+#ifdef VULKII_EMBREE
+  bvh::Node *getBVH() { return bvh.root; }
+#else
+  bvh::Node *getBVH() { return NULL; }
+#endif
 
-  Tri_BVH *getBVH() { return bvh; }
   ~GfxSufraceComponent() override {}
   GfxSufraceComponent(Node *n) : Component(n) { gfx_surfaces.init(); }
   static GfxSufraceComponent *create(rd::IDevice *factory, Node *n) {
@@ -2180,32 +2384,38 @@ class GfxSufraceComponent : public Node::Component {
     return s;
   }
   void buildBVH() {
-    /* if (bvh) bvh->release();
-     bvh = new BVH<Tri>;
-     AutoArray<Tri> tri_pool;
-     MeshNode *     mn = node->dyn_cast<MeshNode>();
-     ito(mn->getNumSurfaces()) {
-       tri_pool.reserve(tri_pool.size + mn->getSurface(i)->mesh.num_indices / 3);
-       kto(mn->getSurface(i)->mesh.num_indices / 3) {
-         Triangle_Full ftri = mn->getSurface(i)->mesh.fetch_triangle(k);
-         Tri           t;
-         t.surface_id  = i;
-         t.triangle_id = k;
-         t.a           = node->transform(ftri.v0.position);
-         t.b           = node->transform(ftri.v1.position);
-         t.c           = node->transform(ftri.v2.position);
-
-         tri_pool.push(t);
-       }
-     }
-     bvh->init(&tri_pool[0], (u32)tri_pool.size);*/
+#ifdef VULKII_EMBREE
+    bvh.release();
+    static bvh::Embree_BVH_Builder *bvh_builder = bvh::Embree_BVH_Builder::create();
+    // defer(bvh_builder->release());
+    AutoArray<Triangle> triangles{};
+    if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
+      ito(mn->getNumSurfaces()) {
+        Surface *s = mn->getSurface(i);
+        triangles.reserve(s->mesh.num_indices / 3);
+        jto(s->mesh.num_indices / 3) {
+          Triangle_Full ftri = s->mesh.fetch_triangle(j);
+          Triangle      t{};
+          t.a           = node->transform(ftri.v0.position);
+          t.b           = node->transform(ftri.v1.position);
+          t.c           = node->transform(ftri.v2.position);
+          t.surface_id  = i;
+          t.triangle_id = j;
+          triangles.push(t);
+        }
+      }
+    }
+    bvh = bvh_builder->build(&triangles[0], triangles.size);
+#endif
   }
   u32         getNumSurfaces() { return (u32)gfx_surfaces.size; }
   GfxSurface *getSurface(u32 i) { return gfx_surfaces[i]; }
   void        release() override {
     ito(gfx_surfaces.size) gfx_surfaces[i]->release();
     gfx_surfaces.release();
-    if (bvh) bvh->release();
+#ifdef VULKII_EMBREE
+    bvh.release();
+#endif
     Component::release();
   }
 };
@@ -2388,154 +2598,5 @@ struct Topo_Mesh {
     nonmanifold_edges.release();
   }
 };
-
-#ifdef VULKII_EMBREE
-
-// Based off
-// https://github.com/embree/embree/blob/master/tutorials/bvh_builder/bvh_builder_device.cpp
-// https://interplayoflight.wordpress.com/2020/07/21/using-embree-generated-bvh-trees-for-gpu-raytracing/
-class Embree_BVH_Builder {
-  RTCDevice device = NULL;
-  // RTCScene  scene       = NULL;
-  ~Embree_BVH_Builder() = default;
-  Embree_BVH_Builder()  = default;
-
-  struct Node {
-    AABB          aabb{};
-    virtual float sah() = 0;
-    virtual ~Node()     = 0;
-  };
-
-  struct InnerNode : public Node {
-
-    Node *children[2]{};
-
-    InnerNode() {}
-    ~InnerNode() override {
-      if (children[0]) delete children[0];
-      if (children[1]) delete children[1];
-    }
-    float sah() {
-      AABB &bounds0 = children[0]->aabb;
-      AABB &bounds1 = children[1]->aabb;
-      AABB  uni     = bounds0;
-      uni.unite(bounds1);
-      return 1.0f + (bounds0.area() * children[0]->sah() + bounds1.area() * children[1]->sah()) /
-                        uni.area();
-    }
-
-    static void *create(RTCThreadLocalAllocator alloc, unsigned int numChildren, void *userPtr) {
-      assert(numChildren == 2);
-      void *ptr = rtcThreadLocalAlloc(alloc, sizeof(InnerNode), 16);
-      return (void *)new (ptr) InnerNode;
-    }
-
-    static void setChildren(void *nodePtr, void **childPtr, unsigned int numChildren,
-                            void *userPtr) {
-      assert(numChildren == 2);
-      for (size_t i = 0; i < 2; i++) ((InnerNode *)nodePtr)->children[i] = (Node *)childPtr[i];
-    }
-
-    static void setBounds(void *nodePtr, const RTCBounds **bounds, unsigned int numChildren,
-                          void *userPtr) {
-      assert(numChildren == 2);
-      ((InnerNode *)nodePtr)->aabb = *(const AABB *)bounds[0];
-      ((InnerNode *)nodePtr)->aabb.unite(*(const AABB *)bounds[1]);
-    }
-  };
-  static void splitPrimitive(const RTCBuildPrimitive *prim, unsigned int dim, float pos,
-                             RTCBounds *lprim, RTCBounds *rprim, void *userPtr) {
-    assert(dim < 3);
-    assert(prim->geomID == 0);
-    *(RTCBuildPrimitive *)lprim = *(RTCBuildPrimitive *)prim;
-    *(RTCBuildPrimitive *)rprim = *(RTCBuildPrimitive *)prim;
-    (&lprim->upper_x)[dim]      = pos;
-    (&rprim->lower_x)[dim]      = pos;
-  }
-  struct LeafNode : public Node {
-    u32 id               = 0;
-    ~LeafNode() override = default;
-    float sah() { return 1.0f; }
-
-    LeafNode(unsigned id, const AABB &aabb) : id(id) { this->aabb = aabb; }
-
-    static void *create(RTCThreadLocalAllocator alloc, const RTCBuildPrimitive *prims,
-                        size_t numPrims, void *userPtr) {
-      assert(numPrims == 1);
-      void *ptr = rtcThreadLocalAlloc(alloc, sizeof(LeafNode), 16);
-      return (void *)new (ptr) LeafNode(prims->geomID, *(AABB *)prims);
-    }
-  };
-
-  public:
-  static Embree_BVH_Builder *create() {
-    Embree_BVH_Builder *out = new Embree_BVH_Builder;
-    out->device             = rtcNewDevice(NULL);
-    return out;
-  }
-  void release() {
-    rtcReleaseDevice(device);
-    delete this;
-  }
-  struct BVH_Result {
-    u32                 prim_id = 0;
-    Embree_BVH_Builder *builder = NULL;
-    RTCBVH              bvh     = NULL;
-    Node *              root    = NULL;
-    void                release() { rtcReleaseBVH(bvh); }
-  };
-  template <typename T> BVH_Result build(T *elems, size_t num_elems, u32 prim_id) {
-    constexpr size_t   extra_nodes = 1000;
-    size_t             num_nodes   = num_elems;
-    size_t             capacity    = num_elems + extra_nodes;
-    RTCBuildPrimitive *prims       = tl_alloc_typed<RTCBuildPrimitive>(capacity);
-    defer(tl_free(prims));
-    ito(num_elems) {
-      RTCBuildPrimitive prim{};
-      AABB              aabb = elems[i].get_aabb();
-      prim.lower_x           = aabb.min.x;
-      prim.lower_y           = aabb.min.y;
-      prim.lower_z           = aabb.min.z;
-      prim.upper_x           = aabb.max.x;
-      prim.upper_y           = aabb.max.y;
-      prim.upper_z           = aabb.max.z;
-      prim.geomID            = i;
-      prim.primID            = prim_id;
-      prims[i]               = prim;
-    }
-
-    BVH_Result out{};
-    out.bvh = rtcNewBVH(device);
-
-    RTCBuildArguments arguments      = rtcDefaultBuildArguments();
-    arguments.byteSize               = sizeof(arguments);
-    arguments.buildFlags             = RTC_BUILD_FLAG_NONE;
-    arguments.buildQuality           = RTC_BUILD_QUALITY_HIGH;
-    arguments.maxBranchingFactor     = 2;
-    arguments.maxDepth               = 1024;
-    arguments.sahBlockSize           = 1;
-    arguments.minLeafSize            = 1;
-    arguments.maxLeafSize            = 1;
-    arguments.traversalCost          = 1.0f;
-    arguments.intersectionCost       = 1.0f;
-    arguments.bvh                    = out.bvh;
-    arguments.primitives             = prims;
-    arguments.primitiveCount         = num_nodes;
-    arguments.primitiveArrayCapacity = capacity;
-    arguments.createNode             = InnerNode::create;
-    arguments.setNodeChildren        = InnerNode::setChildren;
-    arguments.setNodeBounds          = InnerNode::setBounds;
-    arguments.createLeaf             = LeafNode::create;
-    arguments.splitPrimitive         = splitPrimitive;
-    arguments.buildProgress          = nullptr;
-    arguments.userPtr                = nullptr;
-
-    out.root    = (Node *)rtcBuildBVH(&arguments);
-    out.builder = this;
-    out.prim_id = prim_id;
-    return out;
-  }
-};
-#endif
 
 #endif // SCENE

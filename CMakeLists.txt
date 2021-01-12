@@ -117,6 +117,12 @@ function(ADD_EXAMPLE example_name example_file)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_SOURCE_DIR}/bin/dxil.dll"
             $<TARGET_FILE_DIR:${example_name}>)
+      if(embree_FOUND)
+             add_custom_command(TARGET ${example_name} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${embree_DIR}/bin/embree3.dll"
+                    $<TARGET_FILE_DIR:${example_name}>)
+     endif()
       set_property(TARGET ${example_name} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
     ELSE()
     ENDIF()

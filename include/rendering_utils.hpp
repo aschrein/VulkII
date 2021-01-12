@@ -1021,7 +1021,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     MEMZERO(pc);
     pc.op = filter;
     switch (image->format) {
-    // clang-format off
+      // clang-format off
       case rd::Format::RGBA8_SRGBA:  {  pc.format = 0; } break;
       case rd::Format::RGBA8_UNORM:  {  pc.format = 1; } break;
       case rd::Format::RGB32_FLOAT:  {  pc.format = 2; } break;
@@ -1207,7 +1207,7 @@ protected:
   AutoArray<Gizmo_Instance_Data_CPU, 0x1000> cylinder_draw_cmds{};
   AutoArray<Gizmo_Instance_Data_CPU, 0x1000> sphere_draw_cmds{};
   AutoArray<Gizmo_Instance_Data_CPU, 0x1000> cone_draw_cmds{};
-  AutoArray<Gizmo_Line_Vertex, 0x1000>       line_segments{};
+  AutoArray<Gizmo_Line_Vertex, 1000000>      line_segments{};
   Pool<char>                                 char_storage{};
   struct _String2D {
     char *   c_str;
@@ -1879,6 +1879,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
     g->on_mouse_enter();
     g->on_select();
   }
+  // Called multiple times per frame per imgui window
   void per_imgui_window() {
 
     ImGuiIO &io = ImGui::GetIO();
@@ -2148,6 +2149,8 @@ float4 main(in PSInput input) : SV_TARGET0 {
       memcpy((u8 *)ptr, &line_segments[0], line_segments.size * sizeof(Gizmo_Line_Vertex));
       dev->unmap_buffer(gizmo_instance_buffer);
       dev->release_resource(gizmo_instance_buffer);
+      ctx->bind_graphics_pso(gizmo_lines_pso);
+      ctx->bind_vertex_buffer(0, gizmo_instance_buffer, 0);
       table->push_constants(&pc, 0, sizeof(pc));
       ctx->draw(line_segments.size, 1, 0, 0);
       line_segments.reset();
@@ -2394,13 +2397,14 @@ static float3 transform(float4x4 const &t, float3 const &v) {
   float4 r = t * float4(v.xyz, 1.0f);
   return r.xyz;
 }
-
-// template <typename T> static void render_bvh(float4x4 const &t, BVH<T> *bvh, Gizmo_Layer *gl) {
-//  ASSERT_DEBUG(bvh);
-//  bvh->traverse([&](BVH_Node *node) {
-//    gl->render_linebox(transform(t, node->min), transform(t, node->max), float3(1.0f, 0.0f,
-//    0.0f));
-//  });
-//}
+static void render_bvh(float4x4 const &t, bvh::Node *bvh, Gizmo_Layer *gl) {
+  ASSERT_DEBUG(bvh);
+  bvh->traverse([&](bvh::Node *node) {
+    if (node->is_leaf())
+      return;
+    gl->render_linebox(transform(t, node->aabb.min), transform(t, node->aabb.max),
+                       float3(1.0f, 0.0f, 0.0f));
+  });
+}
 #endif
 #endif // RENDERING_UTILS_HPP

@@ -458,7 +458,7 @@ static inline bool operator==(Render_Pass_Create_Info const &a, Render_Pass_Crea
 
 struct Vertex_Binding {
   u32        binding;
-  u32        stride;
+  size_t     stride;
   Input_Rate inputRate;
 };
 
@@ -480,7 +480,7 @@ struct Graphics_Pipeline_State {
 
   // Utility functions.
   void IA_set_topology(Primitive topology) { this->topology = topology; }
-  void IA_set_vertex_binding(u32 index, u32 stride, Input_Rate rate) {
+  void IA_set_vertex_binding(u32 index, size_t stride, Input_Rate rate) {
     num_vs_bindings           = MAX(num_vs_bindings, index + 1);
     bindings[index].binding   = index;
     bindings[index].inputRate = rate;

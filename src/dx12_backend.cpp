@@ -126,7 +126,7 @@ DXGI_FORMAT to_dx(rd::Format format) {
   case rd::Format::R16_FLOAT       : return DXGI_FORMAT_R16_FLOAT          ;
   case rd::Format::R16_UNORM       : return DXGI_FORMAT_R16_UNORM;
   case rd::Format::R8_UNORM        : return DXGI_FORMAT_R8_UNORM;
-  case rd::Format::D32_OR_R32_FLOAT : return DXGI_FORMAT_R32_TYPELESS;
+  case rd::Format::D32_OR_R32_FLOAT : {TRAP;};
   case rd::Format::R32_UINT        : return DXGI_FORMAT_R32_UINT;
   case rd::Format::R16_UINT        : return DXGI_FORMAT_R16_UINT            ;
   default: UNIMPLEMENTED;
@@ -149,7 +149,7 @@ rd::Format from_dx(DXGI_FORMAT format) {
   case DXGI_FORMAT_R16_FLOAT          : return rd::Format::R16_FLOAT   ;
   case DXGI_FORMAT_R16_UNORM          : return rd::Format::R16_UNORM   ;
   case DXGI_FORMAT_R8_UNORM           : return rd::Format::R8_UNORM    ;
-  case DXGI_FORMAT_R32_TYPELESS          : return rd::Format::D32_OR_R32_FLOAT   ;
+  case DXGI_FORMAT_R32_TYPELESS          : {TRAP;};
   case DXGI_FORMAT_R32_UINT           : return rd::Format::R32_UINT    ;
   case DXGI_FORMAT_R16_UINT           : return rd::Format::R16_UINT    ;
   default: UNIMPLEMENTED;
@@ -848,7 +848,10 @@ class DX12Device : public rd::IDevice {
       desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
     if (info.usage_bits & (u32)rd::Image_Usage_Bits::USAGE_DT)
       desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-    desc.Format             = to_dx(info.format);
+    if (info.format == rd::Format::D32_OR_R32_FLOAT)
+      desc.Format = DXGI_FORMAT_R32_TYPELESS;
+    else
+      desc.Format = to_dx(info.format);
     desc.Height             = 1;
     desc.Layout             = D3D12_TEXTURE_LAYOUT_UNKNOWN;
     desc.MipLevels          = info.levels;
@@ -944,6 +947,7 @@ class DX12Device : public rd::IDevice {
 #define i32 int
 #define f32 float
 #define f64 double
+#define HLSL
 #define float2_splat(x)  float2(x, x)
 #define float3_splat(x)  float3(x, x, x)
 #define float4_splat(x)  float4(x, x, x, x)
@@ -1560,6 +1564,9 @@ class DX12Binding_Table : public rd::IBinding_Table {
         signature->space_descs[space].bindings[binding].OffsetInDescriptorsFromTableStart;
     D3D12_CONSTANT_BUFFER_VIEW_DESC desc{};
     ASSERT_DEBUG((offset & 0xffu) == 0);
+    if (size == 0) {
+      size = res->GetDesc().Width - offset;
+    }
     desc.BufferLocation = res->GetGPUVirtualAddress() + offset;
     desc.SizeInBytes    = (size + 0xffU) & ~0xffu;
     dev_ctx->get_device()->CreateConstantBufferView(
@@ -1587,7 +1594,7 @@ class DX12Binding_Table : public rd::IBinding_Table {
     }
 #endif
     if (size == 0) {
-      size = res->GetDesc().Width;
+      size = res->GetDesc().Width - offset;
     }
     D3D12_UNORDERED_ACCESS_VIEW_DESC desc{};
     desc.ViewDimension               = D3D12_UAV_DIMENSION_BUFFER;

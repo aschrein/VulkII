@@ -2,7 +2,7 @@
 #ifndef UTILS_H
 #define UTILS_H
 
-//#define TRACY_ENABLE
+#define TRACY_ENABLE
 
 #include <codecvt>
 #include <cstdlib>
@@ -1840,9 +1840,9 @@ class Util_Allocator {
 #  endif
 
 struct Thread_Local {
-  Temporary_Storage<> temporal_storage;
+  Temporary_Storage<> temporary_storage;
   bool                initialized = false;
-  ~Thread_Local() { temporal_storage.release(); }
+  ~Thread_Local() { temporary_storage.release(); }
 #  ifdef UTILS_TL_IMPL_DEBUG
   i64 allocated = 0;
 #  endif
@@ -1853,16 +1853,16 @@ thread_local Thread_Local g_tl{};
 
 Thread_Local *get_tl() {
   if (g_tl.initialized == false) {
-    g_tl.initialized      = true;
-    g_tl.temporal_storage = Temporary_Storage<>::create(UTILS_TL_TMP_SIZE);
+    g_tl.initialized       = true;
+    g_tl.temporary_storage = Temporary_Storage<>::create(UTILS_TL_TMP_SIZE);
   }
   return &g_tl;
 }
 
-void *tl_alloc_tmp(size_t size) { return get_tl()->temporal_storage.alloc(size); }
+void *tl_alloc_tmp(size_t size) { return get_tl()->temporary_storage.alloc(size); }
 
-void tl_alloc_tmp_enter() { get_tl()->temporal_storage.enter_scope(); }
-void tl_alloc_tmp_exit() { get_tl()->temporal_storage.exit_scope(); }
+void tl_alloc_tmp_enter() { get_tl()->temporary_storage.enter_scope(); }
+void tl_alloc_tmp_exit() { get_tl()->temporary_storage.exit_scope(); }
 
 void *tl_alloc(size_t size) {
 #  ifdef UTILS_TL_IMPL_DEBUG
@@ -1895,8 +1895,8 @@ static inline void *_tl_realloc(void *ptr, size_t oldsize, size_t newsize) {
 #  ifdef UTILS_TL_IMPL_DEBUG
 static inline void assert_tl_alloc_zero() {
   ASSERT_ALWAYS(get_tl()->allocated == 0);
-  ASSERT_ALWAYS(get_tl()->temporal_storage.cursor == 0);
-  ASSERT_ALWAYS(get_tl()->temporal_storage.stack_cursor == 0);
+  ASSERT_ALWAYS(get_tl()->temporary_storage.cursor == 0);
+  ASSERT_ALWAYS(get_tl()->temporary_storage.stack_cursor == 0);
 }
 #  endif
 
