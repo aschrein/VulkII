@@ -364,7 +364,7 @@ VkDescriptorType to_vk(rd::Binding_t type) {
   case rd::Binding_t::TEXTURE             : return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
   case rd::Binding_t::UAV_BUFFER          : return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
   case rd::Binding_t::UAV_TEXTURE         : return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-  case rd::Binding_t::UNIFORM_BUFFER      : return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+  case rd::Binding_t::UNIFORM_BUFFER      : return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
   default: UNIMPLEMENTED;
   }
   // clang-format on
@@ -596,11 +596,13 @@ static Array<u32> compile_hlsl(VkDevice device, string_ref text, shaderc_shader_
   ASSERT_ALWAYS(DxcCreateInstance);
 #endif
 
-  static CComPtr<IDxcLibrary>  library;
-  static CComPtr<IDxcCompiler> compiler;
-  static int                   init = [&] {
+  static CComPtr<IDxcLibrary>        library;
+  static CComPtr<IDxcCompiler>       compiler;
+  static CComPtr<IDxcIncludeHandler> include_handler;
+  static int                         init = [&] {
     ASSERT_ALWAYS(S_OK == DxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler)));
     ASSERT_ALWAYS(S_OK == DxcCreateInstance(CLSID_DxcLibrary, IID_PPV_ARGS(&library)));
+    ASSERT_ALWAYS(S_OK == library->CreateIncludeHandler(&include_handler));
     return 0;
   }();
   CComPtr<IDxcBlobEncoding> blob;
@@ -628,7 +630,16 @@ static Array<u32> compile_hlsl(VkDevice device, string_ref text, shaderc_shader_
   }
   defer(dxc_defines.release());
 
-  WCHAR const *options[] = {L"-spirv"};
+  WCHAR const *options[] = {
+      L"-spirv",
+#ifndef NDEBUG
+      L"-Zi",           // Debug info
+      L"-Qembed_debug", // Embed debug info into the shader
+      L"-Od",           // Disable optimization
+#else
+      L"-O3", // Optimization level 3
+#endif
+  };
 
   CComPtr<IDxcOperationResult> result;
   HRESULT                      hr = compiler->Compile(blob,                        // pSource
@@ -637,8 +648,8 @@ static Array<u32> compile_hlsl(VkDevice device, string_ref text, shaderc_shader_
                                  profile,                     // pTargetProfile
                                  options, ARRAYSIZE(options), // pArguments, argCount
                                  dxc_defines.ptr, dxc_defines.size, // pDefines, defineCount
-                                 NULL,     // pIncludeHandler
-                                 &result); // ppResult
+                                 include_handler.p, // pIncludeHandler
+                                 &result);          // ppResult
   if (SUCCEEDED(hr)) result->GetStatus(&hr);
   if (FAILED(hr)) {
     if (result) {
@@ -1219,7 +1230,7 @@ class VK_Binding_Table : public rd::IBinding_Table {
     }
     ito(signature->set_layouts.size) {
       VkDescriptorSet set = sets[i];
-      vkCmdBindDescriptorSets(cmd, bind_point, signature->pipeline_layout, 0, 1, &set, 0, NULL);
+      vkCmdBindDescriptorSets(cmd, bind_point, signature->pipeline_layout, i, 1, &set, 0, NULL);
     }
   }
 };
@@ -2269,7 +2280,7 @@ struct VkDeviceContext {
     else
       cinfo.format = format;
     cinfo.image = img.image;
-    //if (img.aspect & VK_IMAGE_ASPECT_DEPTH_BIT)
+    // if (img.aspect & VK_IMAGE_ASPECT_DEPTH_BIT)
     //  cinfo.flags = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
     cinfo.subresourceRange.aspectMask     = img.aspect;
     cinfo.subresourceRange.baseArrayLayer = base_layer;
@@ -3807,6 +3818,11 @@ class VkFactory : public rd::IDevice {
     info.pValues                               = wait_values;
     VkResult res                               = vkWaitSemaphores(dev_ctx->device, &info, 0);
     return res == VK_SUCCESS;
+  }
+  Resource_ID create_shader_from_file(rd::Stage_t type, string_ref filename,
+                                      Pair<string_ref, string_ref> *defines,
+                                      size_t                        num_defines) override {
+    TRAP;
   }
   Resource_ID create_shader(rd::Stage_t type, string_ref body,
                             Pair<string_ref, string_ref> *defines, size_t num_defines) override {

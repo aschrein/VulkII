@@ -185,17 +185,18 @@ class IGUIApp {
 struct PushConstants
 {
   float2 uScale;
-  float2 uTranslate; 
+  float2 uTranslate;
   u32    control_flags;
 };
 [[vk::push_constant]] ConstantBuffer<PushConstants> pc : DX12_PUSH_CONSTANTS_REGISTER;
 
 #define CONTROL_DEPTH_ENABLE 1
-#define CONTROL_AMPLIFY 2
+#define CONTROL_UINT         2
 #define is_control(flag) (pc.control_flags & flag) != 0
 
 [[vk::binding(0, 0)]] Texture2D<float4>   sTexture          : register(t0, space0);
-[[vk::binding(1, 0)]] SamplerState        sSampler          : register(s1, space0);
+[[vk::binding(1, 0)]] Texture2D<uint>     uTexture          : register(t1, space0);
+[[vk::binding(2, 0)]] SamplerState        sSampler          : register(s2, space0);
 
 struct PSInput {
   [[vk::location(0)]] float4 pos   : SV_POSITION;
@@ -225,14 +226,15 @@ PSInput main(in VSInput input) {
 float4 main(in PSInput input) : SV_TARGET0 {
   if (is_control(CONTROL_DEPTH_ENABLE)) {
     float depth = sTexture.Sample(sSampler, input.UV).r;
-    depth = pow(depth * 500.0f, 1.0f / 2.0f);
+    depth = pow(depth * 5.0f, 1.0f / 2.0f);
     return float4_splat(depth);
+  } else if (is_control(CONTROL_UINT)) {
+    u32 width, height;
+    uTexture.GetDimensions(width, height);
+    uint val = uTexture.Load(int3((input.UV.xy) * float2(width, height), 0));
+    return float4(float3_splat(float(val) / 20.0f), 1.0f);
   } else {
     float4 color = input.Color * sTexture.Sample(sSampler, input.UV);
-    if (is_control(CONTROL_AMPLIFY)) {
-      color *= 10.0f;
-      color.a = 1.0f;
-    }
     return color;
   }
 }
@@ -240,6 +242,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
 )");
     Resource_ID       signature    = [=] {
       rd::Binding_Space_Create_Info set_info{};
+      set_info.bindings.push({rd::Binding_t::TEXTURE, 1});
       set_info.bindings.push({rd::Binding_t::TEXTURE, 1});
       set_info.bindings.push({rd::Binding_t::SAMPLER, 1});
       rd::Binding_Table_Create_Info table_info{};
@@ -578,8 +581,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
           else
             ctx->bind_index_buffer(index_buffer, 0, rd::Index_t::UINT32);
           ctx->bind_vertex_buffer(0, vertex_buffer, 0);
-
-          u32 control = 0;
+          PushConstants pc{};
           for (int n = 0; n < draw_data->CmdListsCount; n++) {
             const ImDrawList *cmd_list = draw_data->CmdLists[n];
             for (int cmd_i = 0; cmd_i < cmd_list->CmdBuffer.Size; cmd_i++) {
@@ -591,33 +593,36 @@ float4 main(in PSInput input) : SV_TARGET0 {
               clip_rect.w  = (pcmd->ClipRect.w - clip_off.y) * clip_scale.y;
               ImGui_ID img = image_bindings[(size_t)pcmd->TextureId];
               if (img.format == rd::Format::D32_OR_R32_FLOAT) {
-                control = 1;
-              }
-              if (img.format == rd::Format::R32_UINT) {
-                control    = 2;
-                img.format = rd::Format::RGBA8_UNORM;
+                pc.control_flags = 1;
+              } else if (img.format == rd::Format::R32_UINT) {
+                pc.control_flags = 2;
+              } else {
+                pc.control_flags = 0;
               }
 
               rd::IBinding_Table *table = factory->create_binding_table(signature);
               defer(table->release());
               {
-                float scale[2];
+                float2 scale;
                 scale[0] = 2.0f / draw_data->DisplaySize.x;
                 scale[1] = 2.0f / draw_data->DisplaySize.y;
-                float translate[2];
-                translate[0] = -1.0f - draw_data->DisplayPos.x * scale[0];
-                translate[1] = -1.0f - draw_data->DisplayPos.y * scale[1];
-                table->push_constants(scale, 0, 8);
-                table->push_constants(translate, 8, 8);
-                table->push_constants(&control, 16, 4);
+                float2 translate;
+                translate[0]  = -1.0f - draw_data->DisplayPos.x * scale[0];
+                translate[1]  = -1.0f - draw_data->DisplayPos.y * scale[1];
+                pc.uScale     = scale;
+                pc.uTranslate = translate;
+                table->push_constants(&pc, 0, sizeof(pc));
               }
               rd::Image_Subresource range{};
               range.layer      = img.base_layer;
               range.level      = img.base_level;
               range.num_layers = 1;
               range.num_levels = 1;
-              table->bind_sampler(0, 1, sampler);
-              table->bind_texture(0, 0, 0, img.id, range, rd::Format::NATIVE);
+              table->bind_sampler(0, 2, sampler);
+              if (pc.control_flags == 2)
+                table->bind_texture(0, 1, 0, img.id, range, img.format);
+              else
+                table->bind_texture(0, 0, 0, img.id, range, img.format);
               ctx->bind_table(table);
 
               ctx->set_scissor(clip_rect.x, clip_rect.y, clip_rect.z - clip_rect.x,
@@ -647,7 +652,8 @@ float4 main(in PSInput input) : SV_TARGET0 {
     iid.id         = id;
     iid.base_layer = layer;
     iid.base_level = level;
-    iid.format     = format;
+    if (format == rd::Format::NATIVE) format = factory->get_image_info(id).format;
+    iid.format = format;
     image_bindings.push(iid);
     return (ImTextureID)(size_t)(image_bindings.size - 1);
   }
@@ -1021,7 +1027,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     MEMZERO(pc);
     pc.op = filter;
     switch (image->format) {
-    // clang-format off
+      // clang-format off
       case rd::Format::RGBA8_SRGBA:  {  pc.format = 0; } break;
       case rd::Format::RGBA8_UNORM:  {  pc.format = 1; } break;
       case rd::Format::RGB32_FLOAT:  {  pc.format = 2; } break;
@@ -1645,7 +1651,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
       info.offset   = 20;
       info.type     = rd::Attriute_t::TEXCOORD2;
       gfx_state.IA_set_attribute(info);
-            gfx_state.IA_set_vertex_binding(0, sizeof(float3), rd::Input_Rate::VERTEX);
+      gfx_state.IA_set_vertex_binding(0, sizeof(float3), rd::Input_Rate::VERTEX);
       gfx_state.IA_set_vertex_binding(1, sizeof(Glyph_Instance), rd::Input_Rate::INSTANCE);
       gfx_state.IA_set_topology(rd::Primitive::TRIANGLE_LIST);
       return dev->create_graphics_pso(signature, pass, gfx_state);

@@ -1,21 +1,10 @@
-struct PushConstants {
-  float4x4 model;
-  u32      grid_size;
-  u32      flags;
-};
+#include "examples/shaders/declarations.hlsl"
 
-#define RASTERIZATION_GROUP_SIZE 16
-
-struct FrameConstants {
-  float4x4 viewproj;
-};
-
-#ifdef HLSL
-
-[[vk::push_constant]] ConstantBuffer<PushConstants> pc : DX12_PUSH_CONSTANTS_REGISTER;
+[[vk::push_constant]] ConstantBuffer<GI_PushConstants> pc : DX12_PUSH_CONSTANTS_REGISTER;
 
 [[vk::binding(0, 1)]] ConstantBuffer<FrameConstants> fc : register(b0, space1);
 
+// Buffer for debugging
 // [[vk::binding(0, 2)]] RWByteAddressBuffer feedback_buffer : register(u0, space2);
 
 [[vk::binding(0, 0)]] Texture2D<float4> position_source : register(t0, space0);
@@ -23,13 +12,23 @@ struct FrameConstants {
 
 [[vk::binding(2, 0)]] RWTexture2D<float4> normal_target : register(u2, space0);
 [[vk::binding(3, 0)]] RWTexture2D<uint>   depth_target : register(u3, space0);
-[[vk::binding(4, 0)]] SamplerState        ss : register(s4, space0);
+[[vk::binding(4, 0)]] RWTexture2D<uint>   counter_grid : register(u4, space0);
+[[vk::binding(5, 0)]] SamplerState        ss : register(s5, space0);
 
 bool in_bounds(float4 p) { return p.w > 0.0 && p.z > 0.0 && abs(p.x) < p.w && abs(p.y) < p.w; }
 
 bool outside(int2 e1, int2 e2) { return e2.x * e1.y - e2.y * e1.x < 0; }
+bool outside(float2 e1, float2 e2) { return e2.x * e1.y - e2.y * e1.x < 0.0f; }
 
-[numthreads(RASTERIZATION_GROUP_SIZE, RASTERIZATION_GROUP_SIZE, 1)] void
+void add_sample(float x, float y) {
+  u32 width, height;
+  counter_grid.GetDimensions(width, height);
+  u32 ix = x * width;
+  u32 iy = y * height;
+  InterlockedAdd(counter_grid[int2(ix, iy)], 1);
+}
+
+[numthreads(GI_RASTERIZATION_GROUP_SIZE, GI_RASTERIZATION_GROUP_SIZE, 1)] void
 main(uint3 tid
      : SV_DispatchThreadID) {
   uint width, height;
@@ -45,63 +44,116 @@ main(uint3 tid
     float2 suv0 = grid_uv0 + offsets[0 + tri_id * 3] * grid_dx;
     float2 suv1 = grid_uv0 + offsets[1 + tri_id * 3] * grid_dx;
     float2 suv2 = grid_uv0 + offsets[2 + tri_id * 3] * grid_dx;
-    float3 p0 = position_source.SampleLevel(ss, suv0, 0.0f).xyz;
-    float3 p1 = position_source.SampleLevel(ss, suv1, 0.0f).xyz;
-    float3 p2 = position_source.SampleLevel(ss, suv2, 0.0f).xyz;
+    float3 p0   = position_source.SampleLevel(ss, suv0, 0.0f).xyz;
+    float3 p1   = position_source.SampleLevel(ss, suv1, 0.0f).xyz;
+    float3 p2   = position_source.SampleLevel(ss, suv2, 0.0f).xyz;
 
-    float3 n0 = normal_source.SampleLevel(ss, suv0, 0.0f).xyz;
-    float3 n1 = normal_source.SampleLevel(ss, suv1, 0.0f).xyz;
-    float3 n2 = normal_source.SampleLevel(ss, suv2, 0.0f).xyz;
+    float3 normal_0 = normal_source.SampleLevel(ss, suv0, 0.0f).xyz;
+    float3 normal_1 = normal_source.SampleLevel(ss, suv1, 0.0f).xyz;
+    float3 normal_2 = normal_source.SampleLevel(ss, suv2, 0.0f).xyz;
 
     // feedback_buffer.Store<float3>((DTid.x * 3 + 0) * 12, p0);
     // feedback_buffer.Store<float3>((DTid.x * 3 + 1) * 12, p1);
     // feedback_buffer.Store<float3>((DTid.x * 3 + 2) * 12, p2);
 
+    // Screen space projected positions
     float4 pp0 = mul(fc.viewproj, mul(pc.model, float4(p0, 1.0)));
     float4 pp1 = mul(fc.viewproj, mul(pc.model, float4(p1, 1.0)));
     float4 pp2 = mul(fc.viewproj, mul(pc.model, float4(p2, 1.0)));
 
+    // For simplicity just discard triangles that touch the boundary
+    // @TODO(aschrein): Add proper clipping.
     if (!in_bounds(pp0) || !in_bounds(pp1) || !in_bounds(pp2)) return;
 
-    pp0 /= pp0.w;
-    pp1 /= pp1.w;
-    pp2 /= pp2.w;
+    pp0.xyz /= pp0.w;
+    pp1.xyz /= pp1.w;
+    pp2.xyz /= pp2.w;
 
-    int2 ip0 = int2(i32(0.5 + float(width) * (pp0.x + 1.0) / 2.0),
-                    i32(0.5 + float(height) * (-pp0.y + 1.0) / 2.0));
-    int2 ip1 = int2(i32(0.5 + float(width) * (pp1.x + 1.0) / 2.0),
-                    i32(0.5 + float(height) * (-pp1.y + 1.0) / 2.0));
-    int2 ip2 = int2(i32(0.5 + float(width) * (pp2.x + 1.0) / 2.0),
-                    i32(0.5 + float(height) * (-pp2.y + 1.0) / 2.0));
+    //
+    // For simplicity, we assume samples are at pixel centers
+    //  __________
+    // |          |
+    // |          |
+    // |    X     |
+    // |          |
+    // |__________|
+    //
 
-    int2 imin = int2(min(ip0.x, min(ip1.x, ip2.x)), min(ip0.y, min(ip1.y, ip2.y)));
-    int2 imax = int2(max(ip0.x, max(ip1.x, ip2.x)), max(ip0.y, max(ip1.y, ip2.y)));
+    // v_i - Vertices scaled to window size so 1.5 is inside the second pixel
+    float2 v0 = float2(float(width) * (pp0.x + 1.0) / 2.0, float(height) * (-pp0.y + 1.0) / 2.0);
+    float2 v1 = float2(float(width) * (pp1.x + 1.0) / 2.0, float(height) * (-pp1.y + 1.0) / 2.0);
+    float2 v2 = float2(float(width) * (pp2.x + 1.0) / 2.0, float(height) * (-pp2.y + 1.0) / 2.0);
 
-    int2 e0 = ip1 - ip0;
-    int2 e1 = ip2 - ip1;
-    int2 e2 = ip0 - ip2;
+    // Edges
+    float2 e0 = v1 - v0;
+    float2 e1 = v2 - v1;
+    float2 e2 = v0 - v2;
 
-    if (outside(e0, e1)) return;
+    // Double area
+    float area2 = e0.x * e2.y - e0.y * e2.x;
 
-    for (i32 y = imin.y; y <= imax.y; y++) {
-      for (i32 x = imin.x; x <= imax.x; x++) {
+    // Back/small triangle culling
+    if (area2 < 1.0e-6f) return;
+
+    // 2D Edge Normals
+    float2 n0 = -float2(-e0.y, e0.x) / area2;
+    float2 n1 = -float2(-e1.y, e1.x) / area2;
+    float2 n2 = -float2(-e2.y, e2.x) / area2;
+
+    // Bounding Box
+    float2 fmin = float2(min(v0.x, min(v1.x, v2.x)), min(v0.y, min(v1.y, v2.y)));
+    float2 fmax = float2(max(v0.x, max(v1.x, v2.x)), max(v0.y, max(v1.y, v2.y)));
+
+    int2 ip0 = int2(v0);
+    int2 ip1 = int2(v1);
+    int2 ip2 = int2(v2);
+
+    int2 imin = int2(fmin);
+    int2 imax = int2(fmax);
+
+    // Edge function values at the first (imin.x + 0.5f, imin.y + 0.5f) sample position
+    float2 first_sample = float2(imin) + float2(0.5f, 0.5f);
+    float  init_ef0     = dot(first_sample - v0, n0);
+    float  init_ef1     = dot(first_sample - v1, n1);
+    float  init_ef2     = dot(first_sample - v2, n2);
+
+    for (i32 dy = 0; dy <= imax.y - imin.y; dy++) {
+      for (i32 dx = 0; dx <= imax.x - imin.x; dx++) {
+        i32 x = imin.x + dx;
+        i32 y = imin.y + dy;
         if (x >= 0 && y >= 0 && x < height && y < height) {
           int2 v = int2(x, y);
 
-          if (outside(e0, v - ip0) || outside(e1, v - ip1) || outside(e2, v - ip2)) continue;
+          float ef0 = init_ef0 + n0.x * float(dx) + n0.y * float(dy);
+          float ef1 = init_ef1 + n1.x * float(dx) + n1.y * float(dy);
+          float ef2 = init_ef2 + n2.x * float(dx) + n2.y * float(dy);
 
-          u32 depth = u32(pp0.z * 1000000);
+          if (ef0 < 0.0f || ef1 < 0.0f || ef2 < 0.0f) continue;
+
+          // Barycentrics
+          float b0 = ef1;
+          float b1 = ef2;
+          float b2 = ef0;
+          // Perspective correction
+          float bw = b0 / pp0.w + b1 / pp1.w + b2 / pp2.w;
+          b0       = b0 / pp0.w / bw;
+          b1       = b1 / pp1.w / bw;
+          b2       = b2 / pp2.w / bw;
+
+          // Per pixel Attributes
+          float2 pixel_uv     = suv0 * b0 + suv1 * b1 + suv2 * b2;
+          float3 pixel_normal = normalize(normal_0 * b0 + normal_1 * b1 + normal_2 * b2);
+
+          // add tid.x * 1.0e-6f to avoid z-fight
+          u32 depth = u32((pp0.z + tid.x * 1.0e-6f) * 1000000);
           u32 next_depth;
           InterlockedMax(depth_target[int2(x, y)], depth, next_depth);
           if (depth > next_depth) {
-            normal_target[int2(x, y)] = float4((0.5 * n0 + float3_splat(0.5)), 1.0);
+            add_sample(pixel_uv.x, pixel_uv.y);
+            normal_target[int2(x, y)] = float4(pixel_normal, 1.0f);
           }
         }
       }
     }
   }
-  //
-  // i32 x = i32(0.5 + float(width) * (pp0.x + 1.0) / 2.0);
-  // i32 y = i32(0.5 + float(height) * (-pp0.y + 1.0) / 2.0);
 }
-#endif

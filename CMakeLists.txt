@@ -93,7 +93,8 @@ ENDIF()
 add_compile_definitions(GLM_FORCE_SWIZZLE)
 
 function(ADD_EXAMPLE example_name example_file)
-    file(GLOB INCLUDES_SRC
+    file(GLOB
+        INCLUDES_SRC
         include/*.h
     )
     add_executable(${example_name}

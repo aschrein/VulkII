@@ -554,6 +554,9 @@ class IDevice {
   virtual Resource_ID create_buffer(Buffer_Create_Info info)                                   = 0;
   virtual Resource_ID create_shader(Stage_t type, string_ref text,
                                     Pair<string_ref, string_ref> *defines, size_t num_defines) = 0;
+  virtual Resource_ID create_shader_from_file(Stage_t type, string_ref filename,
+                                              Pair<string_ref, string_ref> *defines,
+                                              size_t                        num_defines)                              = 0;
   virtual Resource_ID create_sampler(Sampler_Create_Info const &info)                          = 0;
   // Deferred release. Must call new_frame 3-6 times for the actual release to make sure it's not
   // used by the GPU.

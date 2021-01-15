@@ -241,6 +241,7 @@ static int              get_thread_id() {
 class GPU_Desc_Heap {
   private:
   ComPtr<ID3D12DescriptorHeap> heap;
+  ComPtr<ID3D12DescriptorHeap> cpu_heap;
   Util_Allocator               ual;
   D3D12_DESCRIPTOR_HEAP_TYPE   type;
   SIZE_T                       element_size;
@@ -250,14 +251,23 @@ class GPU_Desc_Heap {
   SIZE_T                       get_element_size() { return element_size; }
   D3D12_DESCRIPTOR_HEAP_TYPE   get_type() { return type; }
   ComPtr<ID3D12DescriptorHeap> get_heap() { return heap; }
-  GPU_Desc_Heap(ID3D12Device *device, D3D12_DESCRIPTOR_HEAP_TYPE type, u32 size,
-                D3D12_DESCRIPTOR_HEAP_FLAGS flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)
+  ComPtr<ID3D12DescriptorHeap> get_cpu_heap() { return cpu_heap; }
+  GPU_Desc_Heap(ID3D12Device *device, D3D12_DESCRIPTOR_HEAP_TYPE type, u32 size)
       : ual(size), type(type) {
-    D3D12_DESCRIPTOR_HEAP_DESC desc = {};
-    desc.Type                       = type;
-    desc.NumDescriptors             = size;
-    desc.Flags                      = flags;
-    DX_ASSERT_OK(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&heap)));
+    if (type != D3D12_DESCRIPTOR_HEAP_TYPE_RTV && type != D3D12_DESCRIPTOR_HEAP_TYPE_DSV) {
+      D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+      desc.Type                       = type;
+      desc.NumDescriptors             = size;
+      desc.Flags                      = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+      DX_ASSERT_OK(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&heap)));
+    }
+    {
+      D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+      desc.Type                       = type;
+      desc.NumDescriptors             = size;
+      desc.Flags                      = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+      DX_ASSERT_OK(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&cpu_heap)));
+    }
     element_size = device->GetDescriptorHandleIncrementSize(type);
   }
   ~GPU_Desc_Heap() {}
@@ -726,10 +736,8 @@ class DX12Device : public rd::IDevice {
         QueryHeap::create(device.Get(), D3D12_QUERY_HEAP_TYPE_TIMESTAMP, 1 << 10);
     copy_timestamp_heap =
         QueryHeap::create(device.Get(), D3D12_QUERY_HEAP_TYPE_COPY_QUEUE_TIMESTAMP, 1 << 10);
-    dsv_desc_heap     = new GPU_Desc_Heap(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 2048,
-                                      D3D12_DESCRIPTOR_HEAP_FLAG_NONE);
-    rtv_desc_heap     = new GPU_Desc_Heap(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 2048,
-                                      D3D12_DESCRIPTOR_HEAP_FLAG_NONE);
+    dsv_desc_heap     = new GPU_Desc_Heap(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 2048);
+    rtv_desc_heap     = new GPU_Desc_Heap(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 2048);
     sampler_desc_heap = new GPU_Desc_Heap(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 2048);
     common_desc_heap =
         new GPU_Desc_Heap(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1 << 19);
@@ -902,14 +910,21 @@ class DX12Device : public rd::IDevice {
     return {resource_table.push(new ResourceWrapper{buf, state, {}, info}),
             (u32)Resource_Type::BUFFER};
   }
+  Resource_ID create_shader_from_file(rd::Stage_t type, string_ref filename,
+                                      Pair<string_ref, string_ref> *defines,
+                                      size_t                        num_defines) override {
+    TRAP;
+  }
   Resource_ID create_shader(rd::Stage_t type, string_ref text,
                             Pair<string_ref, string_ref> *defines, size_t num_defines) override {
     SCOPED_LOCK;
-    static ComPtr<IDxcLibrary>  library;
-    static ComPtr<IDxcCompiler> compiler;
-    static int                  _init = [] {
+    static ComPtr<IDxcLibrary>        library;
+    static ComPtr<IDxcCompiler>       compiler;
+    static ComPtr<IDxcIncludeHandler> include_handler;
+    static int                        _init = [] {
       DX_ASSERT_OK(DxcCreateInstance(CLSID_DxcLibrary, IID_PPV_ARGS(&library)));
       DX_ASSERT_OK(DxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler)));
+      DX_ASSERT_OK(library->CreateIncludeHandler(&include_handler));
       return 0;
     }();
     ComPtr<IDxcBlobEncoding> blob;
@@ -962,7 +977,7 @@ class DX12Device : public rd::IDevice {
                                    profile,                                // pTargetProfile
                                    options, (u32)ARRAYSIZE(options) - 1,   // pArguments, argCount
                                    dxc_defines.ptr, (u32)dxc_defines.size, // pDefines, defineCount
-                                   NULL,                                   // pIncludeHandler
+                                   include_handler.Get(),                  // pIncludeHandler
                                    &result);                               // ppResult
     if (SUCCEEDED(hr)) result->GetStatus(&hr);
     if (FAILED(hr)) {
@@ -1075,8 +1090,11 @@ class DX12Device : public rd::IDevice {
     info.layers          = desc.DepthOrArraySize;
     info.levels          = desc.MipLevels;
     info.width           = desc.Width;
-    info.format          = from_dx(desc.Format);
-    info.is_depth        = rd::is_depth_format(info.format);
+    if (desc.Format == DXGI_FORMAT_R32_TYPELESS)
+      info.format = rd::Format::D32_OR_R32_FLOAT;
+    else
+      info.format = from_dx(desc.Format);
+    info.is_depth = rd::is_depth_format(info.format);
     return info;
   }
   void *map_buffer(Resource_ID id) override {
@@ -1448,14 +1466,14 @@ class DX12Binding_Table : public rd::IBinding_Table {
   DX12Device *           dev_ctx   = NULL;
   DX12Binding_Signature *signature = NULL;
 
-  ComPtr<ID3D12DescriptorHeap> cpu_common_heap;
-  ComPtr<ID3D12DescriptorHeap> cpu_sampler_heap;
-  size_t                       common_heap_offset  = 0;
-  size_t                       sampler_heap_offset = 0;
-  u8                           push_constants_data[128];
-  bool                         is_bindings_dirty       = false;
-  bool                         is_push_constants_dirty = false;
-  bool                         is_bound                = false;
+  // ComPtr<ID3D12DescriptorHeap> cpu_common_heap;
+  // ComPtr<ID3D12DescriptorHeap> cpu_sampler_heap;
+  size_t common_heap_offset  = 0;
+  size_t sampler_heap_offset = 0;
+  u8     push_constants_data[128];
+  bool   is_bindings_dirty       = false;
+  bool   is_push_constants_dirty = false;
+  bool   is_bound                = false;
 
   public:
   static DX12Binding_Table *create(DX12Device *dev_ctx, DX12Binding_Signature *signature) {
@@ -1464,20 +1482,20 @@ class DX12Binding_Table : public rd::IBinding_Table {
     out->signature         = signature;
     auto device            = dev_ctx->get_device();
 
-    {
-      D3D12_DESCRIPTOR_HEAP_DESC desc = {};
-      desc.Type                       = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
-      desc.NumDescriptors             = signature->num_desc_samplers;
-      desc.Flags                      = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-      DX_ASSERT_OK(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&out->cpu_sampler_heap)));
-    }
-    {
-      D3D12_DESCRIPTOR_HEAP_DESC desc = {};
-      desc.Type                       = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-      desc.NumDescriptors             = signature->num_desc_common;
-      desc.Flags                      = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-      DX_ASSERT_OK(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&out->cpu_common_heap)));
-    }
+    /* {
+       D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+       desc.Type                       = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+       desc.NumDescriptors             = signature->num_desc_samplers;
+       desc.Flags                      = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+       DX_ASSERT_OK(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&out->cpu_sampler_heap)));
+     }
+     {
+       D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+       desc.Type                       = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+       desc.NumDescriptors             = signature->num_desc_common;
+       desc.Flags                      = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+       DX_ASSERT_OK(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&out->cpu_common_heap)));
+     }*/
     if (signature->num_desc_common) {
       out->common_heap_offset =
           dev_ctx->get_common_desc_heap()->allocate(signature->num_desc_common);
@@ -1502,7 +1520,11 @@ class DX12Binding_Table : public rd::IBinding_Table {
             signature->num_desc_common,
             {dev_ctx->get_common_desc_heap()->get_heap()->GetCPUDescriptorHandleForHeapStart().ptr +
              dev_ctx->get_common_desc_heap()->get_element_size() * common_heap_offset},
-            cpu_common_heap->GetCPUDescriptorHandleForHeapStart(),
+            {dev_ctx->get_common_desc_heap()
+                 ->get_cpu_heap()
+                 ->GetCPUDescriptorHandleForHeapStart()
+                 .ptr +
+             dev_ctx->get_common_desc_heap()->get_element_size() * common_heap_offset},
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
       }
       D3D12_GPU_DESCRIPTOR_HANDLE handle = {
@@ -1518,11 +1540,14 @@ class DX12Binding_Table : public rd::IBinding_Table {
       if (is_bindings_dirty) {
         auto heap_start =
             dev_ctx->get_sampler_desc_heap()->get_heap()->GetCPUDescriptorHandleForHeapStart().ptr;
+        auto cpu_heap_start = dev_ctx->get_sampler_desc_heap()
+                                  ->get_cpu_heap()
+                                  ->GetCPUDescriptorHandleForHeapStart()
+                                  .ptr;
         auto stride = dev_ctx->get_sampler_desc_heap()->get_element_size();
         dev_ctx->get_device()->CopyDescriptorsSimple(
             signature->num_desc_samplers, {heap_start + stride * sampler_heap_offset},
-            cpu_sampler_heap->GetCPUDescriptorHandleForHeapStart(),
-            D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+            {cpu_heap_start + stride * sampler_heap_offset}, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
       }
       D3D12_GPU_DESCRIPTOR_HANDLE handle = {
           dev_ctx->get_sampler_desc_heap()->get_heap()->GetGPUDescriptorHandleForHeapStart().ptr +
@@ -1570,16 +1595,22 @@ class DX12Binding_Table : public rd::IBinding_Table {
     desc.BufferLocation = res->GetGPUVirtualAddress() + offset;
     desc.SizeInBytes    = (size + 0xffU) & ~0xffu;
     dev_ctx->get_device()->CreateConstantBufferView(
-        &desc, {cpu_common_heap->GetCPUDescriptorHandleForHeapStart().ptr +
-                dev_ctx->get_common_desc_heap()->get_element_size() * ((u64)binding_offset)});
+        &desc,
+        {dev_ctx->get_common_desc_heap()->get_cpu_heap()->GetCPUDescriptorHandleForHeapStart().ptr +
+         dev_ctx->get_common_desc_heap()->get_element_size() *
+             (common_heap_offset + (u64)binding_offset)});
     is_bindings_dirty = true;
   }
   void bind_sampler(u32 space, u32 binding, Resource_ID sampler_id) override {
     D3D12_SAMPLER_DESC *desc = dev_ctx->get_sampler(sampler_id.id);
     u32 offset = signature->space_descs[space].bindings[binding].OffsetInDescriptorsFromTableStart;
-    dev_ctx->get_device()->CreateSampler(
-        desc, {cpu_sampler_heap->GetCPUDescriptorHandleForHeapStart().ptr +
-               dev_ctx->get_sampler_desc_heap()->get_element_size() * ((u64)offset)});
+    dev_ctx->get_device()->CreateSampler(desc,
+                                         {dev_ctx->get_sampler_desc_heap()
+                                              ->get_cpu_heap()
+                                              ->GetCPUDescriptorHandleForHeapStart()
+                                              .ptr +
+                                          dev_ctx->get_sampler_desc_heap()->get_element_size() *
+                                              (sampler_heap_offset + (u64)offset)});
     is_bindings_dirty = true;
   }
   void bind_UAV_buffer(u32 space, u32 binding, Resource_ID buf_id, size_t offset,
@@ -1608,8 +1639,9 @@ class DX12Binding_Table : public rd::IBinding_Table {
         signature->space_descs[space].bindings[binding].OffsetInDescriptorsFromTableStart;
     dev_ctx->get_device()->CreateUnorderedAccessView(
         res, NULL, &desc,
-        {cpu_common_heap->GetCPUDescriptorHandleForHeapStart().ptr +
-         dev_ctx->get_sampler_desc_heap()->get_element_size() * ((u64)binding_offset)});
+        {dev_ctx->get_common_desc_heap()->get_cpu_heap()->GetCPUDescriptorHandleForHeapStart().ptr +
+         dev_ctx->get_common_desc_heap()->get_element_size() *
+             (common_heap_offset + (u64)binding_offset)});
     is_bindings_dirty = true;
   }
   void bind_texture(u32 space, u32 binding, u32 index, Resource_ID image_id,
@@ -1674,8 +1706,9 @@ class DX12Binding_Table : public rd::IBinding_Table {
 
     dev_ctx->get_device()->CreateShaderResourceView(
         res, &desc,
-        {cpu_common_heap->GetCPUDescriptorHandleForHeapStart().ptr +
-         dev_ctx->get_common_desc_heap()->get_element_size() * ((u64)binding_offset)});
+        {dev_ctx->get_common_desc_heap()->get_cpu_heap()->GetCPUDescriptorHandleForHeapStart().ptr +
+         dev_ctx->get_common_desc_heap()->get_element_size() *
+             (common_heap_offset + (u64)binding_offset)});
     is_bindings_dirty = true;
   }
   void bind_UAV_texture(u32 space, u32 binding, u32 index, Resource_ID image_id,
@@ -1733,8 +1766,9 @@ class DX12Binding_Table : public rd::IBinding_Table {
         signature->space_descs[space].bindings[binding].OffsetInDescriptorsFromTableStart + index;
     dev_ctx->get_device()->CreateUnorderedAccessView(
         res, NULL, &desc,
-        {cpu_common_heap->GetCPUDescriptorHandleForHeapStart().ptr +
-         dev_ctx->get_sampler_desc_heap()->get_element_size() * ((u64)binding_offset)});
+        {dev_ctx->get_common_desc_heap()->get_cpu_heap()->GetCPUDescriptorHandleForHeapStart().ptr +
+         dev_ctx->get_common_desc_heap()->get_element_size() *
+             (common_heap_offset + (u64)binding_offset)});
     is_bindings_dirty = true;
   }
   void release() override {
@@ -1773,12 +1807,12 @@ class FrameBuffer {
 
   public:
   D3D12_CPU_DESCRIPTOR_HANDLE get_rtv_handle(u32 i) {
-    return {dev_ctx->get_rtv_desc_heap()->get_heap()->GetCPUDescriptorHandleForHeapStart().ptr +
+    return {dev_ctx->get_rtv_desc_heap()->get_cpu_heap()->GetCPUDescriptorHandleForHeapStart().ptr +
             (rtv_offset + i) * dev_ctx->get_rtv_desc_heap()->get_element_size()};
   }
 
   D3D12_CPU_DESCRIPTOR_HANDLE get_dsv_handle() {
-    return {dev_ctx->get_dsv_desc_heap()->get_heap()->GetCPUDescriptorHandleForHeapStart().ptr +
+    return {dev_ctx->get_dsv_desc_heap()->get_cpu_heap()->GetCPUDescriptorHandleForHeapStart().ptr +
             rtv_offset * dev_ctx->get_dsv_desc_heap()->get_element_size()};
   }
 
@@ -2446,8 +2480,7 @@ Resource_ID DX12Device::create_graphics_pso(Resource_ID signature, Resource_ID r
   desc.RasterizerState.FillMode              = state.rs_state.polygon_mode == rd::Polygon_Mode::FILL
                                       ? D3D12_FILL_MODE_SOLID
                                       : D3D12_FILL_MODE_WIREFRAME;
-  desc.RasterizerState.FrontCounterClockwise =
-      state.rs_state.front_face == rd::Front_Face::CW ? true : false;
+  desc.RasterizerState.FrontCounterClockwise = state.rs_state.front_face == rd::Front_Face::CCW;
 
   desc.pRootSignature = sig->root_signature.Get();
 

@@ -479,6 +479,8 @@ class GIComputeGBufferPass {
   RESOURCE(sampler_state);                                                                         \
   RESOURCE(clear_pso);                                                                             \
   RESOURCE(pso);                                                                                   \
+  RESOURCE(counter_grid_0);                                                                        \
+  RESOURCE(counter_grid_1);                                                                        \
   RESOURCE(normal_rt);                                                                             \
   RESOURCE(depth_rt);
 
@@ -486,11 +488,17 @@ class GIComputeGBufferPass {
   RESOURCE_LIST
 #undef RESOURCE
 
-  u32 width  = 0;
-  u32 height = 0;
+  static constexpr u32 COUNTER_GRID_RESOLUTION = 512;
+
+  u32 grid_id = 0;
+  u32 width   = 0;
+  u32 height  = 0;
+
+  Resource_ID prev_grid{};
+  Resource_ID cur_grid{};
 
   public:
-#include "examples/shaders/gi_compute_rasterization.hlsl"
+#include "examples/shaders/declarations.hlsl"
 
   TimeStamp_Pool timestamps = {};
 
@@ -518,6 +526,7 @@ class GIComputeGBufferPass {
         rd::Binding_Space_Create_Info set_info{};
         set_info.bindings.push({rd::Binding_t::TEXTURE, 1});
         set_info.bindings.push({rd::Binding_t::TEXTURE, 1});
+        set_info.bindings.push({rd::Binding_t::UAV_TEXTURE, 1});
         set_info.bindings.push({rd::Binding_t::UAV_TEXTURE, 1});
         set_info.bindings.push({rd::Binding_t::UAV_TEXTURE, 1});
         set_info.bindings.push({rd::Binding_t::SAMPLER, 1});
@@ -548,23 +557,62 @@ class GIComputeGBufferPass {
     cs        = {};
     clear_pso = dev->create_compute_pso(signature,
                                         cs = dev->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
+struct PushConstants {
+  u32      clear_counter_grid;
+};
 
-[[vk::binding(2, 0)]] RWTexture2D<float4> normal_target   : register(u2, space0);
+[[vk::push_constant]] ConstantBuffer<PushConstants> pc : DX12_PUSH_CONSTANTS_REGISTER;
+
+[[vk::binding(2, 0)]] RWTexture2D<float4> normal_target  : register(u2, space0);
 [[vk::binding(3, 0)]] RWTexture2D<uint>  depth_target    : register(u3, space0);
+[[vk::binding(4, 0)]] RWTexture2D<uint>  counter_grid    : register(u4, space0);
 
 [numthreads(16, 16, 1)]
   void main(uint3 tid : SV_DispatchThreadID)
 {
-  uint width, height;
-  normal_target.GetDimensions(width, height);
-  if (tid.x >= width || tid.y >= height)
-    return;
-  normal_target[tid.xy] = float4_splat(0.0f);
-  depth_target[tid.xy]  = 0;
+  if (pc.clear_counter_grid) {
+    uint width, height;
+    counter_grid.GetDimensions(width, height);
+    if (tid.x >= width || tid.y >= height)
+      return;
+    counter_grid[tid.xy]  = 0;
+  } else {
+
+    uint width, height;
+    normal_target.GetDimensions(width, height);
+    if (tid.x >= width || tid.y >= height)
+      return;
+    normal_target[tid.xy] = float4_splat(0.0f);
+    depth_target[tid.xy]  = 0;
+  }
 }
 )"),
                                                                 NULL, 0));
     dev->release_resource(cs);
+    counter_grid_0 = [=] {
+      rd::Image_Create_Info rt0_info{};
+      rt0_info.format = rd::Format::R32_UINT;
+      rt0_info.width  = COUNTER_GRID_RESOLUTION;
+      rt0_info.height = COUNTER_GRID_RESOLUTION;
+      rt0_info.depth  = 1;
+      rt0_info.layers = 1;
+      rt0_info.levels = 1;
+      rt0_info.usage_bits =
+          (u32)rd::Image_Usage_Bits::USAGE_SAMPLED | (u32)rd::Image_Usage_Bits::USAGE_UAV;
+      return dev->create_image(rt0_info);
+    }();
+    counter_grid_1 = [=] {
+      rd::Image_Create_Info rt0_info{};
+      rt0_info.format = rd::Format::R32_UINT;
+      rt0_info.width  = COUNTER_GRID_RESOLUTION;
+      rt0_info.height = COUNTER_GRID_RESOLUTION;
+      rt0_info.depth  = 1;
+      rt0_info.layers = 1;
+      rt0_info.levels = 1;
+      rt0_info.usage_bits =
+          (u32)rd::Image_Usage_Bits::USAGE_SAMPLED | (u32)rd::Image_Usage_Bits::USAGE_UAV;
+      return dev->create_image(rt0_info);
+    }();
   }
   void update_frame_buffer(RenderingContext rctx) {
     auto dev = rctx.factory;
@@ -623,7 +671,15 @@ class GIComputeGBufferPass {
       memcpy(dev->map_buffer(cbuffer), &fc, sizeof(fc));
       dev->unmap_buffer(cbuffer);
     }
-    PushConstants pc{};
+    GI_PushConstants pc{};
+    if (grid_id == 0) {
+      cur_grid  = counter_grid_0;
+      prev_grid = counter_grid_1;
+    } else {
+      cur_grid  = counter_grid_1;
+      prev_grid = counter_grid_0;
+    }
+    grid_id = (grid_id + 1) & 1;
     {
       rd::ICtx *ctx = dev->start_compute_pass();
       {
@@ -635,8 +691,18 @@ class GIComputeGBufferPass {
                                 rd::Format::NATIVE);
         table->bind_UAV_texture(0, 3, 0, this->depth_rt, rd::Image_Subresource::top_level(),
                                 rd::Format::NATIVE);
+        table->bind_UAV_texture(0, 4, 0, cur_grid, rd::Image_Subresource::top_level(),
+                                rd::Format::NATIVE);
         ctx->bind_table(table);
+        struct PushConstants {
+          u32 clear_counter_grid;
+        } pc;
+        pc.clear_counter_grid = 0;
+        table->push_constants(&pc, 0, sizeof(pc));
         ctx->dispatch((width + 15) / 16, (height + 15) / 16, 1);
+        pc.clear_counter_grid = 1;
+        table->push_constants(&pc, 0, sizeof(pc));
+        ctx->dispatch((COUNTER_GRID_RESOLUTION + 15) / 16, (COUNTER_GRID_RESOLUTION + 15) / 16, 1);
       }
       dev->end_compute_pass(ctx);
     }
@@ -665,13 +731,18 @@ class GIComputeGBufferPass {
                               rd::Format::NATIVE);
       table->bind_UAV_texture(0, 3, 0, this->depth_rt, rd::Image_Subresource::top_level(),
                               rd::Format::NATIVE);
-      table->bind_sampler(0, 4, sampler_state);
+      table->bind_UAV_texture(0, 4, 0, cur_grid, rd::Image_Subresource::top_level(),
+                              rd::Format::NATIVE);
+      table->bind_sampler(0, 5, sampler_state);
+      ctx->image_barrier(pos_tex, rd::Image_Access::SAMPLED);
+      ctx->image_barrier(normal_tex, rd::Image_Access::SAMPLED);
       pc.grid_size = rctx.config->get_u32("G.I.grid_size");
       pc.model     = float4x4(1.0f);
       table->push_constants(&pc, 0, sizeof(pc));
       ctx->bind_table(table);
-      ctx->dispatch((pc.grid_size + RASTERIZATION_GROUP_SIZE - 1) / RASTERIZATION_GROUP_SIZE,
-                    (pc.grid_size + RASTERIZATION_GROUP_SIZE - 1) / RASTERIZATION_GROUP_SIZE, 1);
+      ctx->dispatch((pc.grid_size + GI_RASTERIZATION_GROUP_SIZE - 1) / GI_RASTERIZATION_GROUP_SIZE,
+                    (pc.grid_size + GI_RASTERIZATION_GROUP_SIZE - 1) / GI_RASTERIZATION_GROUP_SIZE,
+                    1);
       timestamps.end_range(ctx);
     }
 
@@ -714,7 +785,7 @@ class ComputeGBufferPass {
   u32 height = 0;
 
   public:
-#include "examples/shaders/compute_rasterization.hlsl"
+#include "examples/shaders/declarations.hlsl"
 
   TimeStamp_Pool timestamps = {};
 
@@ -1027,7 +1098,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
       rd::DS_State ds_state{};
       rd::RS_State rs_state{};
       rs_state.polygon_mode = rd::Polygon_Mode::FILL;
-      rs_state.front_face   = rd::Front_Face::CW;
+      rs_state.front_face   = rd::Front_Face::CCW;
       rs_state.cull_mode    = rd::Cull_Mode::BACK;
       gfx_state.RS_set_state(rs_state);
       ds_state.cmp_op             = rd::Cmp::GE;
@@ -1459,6 +1530,7 @@ void main(uint3 tid : SV_DispatchThreadID)
       this->height = height;
       update_frame_buffer(rctx);
     }
+
     rd::IBinding_Table *table = dev->create_binding_table(signature);
     defer(table->release());
     table->bind_texture(0, 2, 0, gbuffer.normal, rd::Image_Subresource::top_level(),
@@ -1470,6 +1542,9 @@ void main(uint3 tid : SV_DispatchThreadID)
     table->bind_UAV_texture(0, 0, 0, rt, rd::Image_Subresource::top_level(), rd::Format::NATIVE);
     table->bind_sampler(0, 1, sampler_state);
     rd::ICtx *ctx = dev->start_compute_pass();
+    ctx->image_barrier(gbuffer.normal, rd::Image_Access::SAMPLED);
+    ctx->image_barrier(gbuffer.depth, rd::Image_Access::SAMPLED);
+    ctx->image_barrier(gizmo_layer, rd::Image_Access::SAMPLED);
     {
       TracyVulkIINamedZone(ctx, NAME);
       timestamps.begin_range(ctx);
@@ -1564,6 +1639,15 @@ class Event_Consumer : public IGUIApp {
       { Ray ray = rctx.gizmo_layer->getMouseRay(); }
     }
     ImGui::End();
+    ImGui::Begin("Sample Counter");
+    {
+      rctx.gizmo_layer->per_imgui_window();
+      auto wsize = get_window_size();
+      ImGui::Image(bind_texture(gi_compute_gbuffer_pass.prev_grid, 0, 0, rd::Format::NATIVE),
+                   ImVec2(wsize.x, wsize.y));
+      { Ray ray = rctx.gizmo_layer->getMouseRay(); }
+    }
+    ImGui::End();
     ImGui::Begin("Baking Pass");
     {
       rctx.gizmo_layer->per_imgui_window();
@@ -1583,7 +1667,6 @@ class Event_Consumer : public IGUIApp {
     }
     ImGui::End();
     ImGui::Begin("Compute Gbuffer normal");
-
     {
       rctx.gizmo_layer->per_imgui_window();
       auto wsize = get_window_size();
@@ -1692,6 +1775,7 @@ int main(int argc, char *argv[]) {
   // vulkan_thread.join();
   // dx12_thread.join();
 
-  window_loop(rd::Impl_t::DX12);
+  //window_loop(rd::Impl_t::VULKAN);
+   window_loop(rd::Impl_t::DX12);
   return 0;
 }

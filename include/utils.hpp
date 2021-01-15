@@ -2,7 +2,7 @@
 #ifndef UTILS_H
 #define UTILS_H
 
-#define TRACY_ENABLE
+//#define TRACY_ENABLE
 
 #include <codecvt>
 #include <cstdlib>

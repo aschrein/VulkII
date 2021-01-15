@@ -1,24 +1,4 @@
-struct PushConstants {
-  float4x4 model;
-  u32      normal_offset;
-  u32      normal_stride;
-  u32      position_offset;
-  u32      position_stride;
-  u32      first_vertex;
-  u32      index_offset;
-  u32      index_count;
-  u32      index_stride;
-  u32      flags;
-};
-
-#define RASTERIZATION_FLAG_CULL_PIXELS 0x1
-#define RASTERIZATION_GROUP_SIZE 64
-
-struct FrameConstants {
-  float4x4 viewproj;
-};
-
-#ifdef HLSL
+#include "examples/shaders/declarations.hlsl"
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> pc : DX12_PUSH_CONSTANTS_REGISTER;
 
@@ -57,7 +37,7 @@ bool in_bounds(float4 p) { return p.w > 0.0 && p.z > 0.0 && abs(p.x) < p.w && ab
 bool outside(int2 e1, int2 e2) { return e2.x * e1.y - e2.y * e1.x < 0; }
 
 [numthreads(RASTERIZATION_GROUP_SIZE, 1, 1)] void main(uint3 DTid
-                                  : SV_DispatchThreadID) {
+                                                       : SV_DispatchThreadID) {
   uint width, height;
   normal_target.GetDimensions(width, height);
   if (DTid.x > pc.index_count / 3) return;
@@ -115,7 +95,7 @@ bool outside(int2 e1, int2 e2) { return e2.x * e1.y - e2.y * e1.x < 0; }
         u32 next_depth;
         InterlockedMax(depth_target[int2(x, y)], depth, next_depth);
         if (depth > next_depth) {
-          normal_target[int2(x, y)] = float4((0.5 * n0 + float3_splat(0.5)), 1.0);
+          normal_target[int2(x, y)] = float4((n0), 1.0);
         }
       }
     }
@@ -125,4 +105,3 @@ bool outside(int2 e1, int2 e2) { return e2.x * e1.y - e2.y * e1.x < 0; }
   // i32 x = i32(0.5 + float(width) * (pp0.x + 1.0) / 2.0);
   // i32 y = i32(0.5 + float(height) * (-pp0.y + 1.0) / 2.0);
 }
-#endif
