@@ -183,6 +183,7 @@ D3D12_RESOURCE_STATES to_dx(rd::Buffer_Access access) {
   case rd::Buffer_Access::HOST_READ: return D3D12_RESOURCE_STATE_GENERIC_READ;
   case rd::Buffer_Access::HOST_WRITE: return D3D12_RESOURCE_STATE_COMMON;
   case rd::Buffer_Access::HOST_READ_WRITE: return D3D12_RESOURCE_STATE_COMMON;
+  case rd::Buffer_Access::INDIRECT_ARGS: return D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
 
   default: {
     TRAP;
@@ -515,6 +516,8 @@ class DX12Device : public rd::IDevice {
   ComPtr<ID3D12CommandQueue> compute_cmd_queue;
   ComPtr<ID3D12CommandQueue> copy_cmd_queue;
 
+  ComPtr<ID3D12CommandSignature> dispatch_indirect_signature;
+
 #ifdef TRACY_ENABLE
   TracyContext tracy_ctx{};
 #endif
@@ -639,7 +642,7 @@ class DX12Device : public rd::IDevice {
 #ifdef TRACY_ENABLE
   TracyContext get_tracy_context() { return tracy_ctx; }
 #endif
-
+  auto get_dispatch_indirect_signature() { return dispatch_indirect_signature; }
   void deferred_release_desc_range(D3D12_DESCRIPTOR_HEAP_TYPE type, u32 offset, u32 size) {
     SCOPED_LOCK;
     deferred_desc_range_release.push({type, offset, size, 6});
@@ -767,6 +770,17 @@ class DX12Device : public rd::IDevice {
       desc.Flags                    = D3D12_COMMAND_QUEUE_FLAG_NONE;
       desc.NodeMask                 = 1;
       DX_ASSERT_OK(device->CreateCommandQueue(&desc, IID_PPV_ARGS(&copy_cmd_queue)));
+    }
+    {
+      D3D12_INDIRECT_ARGUMENT_DESC argumentDescs[1]     = {};
+      argumentDescs[0].Type                             = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+      D3D12_COMMAND_SIGNATURE_DESC commandSignatureDesc = {};
+      commandSignatureDesc.pArgumentDescs               = argumentDescs;
+      commandSignatureDesc.NumArgumentDescs             = _countof(argumentDescs);
+      commandSignatureDesc.ByteStride                   = sizeof(rd::Dispatch_Indirect_Args);
+
+      DX_ASSERT_OK(device->CreateCommandSignature(&commandSignatureDesc, NULL,
+                                                  IID_PPV_ARGS(&dispatch_indirect_signature)));
     }
 #ifdef TRACY_ENABLE
     tracy_ctx.gfx_queue_context     = TracyD3D12Context(device.Get(), gfx_cmd_queue.Get());
@@ -2106,6 +2120,11 @@ class DX12Context : public rd::ICtx {
     ASSERT_DEBUG(cur_binding);
     cur_binding->flush_push_constants(cmd, type);
     cmd->DrawInstanced(vertices, instances, first_vertex, first_instance);
+  }
+  void dispatch_indirect(Resource_ID arg_buf_id, size_t arg_buf_offset) override {
+    ID3D12Resource *arg_buf = dev_ctx->get_resource(arg_buf_id.id)->res;
+    cmd->ExecuteIndirect(dev_ctx->get_dispatch_indirect_signature().Get(), 1, arg_buf,
+                         arg_buf_offset, NULL, 0);
   }
   void multi_draw_indexed_indirect(Resource_ID arg_buf_id, size_t arg_buf_offset,
                                    Resource_ID cnt_buf_id, size_t cnt_buf_offset, u32 max_count,

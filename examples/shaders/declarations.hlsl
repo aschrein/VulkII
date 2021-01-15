@@ -14,6 +14,7 @@ struct PushConstants {
 };
 
 #define RASTERIZATION_FLAG_CULL_PIXELS 0x1
+
 #define RASTERIZATION_GROUP_SIZE 64
 
 struct FrameConstants {
@@ -22,8 +23,10 @@ struct FrameConstants {
 
 struct GI_PushConstants {
   float4x4 model;
-  u32      grid_size;
+  u32      cell_x;
+  u32      cell_y;
   u32      flags;
 };
-
-#define GI_RASTERIZATION_GROUP_SIZE 16
+#define COUNTER_GRID_RESOLUTION 16
+#define GI_RASTERIZATION_GROUP_SIZE 8
+#define GI_RASTERIZATION_FLAG_PIXEL_COLOR_TRIANGLES 0x2

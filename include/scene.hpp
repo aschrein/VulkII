@@ -1948,6 +1948,7 @@ struct Config {
     }
     ASSERT_DEBUG(items.contains(_name));
     auto &ref = items.get_ref(_name);
+    ref.type  = Config_Item::BOOL;
     ref.used  = true;
     return ref.v_bool;
   }

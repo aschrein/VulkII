@@ -1,25 +1,26 @@
 (
 (camera
- (set_phi -21.148924)
- (set_theta 6.055921)
- (set_distance 0.034060)
- (set_look_at 0.008299 0.015560 0.015128)
- (set_aspect 3.481229)
+ (set_phi -49.508862)
+ (set_theta 7.265910)
+ (set_distance 0.048377)
+ (set_look_at 0.039951 0.003713 0.040439)
+ (set_aspect 1.252646)
  (set_fov 1.570796)
  (set_znear 0.001000)
  (set_zfar 1000000.000000)
 )
 (config
  (add bool "gizmo.enable" 1)
- (add u32 "G.I.grid_size" 584 (min 4) (max 4096))
+ (add u32 "G.I.grid_size" 38 (min 4) (max 4096))
  (add bool "gizmo.render_bounds" 1)
  (add u32 "g_buffer_width" 1050 (min 4) (max 2048))
  (add bool "gizmo.render_seams" 1)
  (add bool "gizmo.render_bvh" 0)
+ (add bool "G.I.color_triangles" 1)
  (add u32 "baking.size" 2072 (min 4) (max 4096))
  (add bool "gizmo.render_seams.numbers" 1)
  (add u32 "g_buffer_height" 992 (min 4) (max 2048))
- (add bool "RASTERIZATION_FLAG_CULL_PIXELS" 1)
+ (add bool "RASTERIZATION_FLAG_CULL_PIXELS" 0)
 )
 (scene
 (node """ROOT"""

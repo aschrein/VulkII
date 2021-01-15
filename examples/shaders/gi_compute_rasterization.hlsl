@@ -14,36 +14,67 @@
 [[vk::binding(3, 0)]] RWTexture2D<uint>   depth_target : register(u3, space0);
 [[vk::binding(4, 0)]] RWTexture2D<uint>   counter_grid : register(u4, space0);
 [[vk::binding(5, 0)]] SamplerState        ss : register(s5, space0);
+[[vk::binding(6, 0)]] RWByteAddressBuffer indirect_arg_buffer : register(u6, space0);
+[[vk::binding(7, 0)]] RWTexture2D<uint>   prev_counter_grid : register(u7, space0);
+
+struct IndirectArgs {
+  u32 dimx;
+  u32 dimy;
+  u32 dimz;
+};
 
 bool in_bounds(float4 p) { return p.w > 0.0 && p.z > 0.0 && abs(p.x) < p.w && abs(p.y) < p.w; }
 
 bool outside(int2 e1, int2 e2) { return e2.x * e1.y - e2.y * e1.x < 0; }
 bool outside(float2 e1, float2 e2) { return e2.x * e1.y - e2.y * e1.x < 0.0f; }
 
-void add_sample(float x, float y) {
+void add_sample(float2 uv, u32 num) {
   u32 width, height;
   counter_grid.GetDimensions(width, height);
-  u32 ix = x * width;
-  u32 iy = y * height;
-  InterlockedAdd(counter_grid[int2(ix, iy)], 1);
+  u32 ix = uv.x * width;
+  u32 iy = uv.y * height;
+  InterlockedMax(counter_grid[int2(ix, iy)], num);
+}
+
+float3 random_color(float2 uv) {
+  uv           = uv * 15.718281828459045;
+  float3 seeds = float3(0.123, 0.456, 0.789);
+  seeds        = frac((uv.x + 0.5718281828459045 + seeds) *
+               ((seeds + fmod(uv.x, 0.141592653589793)) * 27.61803398875 + 4.718281828459045));
+  seeds        = frac((uv.y + 0.5718281828459045 + seeds) *
+               ((seeds + fmod(uv.y, 0.141592653589793)) * 27.61803398875 + 4.718281828459045));
+  seeds        = frac((0.5718281828459045 + seeds) *
+               ((seeds + fmod(uv.x, 0.141592653589793)) * 27.61803398875 + 4.718281828459045));
+  return seeds;
 }
 
 [numthreads(GI_RASTERIZATION_GROUP_SIZE, GI_RASTERIZATION_GROUP_SIZE, 1)] void
 main(uint3 tid
      : SV_DispatchThreadID) {
+  float2 uv_offset = float2(0.0f, 0.0f);
+  float2 uv_step   = float2(1.0f, 1.0f) / float(COUNTER_GRID_RESOLUTION);
+  {
+    IndirectArgs args = indirect_arg_buffer.Load<IndirectArgs>(
+        12 * (pc.cell_x + pc.cell_y * COUNTER_GRID_RESOLUTION));
+    u32 res   = GI_RASTERIZATION_GROUP_SIZE * args.dimx;
+    uv_offset = float2(float(pc.cell_x), float(pc.cell_y)) /
+                float2(float(COUNTER_GRID_RESOLUTION), float(COUNTER_GRID_RESOLUTION));
+    float cell_size = 1.0f / float(COUNTER_GRID_RESOLUTION);
+    uv_step         = cell_size / float(res);
+  }
+
   uint width, height;
   normal_target.GetDimensions(width, height);
   uint2  pnt        = tid.xy;
-  float2 grid_uv0   = float2(pnt) / float(pc.grid_size);
-  float  grid_dx    = 1.0 / float(pc.grid_size);
+  float2 grid_uv0   = float2(pnt) * uv_step + uv_offset;
   float2 offsets[6] = {
       float2(0.0f, 0.0f), float2(1.0f, 0.0f), float2(0.0f, 1.0f),
       float2(1.0f, 0.0f), float2(1.0f, 1.0f), float2(0.0f, 1.0f),
   };
   for (uint tri_id = 0; tri_id < 2; tri_id++) {
-    float2 suv0 = grid_uv0 + offsets[0 + tri_id * 3] * grid_dx;
-    float2 suv1 = grid_uv0 + offsets[1 + tri_id * 3] * grid_dx;
-    float2 suv2 = grid_uv0 + offsets[2 + tri_id * 3] * grid_dx;
+    float2 suv0 = grid_uv0 + offsets[0 + tri_id * 3] * uv_step;
+    float2 suv1 = grid_uv0 + offsets[1 + tri_id * 3] * uv_step;
+    float2 suv2 = grid_uv0 + offsets[2 + tri_id * 3] * uv_step;
     float3 p0   = position_source.SampleLevel(ss, suv0, 0.0f).xyz;
     float3 p1   = position_source.SampleLevel(ss, suv1, 0.0f).xyz;
     float3 p2   = position_source.SampleLevel(ss, suv2, 0.0f).xyz;
@@ -117,6 +148,8 @@ main(uint3 tid
     float  init_ef1     = dot(first_sample - v1, n1);
     float  init_ef2     = dot(first_sample - v2, n2);
 
+    u32 num_samples = 0;
+
     for (i32 dy = 0; dy <= imax.y - imin.y; dy++) {
       for (i32 dx = 0; dx <= imax.x - imin.x; dx++) {
         i32 x = imin.x + dx;
@@ -149,11 +182,15 @@ main(uint3 tid
           u32 next_depth;
           InterlockedMax(depth_target[int2(x, y)], depth, next_depth);
           if (depth > next_depth) {
-            add_sample(pixel_uv.x, pixel_uv.y);
-            normal_target[int2(x, y)] = float4(pixel_normal, 1.0f);
+            num_samples++;
+            if (pc.flags & GI_RASTERIZATION_FLAG_PIXEL_COLOR_TRIANGLES)
+              normal_target[int2(x, y)] = float4(random_color(suv0), 1.0f);
+            else
+              normal_target[int2(x, y)] = float4(pixel_normal, 1.0f);
           }
         }
       }
     }
+    add_sample((suv0 + suv1 + suv2) / 3.0f, num_samples);
   }
 }

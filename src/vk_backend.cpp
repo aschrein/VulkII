@@ -311,6 +311,7 @@ VkAccessFlags to_vk(rd::Buffer_Access access) {
   case rd::Buffer_Access::UAV: return VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
   case rd::Buffer_Access::UNIFORM: return VK_ACCESS_UNIFORM_READ_BIT;
   case rd::Buffer_Access::VERTEX_BUFFER: return VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+  case rd::Buffer_Access::INDIRECT_ARGS: return VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
   default: TRAP;
   }
 }
@@ -3625,6 +3626,13 @@ class Vk_Ctx : public rd::ICtx {
     ASSERT_ALWAYS(type == rd::Pass_t::RENDER);
     _bind_sets();
     vkCmdDraw(cmd, vertex_count, instance_count, first_vertex, first_instance);
+  }
+  void dispatch_indirect(Resource_ID arg_buf_id, size_t arg_buf_offset) override {
+    ASSERT_ALWAYS(type == rd::Pass_t::RENDER || type == rd::Pass_t::COMPUTE ||
+                  type == rd::Pass_t::ASYNC_COMPUTE);
+    _bind_sets();
+    Buffer arg_buf = dev_ctx->buffers.read(arg_buf_id.id);
+    vkCmdDispatchIndirect(cmd, arg_buf.buffer, arg_buf_offset);
   }
   void multi_draw_indexed_indirect(Resource_ID arg_buf_id, size_t arg_buf_offset,
                                    Resource_ID cnt_buf_id, size_t cnt_buf_offset, u32 max_count,

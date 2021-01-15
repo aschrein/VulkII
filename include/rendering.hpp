@@ -285,6 +285,7 @@ enum class Buffer_Access {
   HOST_READ,
   HOST_WRITE,
   HOST_READ_WRITE,
+  INDIRECT_ARGS,
 };
 
 enum class Image_Access {
@@ -514,6 +515,12 @@ static inline u64 hash_of(Graphics_Pipeline_State const &state) {
   return hash_of(string_ref{(char const *)&state, sizeof(state)});
 }
 
+struct Dispatch_Indirect_Args {
+  u32 ThreadGroupCountX;
+  u32 ThreadGroupCountY;
+  u32 ThreadGroupCountZ;
+};
+
 // Single threaded entity to manage descriptor binding. Semi-lightweight, not much allocations going
 // on.
 class IBinding_Table {
@@ -639,8 +646,9 @@ class ICtx {
   /////////////
   // Compute //
   /////////////
-  virtual void bind_compute(Resource_ID id)              = 0;
-  virtual void dispatch(u32 dim_x, u32 dim_y, u32 dim_z) = 0;
+  virtual void bind_compute(Resource_ID id)                                     = 0;
+  virtual void dispatch(u32 dim_x, u32 dim_y, u32 dim_z)                        = 0;
+  virtual void dispatch_indirect(Resource_ID arg_buf_id, size_t arg_buf_offset) = 0;
 
   /////////////////////
   // Memory movement //

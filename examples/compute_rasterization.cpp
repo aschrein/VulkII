@@ -478,6 +478,8 @@ class GIComputeGBufferPass {
   RESOURCE(signature);                                                                             \
   RESOURCE(sampler_state);                                                                         \
   RESOURCE(clear_pso);                                                                             \
+  RESOURCE(prepare_indirect_pso);                                                                  \
+  RESOURCE(indirect_args_buffer);                                                                  \
   RESOURCE(pso);                                                                                   \
   RESOURCE(counter_grid_0);                                                                        \
   RESOURCE(counter_grid_1);                                                                        \
@@ -487,8 +489,6 @@ class GIComputeGBufferPass {
 #define RESOURCE(name) Resource_ID name{};
   RESOURCE_LIST
 #undef RESOURCE
-
-  static constexpr u32 COUNTER_GRID_RESOLUTION = 512;
 
   u32 grid_id = 0;
   u32 width   = 0;
@@ -530,6 +530,8 @@ class GIComputeGBufferPass {
         set_info.bindings.push({rd::Binding_t::UAV_TEXTURE, 1});
         set_info.bindings.push({rd::Binding_t::UAV_TEXTURE, 1});
         set_info.bindings.push({rd::Binding_t::SAMPLER, 1});
+        set_info.bindings.push({rd::Binding_t::UAV_BUFFER, 1});
+        set_info.bindings.push({rd::Binding_t::UAV_TEXTURE, 1});
         table_info.spaces.push(set_info);
       }
       {
@@ -554,6 +556,58 @@ class GIComputeGBufferPass {
             read_file_tmp_stref("examples/shaders/gi_compute_rasterization.hlsl"), NULL, 0));
     dev->release_resource(cs);
 
+    indirect_args_buffer = [&] {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.memory_type = rd::Memory_Type::GPU_LOCAL;
+      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_INDIRECT_ARGUMENTS |
+                            (u32)rd::Buffer_Usage_Bits::USAGE_UAV;
+      buf_info.size =
+          sizeof(rd::Dispatch_Indirect_Args) * COUNTER_GRID_RESOLUTION * COUNTER_GRID_RESOLUTION;
+      return dev->create_buffer(buf_info);
+    }();
+
+    cs                   = {};
+    prepare_indirect_pso = dev->create_compute_pso(
+        signature, cs = dev->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
+struct IndirectArgs {
+  u32 dimx;
+  u32 dimy;
+  u32 dimz;
+};
+
+[[vk::binding(4, 0)]] RWTexture2D<uint>  counter_grid         : register(u4, space0);
+[[vk::binding(6, 0)]] RWByteAddressBuffer indirect_arg_buffer : register(u6, space0);
+
+[numthreads(16, 16, 1)]
+  void main(uint3 tid : SV_DispatchThreadID)
+{
+  u32 width, height;
+  counter_grid.GetDimensions(width, height);
+  if (tid.x >= width || tid.y >= height)
+    return;
+  u32 cnt = counter_grid[tid.xy];
+  IndirectArgs args = indirect_arg_buffer.Load<IndirectArgs>(12 * (tid.x + tid.y * width));
+  if (args.dimx == 0) {
+    args.dimx = 1;
+    args.dimy = 1;
+    args.dimz = 1;
+  } else if (cnt > 32) {
+    u32 dim = args.dimx;
+    args.dimx = min(32, dim * 2);
+    args.dimy = min(32, dim * 2);
+    args.dimz = 1;
+  } else if (cnt < 4) {
+    u32 dim = args.dimx;
+    args.dimx = max(1, dim / 2);
+    args.dimy = max(1, dim / 2);
+    args.dimz = 1;
+  }
+  indirect_arg_buffer.Store<IndirectArgs>(12 * (tid.x + tid.y * width), args);
+}
+)"),
+                                           NULL, 0));
+    dev->release_resource(cs);
     cs        = {};
     clear_pso = dev->create_compute_pso(signature,
                                         cs = dev->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
@@ -671,7 +725,6 @@ struct PushConstants {
       memcpy(dev->map_buffer(cbuffer), &fc, sizeof(fc));
       dev->unmap_buffer(cbuffer);
     }
-    GI_PushConstants pc{};
     if (grid_id == 0) {
       cur_grid  = counter_grid_0;
       prev_grid = counter_grid_1;
@@ -716,10 +769,25 @@ struct PushConstants {
     }();
     dev->release_resource(feedback_buffer);
     rd::ICtx *ctx = dev->start_compute_pass();
+    timestamps.begin_range(ctx);
+    {
+      TracyVulkIINamedZone(ctx, "G.I. Prepare Compute GBuffer Pass");
+
+      rd::IBinding_Table *table = dev->create_binding_table(signature);
+      defer(table->release());
+      table->bind_UAV_texture(0, 4, 0, prev_grid, rd::Image_Subresource::top_level(),
+                              rd::Format::NATIVE);
+      table->bind_UAV_buffer(0, 6, indirect_args_buffer, 0, 0);
+      ctx->buffer_barrier(indirect_args_buffer, rd::Buffer_Access::UAV);
+      ctx->bind_compute(prepare_indirect_pso);
+      ctx->bind_table(table);
+      ctx->dispatch((COUNTER_GRID_RESOLUTION + 16 - 1) / 16,
+                    (COUNTER_GRID_RESOLUTION + 16 - 1) / 16, 1);
+      ctx->buffer_barrier(indirect_args_buffer, rd::Buffer_Access::INDIRECT_ARGS);
+    }
     {
       TracyVulkIINamedZone(ctx, "G.I. Compute GBuffer Pass");
-      timestamps.begin_range(ctx);
-      ctx->bind_compute(pso);
+
       rd::IBinding_Table *table = dev->create_binding_table(signature);
       defer(table->release());
       table->bind_cbuffer(1, 0, cbuffer, 0, 0);
@@ -733,19 +801,34 @@ struct PushConstants {
                               rd::Format::NATIVE);
       table->bind_UAV_texture(0, 4, 0, cur_grid, rd::Image_Subresource::top_level(),
                               rd::Format::NATIVE);
+      table->bind_UAV_buffer(0, 6, indirect_args_buffer, 0, 0);
+      table->bind_UAV_texture(0, 7, 0, prev_grid, rd::Image_Subresource::top_level(),
+                              rd::Format::NATIVE);
+
       table->bind_sampler(0, 5, sampler_state);
       ctx->image_barrier(pos_tex, rd::Image_Access::SAMPLED);
       ctx->image_barrier(normal_tex, rd::Image_Access::SAMPLED);
-      pc.grid_size = rctx.config->get_u32("G.I.grid_size");
-      pc.model     = float4x4(1.0f);
-      table->push_constants(&pc, 0, sizeof(pc));
+      ctx->bind_compute(prepare_indirect_pso);
       ctx->bind_table(table);
-      ctx->dispatch((pc.grid_size + GI_RASTERIZATION_GROUP_SIZE - 1) / GI_RASTERIZATION_GROUP_SIZE,
-                    (pc.grid_size + GI_RASTERIZATION_GROUP_SIZE - 1) / GI_RASTERIZATION_GROUP_SIZE,
-                    1);
-      timestamps.end_range(ctx);
-    }
+      GI_PushConstants pc{};
+      if (rctx.config->get_bool("G.I.color_triangles")) {
+        pc.flags |= GI_RASTERIZATION_FLAG_PIXEL_COLOR_TRIANGLES;
+      }
 
+      ctx->bind_compute(pso);
+      yto(COUNTER_GRID_RESOLUTION) {
+        xto(COUNTER_GRID_RESOLUTION) {
+          // pc.cell_x = rctx.config->get_u32("G.I.grid_size");
+          pc.cell_x = x;
+          pc.cell_y = y;
+          pc.model  = float4x4(1.0f);
+          table->push_constants(&pc, 0, sizeof(pc));
+          ctx->dispatch_indirect(indirect_args_buffer, sizeof(rd::Dispatch_Indirect_Args) *
+                                                           (x + y * COUNTER_GRID_RESOLUTION));
+        }
+      }
+    }
+    timestamps.end_range(ctx);
     Resource_ID e = dev->end_compute_pass(ctx);
     timestamps.commit(e);
   }
@@ -1712,7 +1795,7 @@ class Event_Consumer : public IGUIApp {
   (add u32  g_buffer_width 512 (min 4) (max 2048))
   (add u32  g_buffer_height 512 (min 4) (max 2048))
   (add u32  baking.size 512 (min 4) (max 4096))
-  (add u32  G.I.grid_size 512 (min 4) (max 4096))
+  (add bool G.I.color_triangles 0)
  )
  )"));
     rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/human_bust_sculpt/cut.gltf"));
@@ -1775,7 +1858,7 @@ int main(int argc, char *argv[]) {
   // vulkan_thread.join();
   // dx12_thread.join();
 
-  //window_loop(rd::Impl_t::VULKAN);
-   window_loop(rd::Impl_t::DX12);
+  window_loop(rd::Impl_t::VULKAN);
+  // window_loop(rd::Impl_t::DX12);
   return 0;
 }
