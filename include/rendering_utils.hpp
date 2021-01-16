@@ -823,28 +823,26 @@ struct Mip_Builder {
       info.usage_bits             = usage;
       return factory->create_image(info);
     }();
-    Resource_ID staging_buffer = [image, factory] {
-      rd::Buffer_Create_Info buf_info{};
-      buf_info.memory_type = rd::Memory_Type::CPU_WRITE_GPU_READ;
-      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC |
-                            (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
-      buf_info.size = image->get_size_in_bytes();
-      return factory->create_buffer(buf_info);
-    }();
-    defer(factory->release_resource(staging_buffer));
+    return create_image(factory, output_image, filter);
+  }
+  static Resource_ID create_image(rd::IDevice *factory, Resource_ID output_image,
+                                  Filter filter = FILTER_BOX) {
+    auto desc = factory->get_image_info(output_image);
+
     InlineArray<u32, 0x10>  mip_offsets{};
     InlineArray<u32, 0x10>  mip_pitch{};
     InlineArray<int2, 0x10> mip_sizes{};
-    u32                     w          = image->width;
-    u32                     h          = image->height;
+    u32                     w          = desc.width;
+    u32                     h          = desc.height;
     u32                     mip_offset = 0;
+    u32                     pitch      = rd::IDevice::align_up(w * Image2D::get_bpp(desc.format),
+                                      rd::IDevice::TEXTURE_DATA_PITCH_ALIGNMENT);
+    u32                     image_size_in_bytes = pitch * desc.height;
     while (w || h) {
       mip_offsets.push(mip_offset);
       w = MAX(1, w);
       h = MAX(1, h);
       mip_sizes.push({w, h});
-      u32 pitch =
-          rd::IDevice::align_up(w * image->get_bpp(), rd::IDevice::TEXTURE_DATA_PITCH_ALIGNMENT);
 
       mip_offset += pitch * h;
       mip_offset = rd::IDevice::align_up(mip_offset, rd::IDevice::BUFFER_COPY_ALIGNMENT);
@@ -1020,14 +1018,28 @@ void main(uint3 tid : SV_DispatchThreadID) {
     defer(factory->release_resource(shader));
     Resource_ID cs = factory->create_compute_pso(signature, shader);
     defer(factory->release_resource(cs));
-    void *ptr = factory->map_buffer(staging_buffer);
-    memcpy(ptr, image->data, image->get_size_in_bytes());
-    factory->unmap_buffer(staging_buffer);
+    /*Resource_ID staging_buffer = [&] {
+      rd::Buffer_Create_Info buf_info{};
+      buf_info.memory_type = rd::Memory_Type::CPU_READ_WRITE;
+      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC |
+                            (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
+      buf_info.size = Image2D::get_bpp(desc.format) * desc.width * desc.height;
+      return factory->create_buffer(buf_info);
+    }();
+    defer(factory->release_resource(staging_buffer));
+    {
+      rd::ICtx *ctx = factory->start_compute_pass();
+      ctx->copy_image_to_buffer(staging_buffer, 0, output_image, rd::Image_Copy::top_level(pitch));
+      factory->end_compute_pass(ctx);
+    }*/
+    // void *ptr = factory->map_buffer(staging_buffer);
+    // memcpy(ptr, image->data, image->get_size_in_bytes());
+    // factory->unmap_buffer(staging_buffer);
     PushConstants pc;
     MEMZERO(pc);
     pc.op = filter;
-    switch (image->format) {
-      // clang-format off
+    switch (desc.format) {
+    // clang-format off
       case rd::Format::RGBA8_SRGBA:  {  pc.format = 0; } break;
       case rd::Format::RGBA8_UNORM:  {  pc.format = 1; } break;
       case rd::Format::RGB32_FLOAT:  {  pc.format = 2; } break;
@@ -1040,7 +1052,10 @@ void main(uint3 tid : SV_DispatchThreadID) {
     {
       TracyVulkIINamedZone(ctx, "Build Mips");
       ctx->buffer_barrier(gpu_buffer, rd::Buffer_Access::TRANSFER_DST);
-      ctx->copy_buffer(staging_buffer, 0, gpu_buffer, 0, image->get_size_in_bytes());
+      // ctx->buffer_barrier(staging_buffer, rd::Buffer_Access::TRANSFER_SRC);
+      // ctx->copy_buffer(staging_buffer, 0, gpu_buffer, 0, image_size_in_bytes);
+      ctx->image_barrier(output_image, rd::Image_Access::TRANSFER_SRC);
+      ctx->copy_image_to_buffer(gpu_buffer, 0, output_image, rd::Image_Copy::top_level(pitch));
       rd::IBinding_Table *table = factory->create_binding_table(signature);
       defer(table->release());
       table->bind_UAV_buffer(0, 0, gpu_buffer, 0, 0);
@@ -1075,8 +1090,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
         dst_info.size_x           = mip_sizes[i].x;
         dst_info.size_y           = mip_sizes[i].y;
         dst_info.size_z           = 1;
-        ASSERT_DEBUG(mip_offsets[i] + mip_sizes[i].x * mip_sizes[i].y * image->get_bpp() <=
-                     gpu_buffer_size);
+        // ASSERT_DEBUG(mip_offsets[i] + mip_sizes[i].x * mip_sizes[i].y * image->get_bpp() <=
+        // gpu_buffer_size);
         ASSERT_DEBUG((mip_offsets[i] & (rd::IDevice::BUFFER_COPY_ALIGNMENT - 1)) == 0);
         ctx->copy_buffer_to_image(gpu_buffer, mip_offsets[i], output_image, dst_info);
       }

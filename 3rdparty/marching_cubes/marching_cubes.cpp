@@ -617,7 +617,7 @@ void calculateNormals(Mesh& mesh)
 
 	auto normals = new Point[vertexCount];
 
-	#pragma omp parallel for
+	//#pragma omp parallel for
 	for (index_t i = 0; i < vertexCount; ++i)
 	{
 		normals[i][0] = 0;
@@ -625,7 +625,7 @@ void calculateNormals(Mesh& mesh)
 		normals[i][2] = 1;
 	}
 
-	#pragma omp parallel for
+	//#pragma omp parallel for
 	for (index_t i = 0; i < triangleCount; ++i) {
 		Point vec1, vec2, normal;
 		index_t id0, id1, id2;
@@ -655,7 +655,7 @@ void calculateNormals(Mesh& mesh)
 		}
 	}
 
-	#pragma omp parallel for
+	//#pragma omp parallel for
 	for (index_t i = 0; i < vertexCount; ++i) {
 		float length = sqrt(normals[i][0] * normals[i][0] + normals[i][1] * normals[i][1] + normals[i][2] * normals[i][2]);
 		if (length > 0.) {

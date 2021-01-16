@@ -22,6 +22,7 @@ struct RenderingContext {
   Config *     config      = NULL;
   Scene *      scene       = NULL;
   Gizmo_Layer *gizmo_layer = NULL;
+  u32          frame_id    = 0;
   void         dump() {
     FILE *scene_dump = fopen("scene_state", "wb");
     fprintf(scene_dump, "(\n");
@@ -39,6 +40,12 @@ struct RenderingContext {
   }
 };
 
+float3 force(float b, float c, float3 v) {
+  float len = dot(v, v);
+  return b * v;
+}
+
+void heal(float3 &p) { ito(3) if (isnan(p[i]) || isinf(p[i]) || fabsf(p[i]) > 1.0e3f) p[i] = 0.0f; }
 class RenderPass {
   public:
   static constexpr char const *NAME = "GBuffer Pass";
@@ -71,6 +78,7 @@ class RenderPass {
   void init(RenderingContext rctx) {
     auto dev = rctx.factory;
     timestamps.init(dev);
+
     Resource_ID vs = dev->create_shader(rd::Stage_t::VERTEX, stref_s(R"(
 struct PushConstants
 {
@@ -81,20 +89,29 @@ struct PushConstants
 
 struct PSInput {
   [[vk::location(0)]] float4 pos     : SV_POSITION;
-  [[vk::location(1)]] float3 normal  : TEXCOORD0;
-  [[vk::location(2)]] float2 uv      : TEXCOORD1;
+  [[vk::location(1)]] float3 color   : TEXCOORD0;
 };
 
 struct VSInput {
   [[vk::location(0)]] float3 pos     : POSITION;
-  [[vk::location(1)]] float3 normal  : NORMAL;
-  [[vk::location(4)]] float2 uv      : TEXCOORD0;
+  [[vk::location(1)]] uint vertex_id : SV_VertexID;
 };
+
+float3 random_color(uint id) {
+  float2 uv    = frac(float2(float(id) * 15.718281828459045, float(id) * 95.718281828459045));
+  float3 seeds = float3(0.123, 0.456, 0.789);
+  seeds        = frac((uv.x + 0.5718281828459045 + seeds) *
+               ((seeds + fmod(uv.x, 0.141592653589793)) * 27.61803398875 + 4.718281828459045));
+  seeds        = frac((uv.y + 0.5718281828459045 + seeds) *
+               ((seeds + fmod(uv.y, 0.141592653589793)) * 27.61803398875 + 4.718281828459045));
+  seeds        = frac((0.5718281828459045 + seeds) *
+               ((seeds + fmod(uv.x, 0.141592653589793)) * 27.61803398875 + 4.718281828459045));
+  return seeds;
+}
 
 PSInput main(in VSInput input) {
   PSInput output;
-  output.normal = mul(pc.world_transform, float4(input.normal.xyz, 0.0f)).xyz;
-  output.uv     = input.uv;
+  output.color  = random_color(input.vertex_id);
   output.pos    = mul(pc.viewproj, mul(pc.world_transform, float4(input.pos, 1.0f)));
   return output;
 }
@@ -103,12 +120,11 @@ PSInput main(in VSInput input) {
     Resource_ID ps = dev->create_shader(rd::Stage_t::PIXEL, stref_s(R"(
 struct PSInput {
   [[vk::location(0)]] float4 pos     : SV_POSITION;
-  [[vk::location(1)]] float3 normal  : TEXCOORD0;
-  [[vk::location(2)]] float2 uv      : TEXCOORD1;
+  [[vk::location(1)]] float3 color   : TEXCOORD0;
 };
 
 float4 main(in PSInput input) : SV_TARGET0 {
-  return float4(input.uv.xy, 0.0f, 1.0f);
+  return float4(input.color.xyz, 1.0f);
 }
 )"),
                                         NULL, 0);
@@ -168,29 +184,29 @@ float4 main(in PSInput input) : SV_TARGET0 {
         info.type     = rd::Attriute_t::POSITION;
         gfx_state.IA_set_attribute(info);
       }
-      {
-        rd::Attribute_Info info;
-        MEMZERO(info);
-        info.binding  = 1;
-        info.format   = rd::Format::RGB32_FLOAT;
-        info.location = 1;
-        info.offset   = 0;
-        info.type     = rd::Attriute_t::NORMAL;
-        gfx_state.IA_set_attribute(info);
-      }
-      {
-        rd::Attribute_Info info;
-        MEMZERO(info);
-        info.binding  = 2;
-        info.format   = rd::Format::RG32_FLOAT;
-        info.location = 2;
-        info.offset   = 0;
-        info.type     = rd::Attriute_t::TEXCOORD0;
-        gfx_state.IA_set_attribute(info);
-      }
+      /* {
+         rd::Attribute_Info info;
+         MEMZERO(info);
+         info.binding  = 1;
+         info.format   = rd::Format::RGB32_FLOAT;
+         info.location = 1;
+         info.offset   = 0;
+         info.type     = rd::Attriute_t::NORMAL;
+         gfx_state.IA_set_attribute(info);
+       }
+       {
+         rd::Attribute_Info info;
+         MEMZERO(info);
+         info.binding  = 2;
+         info.format   = rd::Format::RG32_FLOAT;
+         info.location = 2;
+         info.offset   = 0;
+         info.type     = rd::Attriute_t::TEXCOORD0;
+         gfx_state.IA_set_attribute(info);
+       }*/
       gfx_state.IA_set_vertex_binding(0, 12, rd::Input_Rate::VERTEX);
-      gfx_state.IA_set_vertex_binding(1, 12, rd::Input_Rate::VERTEX);
-      gfx_state.IA_set_vertex_binding(2, 8, rd::Input_Rate::VERTEX);
+      // gfx_state.IA_set_vertex_binding(1, 12, rd::Input_Rate::VERTEX);
+      // gfx_state.IA_set_vertex_binding(2, 8, rd::Input_Rate::VERTEX);
       gfx_state.IA_set_topology(rd::Primitive::TRIANGLE_LIST);
       return dev->create_graphics_pso(signature, pass, gfx_state);
     }();
@@ -239,7 +255,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
       return dev->create_frame_buffer(pass, info);
     }();
   }
-  void render(RenderingContext rctx) {
+  void render(RenderingContext &rctx) {
     auto dev = rctx.factory;
     timestamps.update(dev);
     // float4x4 bvh_visualizer_offset = glm::translate(float4x4(1.0f), float3(-10.0f, 0.0f,
@@ -275,18 +291,147 @@ float4 main(in PSInput input) : SV_TARGET0 {
       table->push_constants(&viewproj, 0, sizeof(float4x4));
       ctx->bind_table(table);
       ctx->bind_graphics_pso(pso);
+      float fric = rctx.config->get_f32("sim.fric", 0.9f, 0.0f, 1.0f);
+      float simb = rctx.config->get_f32("sim.b", 0.0f, 0.0f, 1.0f);
+      float simc = rctx.config->get_f32("sim.c", 0.0f, 0.0f, 1.0f);
+      if (rctx.config->get_bool("sim.enable")) {
+        rctx.frame_id++;
+        // enable_fpe();
+        // defer(disable_fpe());
+        rctx.scene->traverse([&](Node *node) {
+          if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
+            if (auto *sc = mn->getComponent<TopomeshComponent>()) {
+              ito(sc->get_num_meshes()) {
+                Topo_Mesh *tm = sc->get_topo(i);
+#pragma omp parallel
+#pragma omp for
+                for (int j = 0; j < (i32)tm->vertices.size; j++) {
+                  Topo_Mesh::Vertex v = tm->vertices[j];
+                  kto(v.edges.size) {
+                    Topo_Mesh::Edge &e        = tm->edges[v.edges[k]];
+                    u32              other_id = e.origin;
+                    if (other_id == j) other_id = e.end;
+                    v.f3param0 += force(simb, simc, tm->vertices[other_id].pos - v.pos);
+                  }
+                  heal(v.f3param0);
+                  if (length(v.f3param0) > 1.0f) v.f3param0 = (v.f3param0);
+                  if (!v.bparam1) v.pos += v.f3param0;
+                  // if (length(v.pos) > 1.1f) v.pos = float3(0.0f, 0.0f, 0.0f);
+                  v.f3param0 *= fric;
+                  v.pos.y         = 0.0f;
+                  tm->vertices[j] = v;
+                }
+                // Pin Seam vertices
+                jto(tm->seam_edges.size) {
+                  u32                seam_id = tm->seam_edges[j];
+                  Topo_Mesh::Edge &  e       = tm->edges[seam_id];
+                  Topo_Mesh::Vertex &v0      = tm->vertices[e.origin];
+                  Topo_Mesh::Vertex &v1      = tm->vertices[e.end];
+                  if (length(v1.pos) > 1.0e-3f) {
+                    if (fabsf(v1.pos.x) > fabsf(v1.pos.z)) {
+                      // v1.pos = normalize(v1.pos);
+                      float ratio = v1.pos.z / v1.pos.x;
+                      v1.pos.x    = sign(v1.pos.x);
+                      v1.pos.z    = v1.pos.x * ratio;
+                    } else {
+                      float ratio = v1.pos.x / v1.pos.z;
+                      v1.pos.z    = sign(v1.pos.z);
+                      v1.pos.x    = v1.pos.z * ratio;
+                    }
+                  }
+                  v1.bparam1 = true;
+                }
+                /* float         delta_phi = 2.0f * PI / (tm->seam_edges.size - 1);
+                 float         cur_phi   = 0.0f;
+                 Hash_Set<u32> visited_edges{};
+                 visited_edges.reserve(tm->seam_edges.size);
+                 defer(visited_edges.release());
+                 jto(tm->seam_edges.size) {
+                   u32 seam_id = tm->seam_edges[j];
+                   if (visited_edges.contains(seam_id)) continue;
+                   visited_edges.insert(seam_id);
+                   while (true) {
+                     Topo_Mesh::Edge &  e  = tm->edges[seam_id];
+                     Topo_Mesh::Vertex &v0 = tm->vertices[e.origin];
+                     Topo_Mesh::Vertex &v1 = tm->vertices[e.end];
+                     v1.pos                = float3(cosf(cur_phi), 0.0f, sinf(cur_phi));
+                     cur_phi += delta_phi;
+                     u32 next_seam_id = seam_id;
+                     kto(v1.edges.size) {
+                       Topo_Mesh::Edge &pe = tm->edges[v1.edges[k]];
+                       if (!pe.is_seam) continue;
+                       if (visited_edges.contains(v1.edges[k])) continue;
+                       next_seam_id = v1.edges[k];
+                       break;
+                     }
+                     if (next_seam_id == seam_id) break;
+                     seam_id = next_seam_id;
+                   }
+                 }*/
+              }
+            }
+          }
+        });
+      }
       rctx.scene->traverse([&](Node *node) {
         if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
-          GfxSufraceComponent *gs    = mn->getComponent<GfxSufraceComponent>();
-          float4x4             world = mn->get_transform();
-          pc.world_transform         = world;
-          table->push_constants(&pc, 0, sizeof(pc));
-          ito(gs->getNumSurfaces()) {
-            GfxSurface *s = gs->getSurface(i);
-            s->draw(ctx, gfx_state);
+          if (auto *sc = mn->getComponent<TopomeshComponent>()) {
+            ito(sc->get_num_meshes()) {
+              Topo_Mesh * tm            = sc->get_topo(i);
+              Resource_ID vertex_buffer = [&] {
+                rd::Buffer_Create_Info buf_info;
+                MEMZERO(buf_info);
+                buf_info.memory_type = rd::Memory_Type::CPU_WRITE_GPU_READ;
+                buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER;
+                buf_info.size        = tm->vertices.size * sizeof(float3);
+                return dev->create_buffer(buf_info);
+              }();
+              {
+                float3 *pos                   = (float3 *)dev->map_buffer(vertex_buffer);
+                jto(tm->vertices.size) pos[j] = tm->vertices[j].pos;
+                dev->unmap_buffer(vertex_buffer);
+              }
+              dev->release_resource(vertex_buffer);
+              Resource_ID index_buffer = [&] {
+                rd::Buffer_Create_Info buf_info;
+                MEMZERO(buf_info);
+                buf_info.memory_type = rd::Memory_Type::CPU_WRITE_GPU_READ;
+                buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER;
+                buf_info.size        = tm->faces.size * sizeof(u32) * 3;
+                return dev->create_buffer(buf_info);
+              }();
+              {
+                u32 *indx = (u32 *)dev->map_buffer(index_buffer);
+                jto(tm->faces.size) {
+                  indx[j * 3 + 0] = tm->faces[j].vtx0;
+                  indx[j * 3 + 1] = tm->faces[j].vtx1;
+                  indx[j * 3 + 2] = tm->faces[j].vtx2;
+                }
+                dev->unmap_buffer(index_buffer);
+              }
+              dev->release_resource(index_buffer);
+              ctx->bind_vertex_buffer(0, vertex_buffer, 0);
+              ctx->bind_index_buffer(index_buffer, 0, rd::Index_t::UINT32);
+              float4x4 world     = mn->get_transform();
+              pc.world_transform = world;
+              table->push_constants(&pc, 0, sizeof(pc));
+              ctx->draw_indexed(tm->faces.size * 3, 1, 0, 0, 0);
+            }
           }
         }
       });
+      // rctx.scene->traverse([&](Node *node) {
+      //  if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
+      //    GfxSufraceComponent *gs    = mn->getComponent<GfxSufraceComponent>();
+      //    float4x4             world = mn->get_transform();
+      //    pc.world_transform         = world;
+      //    table->push_constants(&pc, 0, sizeof(pc));
+      //    ito(gs->getNumSurfaces()) {
+      //      GfxSurface *s = gs->getSurface(i);
+      //      s->draw(ctx, gfx_state);
+      //    }
+      //  }
+      //});
 
       if (rctx.config->get_bool("gizmo.enable")) {
         auto g_camera = rctx.gizmo_layer->get_camera();
@@ -427,6 +572,46 @@ class Event_Consumer : public IGUIApp {
         }
       });
     }
+    if (ImGui::Button("Reset topomesh")) {
+      rctx.frame_id = 0;
+      rctx.scene->traverse([&](Node *node) {
+        if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
+          if (mn->getComponent<TopomeshComponent>()) {
+            mn->getComponent<TopomeshComponent>()->release();
+            TopomeshComponent::create(mn);
+          }
+        }
+      });
+    }
+    ImGui::LabelText("", "frame id: %i", rctx.frame_id);
+    if (ImGui::Button("Save OBJ")) {
+      FILE *f = fopen("dump.obj", "wb");
+      defer(fclose(f));
+      ASSERT_DEBUG(f);
+      rctx.scene->traverse([&](Node *node) {
+        if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
+          if (auto *sc = mn->getComponent<TopomeshComponent>()) {
+            ito(sc->get_num_meshes()) {
+              Topo_Mesh *tm   = sc->get_topo(i);
+              auto       surf = mn->getSurface(i);
+              jto(tm->vertices.size) {
+                auto   vtx = surf->mesh.fetch_vertex(j);
+                float2 uv  = tm->vertices[j].pos.xz;
+                fprintf(f, "v %f %f %f\n", vtx.position.x, vtx.position.y, vtx.position.z);
+                fprintf(f, "vn %f %f %f\n", vtx.normal.x, vtx.normal.y, vtx.normal.z);
+                fprintf(f, "vt %f %f\n", uv.x, uv.y);
+              }
+              jto(tm->faces.size) {
+                auto face = tm->faces[j];
+                fprintf(f, "f %i/%i/%i %i/%i/%i %i/%i/%i\n", face.vtx0 + 1, face.vtx0 + 1,
+                        face.vtx0 + 1, face.vtx1 + 1, face.vtx1 + 1, face.vtx1 + 1, face.vtx2 + 1,
+                        face.vtx2 + 1, face.vtx2 + 1);
+              }
+            }
+          }
+        }
+      });
+    }
     ImGui::End();
 
     ImGui::Begin("Render Pass");
@@ -454,7 +639,8 @@ class Event_Consumer : public IGUIApp {
   (add u32  g_buffer_height 512 (min 4) (max 2048))
  )
  )"));
-    rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/human_bust_sculpt/cut.gltf"));
+    // rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/human_bust_sculpt/cut.gltf"));
+    rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/norradalur-froyar/scene.gltf"));
     // rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/human_bust_sculpt/untitled.gltf"));
     // rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/light/scene.gltf"));
     rctx.scene->update();

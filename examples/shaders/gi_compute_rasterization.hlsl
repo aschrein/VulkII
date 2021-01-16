@@ -37,7 +37,7 @@ void add_sample(float2 uv, u32 num) {
 }
 
 float3 random_color(float2 uv) {
-  uv           = uv * 15.718281828459045;
+  uv           = frac(uv * 15.718281828459045);
   float3 seeds = float3(0.123, 0.456, 0.789);
   seeds        = frac((uv.x + 0.5718281828459045 + seeds) *
                ((seeds + fmod(uv.x, 0.141592653589793)) * 27.61803398875 + 4.718281828459045));
@@ -68,20 +68,32 @@ main(uint3 tid
   uint2  pnt        = tid.xy;
   float2 grid_uv0   = float2(pnt) * uv_step + uv_offset;
   float2 offsets[6] = {
-      float2(0.0f, 0.0f), float2(1.0f, 0.0f), float2(0.0f, 1.0f),
-      float2(1.0f, 0.0f), float2(1.0f, 1.0f), float2(0.0f, 1.0f),
+      float2(0.0f, 0.0f), float2(0.0f, 1.0f), float2(1.0f, 0.0f),
+      float2(1.0f, 0.0f), float2(0.0f, 1.0f), float2(1.0f, 1.0f),
   };
+  // Compute the needed LOD for reading
+  u32 src_res;
+  {
+    uint width, height;
+    normal_source.GetDimensions(width, height);
+    src_res = width;
+  }
+  f32 pixels_covered = uv_step * f32(src_res);
+  f32 mip_level      = log2(pixels_covered);
+
   for (uint tri_id = 0; tri_id < 2; tri_id++) {
     float2 suv0 = grid_uv0 + offsets[0 + tri_id * 3] * uv_step;
     float2 suv1 = grid_uv0 + offsets[1 + tri_id * 3] * uv_step;
     float2 suv2 = grid_uv0 + offsets[2 + tri_id * 3] * uv_step;
-    float3 p0   = position_source.SampleLevel(ss, suv0, 0.0f).xyz;
-    float3 p1   = position_source.SampleLevel(ss, suv1, 0.0f).xyz;
-    float3 p2   = position_source.SampleLevel(ss, suv2, 0.0f).xyz;
 
-    float3 normal_0 = normal_source.SampleLevel(ss, suv0, 0.0f).xyz;
-    float3 normal_1 = normal_source.SampleLevel(ss, suv1, 0.0f).xyz;
-    float3 normal_2 = normal_source.SampleLevel(ss, suv2, 0.0f).xyz;
+    float3 p0 = position_source.SampleLevel(ss, suv0, mip_level).xyz;
+    float3 p1 = position_source.SampleLevel(ss, suv1, mip_level).xyz;
+    float3 p2 = position_source.SampleLevel(ss, suv2, mip_level).xyz;
+
+    /*float alpha0 = position_source.SampleLevel(ss, suv0, 0.0f).w;
+    float alpha1 = position_source.SampleLevel(ss, suv1, 0.0f).w;
+    float alpha2 = position_source.SampleLevel(ss, suv2, 0.0f).w;
+    if (alpha0 < 0.5f || alpha1 < 0.5f || alpha2 < 0.5f) return;*/
 
     // feedback_buffer.Store<float3>((DTid.x * 3 + 0) * 12, p0);
     // feedback_buffer.Store<float3>((DTid.x * 3 + 1) * 12, p1);
@@ -121,7 +133,7 @@ main(uint3 tid
     float2 e2 = v0 - v2;
 
     // Double area
-    float area2 = e0.x * e2.y - e0.y * e2.x;
+    float area2 = (e0.x * e2.y - e0.y * e2.x);
 
     // Back/small triangle culling
     if (area2 < 1.0e-6f) return;
@@ -135,10 +147,6 @@ main(uint3 tid
     float2 fmin = float2(min(v0.x, min(v1.x, v2.x)), min(v0.y, min(v1.y, v2.y)));
     float2 fmax = float2(max(v0.x, max(v1.x, v2.x)), max(v0.y, max(v1.y, v2.y)));
 
-    int2 ip0 = int2(v0);
-    int2 ip1 = int2(v1);
-    int2 ip2 = int2(v2);
-
     int2 imin = int2(fmin);
     int2 imax = int2(fmax);
 
@@ -149,6 +157,10 @@ main(uint3 tid
     float  init_ef2     = dot(first_sample - v2, n2);
 
     u32 num_samples = 0;
+
+    float3 normal_0 = normal_source.SampleLevel(ss, suv0, mip_level).xyz;
+    float3 normal_1 = normal_source.SampleLevel(ss, suv1, mip_level).xyz;
+    float3 normal_2 = normal_source.SampleLevel(ss, suv2, mip_level).xyz;
 
     for (i32 dy = 0; dy <= imax.y - imin.y; dy++) {
       for (i32 dx = 0; dx <= imax.x - imin.x; dx++) {
@@ -184,9 +196,11 @@ main(uint3 tid
           if (depth > next_depth) {
             num_samples++;
             if (pc.flags & GI_RASTERIZATION_FLAG_PIXEL_COLOR_TRIANGLES)
-              normal_target[int2(x, y)] = float4(random_color(suv0), 1.0f);
+              normal_target[int2(x, y)] =
+                  // float4(random_color(suv0) * random_color(uv_offset), 1.0f);
+                  float4(float2_splat(mip_level / 10.0f), random_color(suv0).z, 1.0f);
             else
-              normal_target[int2(x, y)] = float4(pixel_normal, 1.0f);
+              normal_target[int2(x, y)] = float4(float3_splat(max(0.0f, dot(pixel_normal, normalize(float3_splat(1.0f))))), 1.0f);
           }
         }
       }

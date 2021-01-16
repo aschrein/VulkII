@@ -233,6 +233,15 @@ struct Image2D {
     MEMZERO(*this);
     delete this;
   }
+  static u32 get_bpp(rd::Format format) {
+    switch (format) {
+    case rd::Format::RGBA8_UNORM:
+    case rd::Format::RGBA8_SRGBA: return 4u;
+    case rd::Format::RGB32_FLOAT: return 12u;
+    case rd::Format::RGBA32_FLOAT: return 16u;
+    default: ASSERT_PANIC(false && "unsupported format");
+    }
+  }
   u32 get_bpp() const {
     switch (format) {
     case rd::Format::RGBA8_UNORM:
@@ -385,7 +394,8 @@ struct Image2D {
 
     return out;
   }
-  u32 get_num_mip_levels() const {
+  u32        get_num_mip_levels() const { return get_num_mip_levels(width, height); }
+  static u32 get_num_mip_levels(u32 width, u32 height) {
     u32 mip_levels = 0;
     u32 w          = width;
     u32 h          = height;
@@ -920,6 +930,7 @@ class Typed {
   static Type *              get_type() { return NULL; }
   virtual Type *             getType() = 0;
   template <typename T> bool isa() {
+    if (this == NULL) return false;
     Type *ty = getType();
     while (ty) {
       if (ty == T::get_type()) return true;
@@ -1896,6 +1907,12 @@ struct Config {
       } else if (item.type == Config_Item::F32) {
         if (item.v_f32_min != item.v_f32_max) {
           modified = ImGui::SliderFloat(buf, (float *)&item.v_f32, item.v_f32_min, item.v_f32_max);
+          ImGui::SameLine();
+          ImGui::SetNextItemWidth(20.0f);
+          ImGui::InputFloat("min", (float *)&item.v_f32_min);
+          ImGui::SameLine();
+          ImGui::SetNextItemWidth(20.0f);
+          ImGui::InputFloat("max", (float *)&item.v_f32_max);
         } else {
           modified = ImGui::InputFloat(buf, (float *)&item.v_f32);
         }
@@ -2451,12 +2468,13 @@ class Topo_Mesh {
     void release() {}
   };
   struct Edge {
-    u32 origin;
-    u32 end;
-    u32 face;
-    i32 sibling;
-    u32 next_edge;
-    u32 prev_edge;
+    u32  origin;
+    u32  end;
+    u32  face;
+    i32  sibling;
+    u32  next_edge;
+    u32  prev_edge;
+    bool is_seam;
 
     void init() { memset(this, 0, sizeof(Edge)); }
     void release() {}
@@ -2466,7 +2484,16 @@ class Topo_Mesh {
     SmallArray<u32, 8> faces;
     u32                index;
     float3             pos;
-
+    union {
+      float3 f3param0;
+      float4 f4param0;
+      bool   bparam0;
+    };
+    union {
+      float3 f3param1;
+      float4 f4param1;
+      bool   bparam1;
+    };
     void init() {
       memset(this, 0, sizeof(Vertex));
       edges.init();
@@ -2586,7 +2613,10 @@ class Topo_Mesh {
         }
       }
       if (e->sibling == -1) {
-        seam_edges.push(i);
+        {
+          e->is_seam = true;
+          seam_edges.push(i);
+        }
       }
       // if (edge_map.contains({e->end, e->origin})) {
       //  e->sibling = edge_map.get({e->end, e->origin});
@@ -2600,6 +2630,8 @@ class Topo_Mesh {
       // ASSERT_ALWAYS(edge_map.get({e->end, e->origin}) != i);
       // e->sibling = edge_map.get({e->end, e->origin});
     }
+    /* quicky_sort(&seam_edges[0], seam_edges.size,
+                 [&](u32 se0, u32 se1) { return edges[se0].origin < edges[se1].origin; });*/
   }
   void release() {
     ito(edges.size) edges[i].release();

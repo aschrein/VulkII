@@ -234,7 +234,7 @@ static u32 enable_fpe() {
       _EM_ZERODIVIDE | //
       _EM_OVERFLOW |   //
       _EM_UNDERFLOW |  //
-      _EM_INEXACT |    //
+      //_EM_INEXACT |    //
       0                //
   );
   u32 mask      = _MCW_EM;
@@ -1312,7 +1312,8 @@ struct Hash_Set {
     arr.memzero();
     item_count = 0;
   }
-  i32 find(K key) {
+  void reserve(size_t num) { arr.resize(arr.size + num); }
+  i32  find(K key) {
     if (item_count == 0) return -1;
     uint64_t key_hash = hash_of(key);
     uint64_t hash     = key_hash;

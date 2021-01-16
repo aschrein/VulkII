@@ -965,7 +965,7 @@ class DX12Device : public rd::IDevice {
     }
 
     defer(dxc_defines.release());
-    WCHAR const *               options[] = {L"-Wignored-attributes", L"UNUSED"};
+    WCHAR const *               options[] = {L"-Wignored-attributes", L"-O3", L"UNUSED"};
     ComPtr<IDxcOperationResult> result;
     // Do a little preprocessing
     // allocated 1 byte but really the rest of memory
@@ -2123,6 +2123,8 @@ class DX12Context : public rd::ICtx {
   }
   void dispatch_indirect(Resource_ID arg_buf_id, size_t arg_buf_offset) override {
     ID3D12Resource *arg_buf = dev_ctx->get_resource(arg_buf_id.id)->res;
+    ASSERT_DEBUG(cur_binding);
+    cur_binding->flush_push_constants(cmd, type);
     cmd->ExecuteIndirect(dev_ctx->get_dispatch_indirect_signature().Get(), 1, arg_buf,
                          arg_buf_offset, NULL, 0);
   }

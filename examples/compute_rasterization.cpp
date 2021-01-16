@@ -60,9 +60,9 @@ class BakerPass {
   RESOURCE_LIST
 #undef RESOURCE
 
-  u32 width  = 0;
-  u32 height = 0;
-
+  u32                         width  = 0;
+  u32                         height = 0;
+  bool                        dirty  = true;
   rd::Render_Pass_Create_Info info{};
   rd::Graphics_Pipeline_State gfx_state{};
 
@@ -109,6 +109,7 @@ PSInput main(in VSInput input) {
   output.normal  = mul(pc.world_transform, float4(input.normal.xyz, 0.0f)).xyz;
   output.uv      = input.uv;
   output.pos     = float4(input.uv * 2.0 - 1.0, 0.0f, 1.0f);
+  //output.pos     = float4(input.uv, 0.0f, 1.0f);
   output.src_pos = input.pos;
   return output;
 }
@@ -234,7 +235,7 @@ PSOut main(in PSInput input) {
       rt0_info.height     = height;
       rt0_info.depth      = 1;
       rt0_info.layers     = 1;
-      rt0_info.levels     = 1;
+      rt0_info.levels     = Image2D::get_num_mip_levels(width, height);
       rt0_info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_RT |      //
                             (u32)rd::Image_Usage_Bits::USAGE_SAMPLED | //
                             (u32)rd::Image_Usage_Bits::USAGE_UAV;
@@ -248,7 +249,7 @@ PSOut main(in PSInput input) {
       rt0_info.height     = height;
       rt0_info.depth      = 1;
       rt0_info.layers     = 1;
-      rt0_info.levels     = 1;
+      rt0_info.levels     = Image2D::get_num_mip_levels(width, height);
       rt0_info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_RT |      //
                             (u32)rd::Image_Usage_Bits::USAGE_SAMPLED | //
                             (u32)rd::Image_Usage_Bits::USAGE_UAV;
@@ -276,8 +277,10 @@ PSOut main(in PSInput input) {
       this->width  = width;
       this->height = height;
       update_frame_buffer(rctx);
+      dirty = true;
     }
-
+    if (dirty == false) return;
+    dirty = false;
     struct PushConstants {
       float4x4 viewproj;
       float4x4 world_transform;
@@ -317,6 +320,8 @@ PSOut main(in PSInput input) {
     }
 
     Resource_ID e = dev->end_render_pass(ctx);
+    Mip_Builder::create_image(dev, position_rt);
+    Mip_Builder::create_image(dev, normal_rt);
     timestamps.commit(e);
   }
 };
@@ -590,19 +595,14 @@ struct IndirectArgs {
   IndirectArgs args = indirect_arg_buffer.Load<IndirectArgs>(12 * (tid.x + tid.y * width));
   if (args.dimx == 0) {
     args.dimx = 1;
-    args.dimy = 1;
-    args.dimz = 1;
-  } else if (cnt > 32) {
-    u32 dim = args.dimx;
-    args.dimx = min(32, dim * 2);
-    args.dimy = min(32, dim * 2);
-    args.dimz = 1;
+  } else if (cnt > 16) {
+    args.dimx = args.dimx + 1;
   } else if (cnt < 4) {
-    u32 dim = args.dimx;
-    args.dimx = max(1, dim / 2);
-    args.dimy = max(1, dim / 2);
-    args.dimz = 1;
+    args.dimx = args.dimx - 1;
   }
+  args.dimx = max(1, min(128, args.dimx));
+  args.dimy = args.dimx;
+  args.dimz = 1;
   indirect_arg_buffer.Store<IndirectArgs>(12 * (tid.x + tid.y * width), args);
 }
 )"),
@@ -1579,8 +1579,8 @@ void main(uint3 tid : SV_DispatchThreadID)
   float2 uv = (float2(tid.xy) + float2(0.5f, 0.5f)) / float2(width, height);
   float3 normal = inputs[GBUFFER_NORMAL].Load(int3(tid.xy, 0)).xyz;
   float4 gizmo  = inputs[GIZMO_LAYER].Load(int3(tid.xy, 0)).xyzw;
-  float3 color = float3_splat(abs(dot(normal, normalize(float3(1.0, 1.0, 1.0)))));
-  compose[tid.xy] = float4(lerp(pow(color, 0.5f), gizmo.xyz, gizmo.w), 1.0f);
+  float3 color = float3_splat(max(0.0f, dot(normal, normalize(float3(1.0, 1.0, 1.0)))));
+  compose[tid.xy] = float4(lerp(pow(color, 1.0f), gizmo.xyz, gizmo.w), 1.0f);
 }
 )"),
                                                              NULL, 0));
@@ -1798,7 +1798,8 @@ class Event_Consumer : public IGUIApp {
   (add bool G.I.color_triangles 0)
  )
  )"));
-    rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/human_bust_sculpt/cut.gltf"));
+    rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/norradalur-froyar/scene.gltf"));
+    // rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/human_bust_sculpt/cut.gltf"));
     // rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/human_bust_sculpt/untitled.gltf"));
     // rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/light/scene.gltf"));
     rctx.scene->update();
@@ -1858,7 +1859,7 @@ int main(int argc, char *argv[]) {
   // vulkan_thread.join();
   // dx12_thread.join();
 
-  window_loop(rd::Impl_t::VULKAN);
-  // window_loop(rd::Impl_t::DX12);
+  // window_loop(rd::Impl_t::VULKAN);
+  window_loop(rd::Impl_t::DX12);
   return 0;
 }
