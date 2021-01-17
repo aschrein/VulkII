@@ -47,10 +47,13 @@ float3 random_color(float2 uv) {
                ((seeds + fmod(uv.x, 0.141592653589793)) * 27.61803398875 + 4.718281828459045));
   return seeds;
 }
+groupshared float4
+    vertex_cache[(GI_RASTERIZATION_GROUP_SIZE + 1) * (GI_RASTERIZATION_GROUP_SIZE + 1)];
 
 [numthreads(GI_RASTERIZATION_GROUP_SIZE, GI_RASTERIZATION_GROUP_SIZE, 1)] void
 main(uint3 tid
-     : SV_DispatchThreadID) {
+     : SV_DispatchThreadID, uint3 gid
+     : SV_GroupThreadID) {
   float2 uv_offset = float2(0.0f, 0.0f);
   float2 uv_step   = float2(1.0f, 1.0f) / float(COUNTER_GRID_RESOLUTION);
   {
@@ -67,9 +70,8 @@ main(uint3 tid
   normal_target.GetDimensions(width, height);
   uint2  pnt        = tid.xy;
   float2 grid_uv0   = float2(pnt) * uv_step + uv_offset;
-  float2 offsets[6] = {
-      float2(0.0f, 0.0f), float2(0.0f, 1.0f), float2(1.0f, 0.0f),
-      float2(1.0f, 0.0f), float2(0.0f, 1.0f), float2(1.0f, 1.0f),
+  int2   offsets[6] = {
+      int2(0, 0), int2(0, 1), int2(1, 0), int2(1, 0), int2(0, 1), int2(1, 1),
   };
   // Compute the needed LOD for reading
   u32 src_res;
@@ -81,14 +83,39 @@ main(uint3 tid
   f32 pixels_covered = uv_step * f32(src_res);
   f32 mip_level      = log2(pixels_covered);
 
+  {
+    float2 suv0 = grid_uv0;
+    float3 p0   = position_source.SampleLevel(ss, suv0, mip_level).xyz;
+    float4 pp0  = mul(fc.viewproj, mul(pc.model, float4(p0, 1.0)));
+    vertex_cache[gid.x + gid.y * (GI_RASTERIZATION_GROUP_SIZE + 1)] = pp0;
+  }
+  if (gid.x == GI_RASTERIZATION_GROUP_SIZE - 1) {
+    float2 suv0 = grid_uv0 + float2(uv_step.x, 0.0f);
+    float3 p0   = position_source.SampleLevel(ss, suv0, mip_level).xyz;
+    float4 pp0  = mul(fc.viewproj, mul(pc.model, float4(p0, 1.0)));
+    vertex_cache[gid.x + 1 + gid.y * (GI_RASTERIZATION_GROUP_SIZE + 1)] = pp0;
+  }
+  if (gid.y == GI_RASTERIZATION_GROUP_SIZE - 1) {
+    float2 suv0 = grid_uv0 + float2(0.0f, uv_step.x);
+    float3 p0   = position_source.SampleLevel(ss, suv0, mip_level).xyz;
+    float4 pp0  = mul(fc.viewproj, mul(pc.model, float4(p0, 1.0)));
+    vertex_cache[gid.x + (gid.y + 1) * (GI_RASTERIZATION_GROUP_SIZE + 1)] = pp0;
+  }
+  if (gid.y == GI_RASTERIZATION_GROUP_SIZE - 1 && gid.x == GI_RASTERIZATION_GROUP_SIZE - 1) {
+    float2 suv0 = grid_uv0 + float2(uv_step.x, uv_step.x);
+    float3 p0   = position_source.SampleLevel(ss, suv0, mip_level).xyz;
+    float4 pp0  = mul(fc.viewproj, mul(pc.model, float4(p0, 1.0)));
+    vertex_cache[gid.x + 1 + (gid.y + 1) * (GI_RASTERIZATION_GROUP_SIZE + 1)] = pp0;
+  }
+  GroupMemoryBarrierWithGroupSync();
   for (uint tri_id = 0; tri_id < 2; tri_id++) {
     float2 suv0 = grid_uv0 + offsets[0 + tri_id * 3] * uv_step;
     float2 suv1 = grid_uv0 + offsets[1 + tri_id * 3] * uv_step;
     float2 suv2 = grid_uv0 + offsets[2 + tri_id * 3] * uv_step;
 
-    float3 p0 = position_source.SampleLevel(ss, suv0, mip_level).xyz;
+    /*float3 p0 = position_source.SampleLevel(ss, suv0, mip_level).xyz;
     float3 p1 = position_source.SampleLevel(ss, suv1, mip_level).xyz;
-    float3 p2 = position_source.SampleLevel(ss, suv2, mip_level).xyz;
+    float3 p2 = position_source.SampleLevel(ss, suv2, mip_level).xyz;*/
 
     /*float alpha0 = position_source.SampleLevel(ss, suv0, 0.0f).w;
     float alpha1 = position_source.SampleLevel(ss, suv1, 0.0f).w;
@@ -100,9 +127,19 @@ main(uint3 tid
     // feedback_buffer.Store<float3>((DTid.x * 3 + 2) * 12, p2);
 
     // Screen space projected positions
-    float4 pp0 = mul(fc.viewproj, mul(pc.model, float4(p0, 1.0)));
+    /*float4 pp0 = mul(fc.viewproj, mul(pc.model, float4(p0, 1.0)));
     float4 pp1 = mul(fc.viewproj, mul(pc.model, float4(p1, 1.0)));
-    float4 pp2 = mul(fc.viewproj, mul(pc.model, float4(p2, 1.0)));
+    float4 pp2 = mul(fc.viewproj, mul(pc.model, float4(p2, 1.0)));*/
+
+    float4 pp0 =
+        vertex_cache[(gid.x + offsets[0 + tri_id * 3].x) +
+                     (gid.y + offsets[0 + tri_id * 3].y) * (GI_RASTERIZATION_GROUP_SIZE + 1)];
+    float4 pp1 =
+        vertex_cache[(gid.x + offsets[1 + tri_id * 3].x) +
+                     (gid.y + offsets[1 + tri_id * 3].y) * (GI_RASTERIZATION_GROUP_SIZE + 1)];
+    float4 pp2 =
+        vertex_cache[(gid.x + offsets[2 + tri_id * 3].x) +
+                     (gid.y + offsets[2 + tri_id * 3].y) * (GI_RASTERIZATION_GROUP_SIZE + 1)];
 
     // For simplicity just discard triangles that touch the boundary
     // @TODO(aschrein): Add proper clipping.
@@ -200,7 +237,8 @@ main(uint3 tid
                   // float4(random_color(suv0) * random_color(uv_offset), 1.0f);
                   float4(float2_splat(mip_level / 10.0f), random_color(suv0).z, 1.0f);
             else
-              normal_target[int2(x, y)] = float4(float3_splat(max(0.0f, dot(pixel_normal, normalize(float3_splat(1.0f))))), 1.0f);
+              normal_target[int2(x, y)] = float4(
+                  float3_splat(max(0.0f, dot(pixel_normal, normalize(float3_splat(1.0f))))), 1.0f);
           }
         }
       }

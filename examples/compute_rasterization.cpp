@@ -595,12 +595,12 @@ struct IndirectArgs {
   IndirectArgs args = indirect_arg_buffer.Load<IndirectArgs>(12 * (tid.x + tid.y * width));
   if (args.dimx == 0) {
     args.dimx = 1;
-  } else if (cnt > 16) {
+  } else if (cnt > 32) {
     args.dimx = args.dimx + 1;
   } else if (cnt < 4) {
     args.dimx = args.dimx - 1;
   }
-  args.dimx = max(1, min(128, args.dimx));
+  args.dimx = max(1, min(32, args.dimx));
   args.dimy = args.dimx;
   args.dimz = 1;
   indirect_arg_buffer.Store<IndirectArgs>(12 * (tid.x + tid.y * width), args);
