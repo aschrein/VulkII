@@ -1891,8 +1891,30 @@ struct Config {
   bool on_imgui() {
     AutoArray<string_t> to_remove{};
     bool                modified = false;
+    AutoArray<string_t> sorted{};
     items.iter_pairs([&](string_t const &name, Config_Item &item) {
       if (item.used == false) return;
+      sorted.push(name);
+    });
+    quicky_sort(&sorted[0], sorted.size, [&](string_t const &a, string_t const &b) {
+      /*double av = 0.0;
+      double bv = 0.0;
+      ito(a.len()) av += pow(10.0, -1.0 * (i + 1)) * (double(a.buf[i]) / 128.0);
+      ito(b.len()) bv += pow(10.0, -1.0 * (i + 1)) * (double(b.buf[i]) / 128.0);
+      return av < bv;*/
+      // if (a.len() < b.len()) return true;
+      size_t len = min(a.len(), b.len());
+      // for (i32 i = (i32)len - 1; i >= 0; i--) {
+      for (i32 i = 0; i < (i32)len; i++) {
+        if (a.buf[i] < b.buf[i]) return true;
+      }
+      return a.len() < b.len();
+    });
+    // items.iter_pairs([&](string_t const &name, Config_Item &item) {
+    ito(sorted.size) {
+      string_t const &name = sorted[i];
+      Config_Item &   item = items.get_ref(name);
+      if (item.used == false) continue;
       char buf[0x100];
       snprintf(buf, sizeof(buf), "%.*s", STRF(name.ref()));
       u64 hash = hash_of(name.ref());
@@ -1925,7 +1947,7 @@ struct Config {
       if (ImGui::Button("Remove")) {
         to_remove.push(name);
       }
-    });
+    }
     ito(to_remove.size) {
       modified = true;
       items.remove(to_remove[i]);

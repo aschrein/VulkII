@@ -235,7 +235,7 @@ static u32 enable_fpe() {
       _EM_OVERFLOW |   //
       _EM_UNDERFLOW |  //
       //_EM_INEXACT |    //
-      0                //
+      0 //
   );
   u32 mask      = _MCW_EM;
   u32 old_state = 0;
@@ -1034,9 +1034,11 @@ template <typename T, typename F> void quicky_sort(T *arr, u32 size, F cmp) {
   while (true) {
     while (cmp(arr[i], pivot)) {
       i++;
+      ASSERT_DEBUG(i <= j);
     }
     while (cmp(pivot, arr[j])) {
       j--;
+      ASSERT_DEBUG(i <= j);
     }
     if (i >= j) break;
     SWAP(arr[i], arr[j]);
