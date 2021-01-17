@@ -19,10 +19,8 @@
 [[vk::binding(5, 0)]] SamplerState ss : register(s5, space0);
 
 //
-[[vk::binding(6, 0)]] RWTexture2D<uint> grid_resolution_table : register(u6, space0);
-[[vk::binding(7, 0)]] RWTexture2D<uint> subgrid_counter_table : register(u7, space0);
-
-//[[vk::binding(7, 0)]] RWTexture2D<uint>   prev_counter_grid : register(u7, space0);
+[[vk::binding(6, 0)]] RWByteAddressBuffer indirect_arg_buffer : register(u6, space0);
+[[vk::binding(7, 0)]] RWTexture2D<uint>   prev_counter_grid : register(u7, space0);
 
 struct IndirectArgs {
   u32 dimx;
@@ -58,7 +56,8 @@ float3 random_color(float2 uv) {
 // groupshared u32 num_samples;
 // uint3 group_id : SV_GroupID
 // Spawn the whole wavefront at a time
-[numthreads(64, 1, 1)] void main(uint3 group_id : SV_GroupID) {
+[numthreads(64, 1, 1)] void main(uint3 group_id
+                                 : SV_GroupID) {
   // Target resolution
   uint width, height;
   normal_target.GetDimensions(width, height);
@@ -71,31 +70,40 @@ float3 random_color(float2 uv) {
     src_res = width;
   }
 
-  u32 cell_x = (group_id % COUNTER_GRID_RESOLUTION);
-  u32 cell_y = (group_id / COUNTER_GRID_RESOLUTION);
+  // u32 cell_x = (group_id % COUNTER_GRID_RESOLUTION);
+  u32 cell_x = pc.cell_x;
+  u32 cell_y = pc.cell_y;
 
   // Scalar loops
   //[unroll]
-  //for (u32 cell_y = 0; cell_y < COUNTER_GRID_RESOLUTION; cell_y++)
+  // for (u32 cell_y = 0; cell_y < COUNTER_GRID_RESOLUTION; cell_y++)
   {
     //[unroll]
-    //for (u32 cell_x = 0; cell_x < COUNTER_GRID_RESOLUTION; cell_x++)
+    // for (u32 cell_x = 0; cell_x < COUNTER_GRID_RESOLUTION; cell_x++)
     {
-      u32 cell_res = grid_resolution_table[int2(cell_x, cell_y)];
+      u32 cell_res;
+      {
+        IndirectArgs args = indirect_arg_buffer.Load<IndirectArgs>(
+            12 * (pc.cell_x + pc.cell_y * COUNTER_GRID_RESOLUTION));
+        cell_res = args.dimx;
+      }
       if (cell_res == 0) return;
       float2 cell_uv = float2(cell_x, cell_y) / float(COUNTER_GRID_RESOLUTION);
-      while (true) {
-        u32 subcell_offset;
-        if (WaveGetLaneIndex() == 0) {
-          /*         subgrid_counter_table.InterlockedAdd(4 * (cell_x + cell_y *
-             COUNTER_GRID_RESOLUTION), 1, subcell_offset);*/
-          InterlockedAdd(subgrid_counter_table[int2(cell_x, cell_y)], 1, subcell_offset);
-        }
-        subcell_offset = WaveReadLaneAt(subcell_offset, 0);
+      // while (true)
+      {
+        // u32 subcell_offset = gtid;
+        // if (WaveGetLaneIndex() == 0) {
+        //  /*         subgrid_counter_table.InterlockedAdd(4 * (cell_x + cell_y *
+        //     COUNTER_GRID_RESOLUTION), 1, subcell_offset);*/
+        //  InterlockedAdd(subgrid_counter_table[int2(cell_x, cell_y)], 1, subcell_offset);
+        //}
+        // subcell_offset = WaveReadLaneAt(subcell_offset, 0);
         // All subcells are already finished
-        if (subcell_offset >= cell_res * cell_res) return;
-        u32    subcell_x       = (subcell_offset % cell_res);
-        u32    subcell_y       = (subcell_offset / cell_res);
+        // if (subcell_offset >= cell_res * cell_res) return;
+        // u32    subcell_x       = (subcell_offset % cell_res);
+        u32 subcell_x = group_id.x;
+        // u32    subcell_y       = (subcell_offset / cell_res);
+        u32    subcell_y       = group_id.y;
         f32    subcell_uv_step = 1.0f / float(cell_res * COUNTER_GRID_RESOLUTION);
         float2 subcell_uv      = cell_uv + float2(subcell_x, subcell_y) * subcell_uv_step;
         int2   offsets[6]      = {
@@ -120,8 +128,8 @@ float3 random_color(float2 uv) {
           float2 suv0 = subcell_uv + offsets[0 + tri_id * 3] * subcell_uv_step;
           float2 suv1 = subcell_uv + offsets[1 + tri_id * 3] * subcell_uv_step;
           float2 suv2 = subcell_uv + offsets[2 + tri_id * 3] * subcell_uv_step;
-          //if (WaveGetLaneIndex() == 0) add_sample((suv0 + suv1 + suv2) / 3.0f, 1);
-          //continue;
+          // if (WaveGetLaneIndex() == 0) add_sample((suv0 + suv1 + suv2) / 3.0f, 1);
+          // continue;
 #if 1
           // float2 suv0 = subcell_uv + float2(0.0f, 0.0f);
           // float2 suv1 = subcell_uv + float2(subcell_uv_step, 0.0f);
@@ -191,12 +199,18 @@ float3 random_color(float2 uv) {
           volatile u32 num_samples = 0;
 
           // Bound the maximum triangle size to 32x32 pixels
-          imax.x = imin.x + min(32, imax.x - imin.x);
-          imax.y = imin.y + min(32, imax.y - imin.y);
+          //imax.x          = imin.x + min(16, imax.x - imin.x);
+          //imax.y          = imin.y + min(16, imax.y - imin.y);
+
+          float3 normal_0 = normal_source.SampleLevel(ss, suv0, mip_level).xyz;
+          float3 normal_1 = normal_source.SampleLevel(ss, suv1, mip_level).xyz;
+          float3 normal_2 = normal_source.SampleLevel(ss, suv2, mip_level).xyz;
 
           // Still a scalar loop
-          [unroll(4)] for (i32 dy = 0; dy <= imax.y - imin.y; dy += 8) {
-            [unroll(4)] for (i32 dx = 0; dx <= imax.x - imin.x; dx += 8) {
+          //[unroll(2)]
+          for (i32 dy = 0; dy <= imax.y - imin.y; dy += 8) {
+            //[unroll(2)]
+            for (i32 dx = 0; dx <= imax.x - imin.x; dx += 8) {
               // Per lane iteration starts here
               // 64 lanes or 8x8 lanes
               u32 lane_x = WaveGetLaneIndex() & 0x7;
@@ -212,7 +226,7 @@ float3 random_color(float2 uv) {
 
                 if (ef0 < 0.0f || ef1 < 0.0f || ef2 < 0.0f) continue;
 
-#  if 0
+#  if 1
                 // Barycentrics
                 float b0 = ef1;
                 float b1 = ef2;
@@ -224,7 +238,7 @@ float3 random_color(float2 uv) {
                 b2       = b2 / pp2.w / bw;
 
                 // Per pixel Attributes
-                //float2 pixel_uv = suv0 * b0 + suv1 * b1 + suv2 * b2;
+                // float2 pixel_uv = suv0 * b0 + suv1 * b1 + suv2 * b2;
 
                 // add tid.x * 1.0e-6f to avoid z-fight
                 u32 depth = u32((pp0.z) * 1000000);
@@ -238,9 +252,7 @@ float3 random_color(float2 uv) {
                         // float4(random_color(suv0) * random_color(uv_offset), 1.0f);
                         float4(float2_splat(mip_level / 10.0f), random_color(suv0).z, 1.0f);
                   else {
-                    float3 normal_0     = normal_source.SampleLevel(ss, suv0, mip_level).xyz;
-                    float3 normal_1     = normal_source.SampleLevel(ss, suv1, mip_level).xyz;
-                    float3 normal_2     = normal_source.SampleLevel(ss, suv2, mip_level).xyz;
+
                     float3 pixel_normal = normalize(normal_0 * b0 + normal_1 * b1 + normal_2 * b2);
                     normal_target[int2(x, y)] = float4(
                         float3_splat(max(0.0f, dot(pixel_normal, normalize(float3_splat(1.0f))))),
