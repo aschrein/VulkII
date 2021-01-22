@@ -186,6 +186,19 @@ static void decodeIndexRejectInvalidVersion()
 	assert(meshopt_decodeIndexBuffer(decoded, index_count, &brokenbuffer[0], brokenbuffer.size()) < 0);
 }
 
+static void decodeIndexMalformedVByte()
+{
+	const unsigned char input[] = {
+	    0xe1, 0x20, 0x20, 0x20, 0xff, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+	    0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+	    0xff, 0xff, 0xff, 0xff, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+	    0x20, 0x20, 0x20, // clang-format :-/
+	};
+
+	unsigned int decoded[66];
+	assert(meshopt_decodeIndexBuffer(decoded, 66, input, sizeof(input)) < 0);
+}
+
 static void roundtripIndexTricky()
 {
 	const size_t index_count = sizeof(kIndexBufferTricky) / sizeof(kIndexBufferTricky[0]);
@@ -500,14 +513,12 @@ static void encodeVertexEmpty()
 
 static void decodeFilterOct8()
 {
-	unsigned char data[4 * 4] = {
+	const unsigned char data[4 * 4] = {
 	    0, 1, 127, 0,
 	    0, 187, 127, 1,
 	    255, 1, 127, 0,
 	    14, 130, 127, 1, // clang-format :-/
 	};
-
-	meshopt_decodeFilterOct(data, 4, 4);
 
 	const unsigned char expected[4 * 4] = {
 	    0, 1, 127, 0,
@@ -516,19 +527,27 @@ static void decodeFilterOct8()
 	    1, 130, 241, 1, // clang-format :-/
 	};
 
-	assert(memcmp(data, expected, sizeof(data)) == 0);
+	// Aligned by 4
+	unsigned char full[4 * 4];
+	memcpy(full, data, sizeof(full));
+	meshopt_decodeFilterOct(full, 4, 4);
+	assert(memcmp(full, expected, sizeof(full)) == 0);
+
+	// Tail processing for unaligned data
+	unsigned char tail[3 * 4];
+	memcpy(tail, data, sizeof(tail));
+	meshopt_decodeFilterOct(tail, 3, 4);
+	assert(memcmp(tail, expected, sizeof(tail)) == 0);
 }
 
 static void decodeFilterOct12()
 {
-	unsigned short data[4 * 4] = {
+	const unsigned short data[4 * 4] = {
 	    0, 1, 2047, 0,
 	    0, 1870, 2047, 1,
 	    2017, 1, 2047, 0,
 	    14, 1300, 2047, 1, // clang-format :-/
 	};
-
-	meshopt_decodeFilterOct(data, 4, 8);
 
 	const unsigned short expected[4 * 4] = {
 	    0, 16, 32767, 0,
@@ -537,19 +556,27 @@ static void decodeFilterOct12()
 	    307, 28541, 16093, 1, // clang-format :-/
 	};
 
-	assert(memcmp(data, expected, sizeof(data)) == 0);
+	// Aligned by 4
+	unsigned short full[4 * 4];
+	memcpy(full, data, sizeof(full));
+	meshopt_decodeFilterOct(full, 4, 8);
+	assert(memcmp(full, expected, sizeof(full)) == 0);
+
+	// Tail processing for unaligned data
+	unsigned short tail[3 * 4];
+	memcpy(tail, data, sizeof(tail));
+	meshopt_decodeFilterOct(tail, 3, 8);
+	assert(memcmp(tail, expected, sizeof(tail)) == 0);
 }
 
 static void decodeFilterQuat12()
 {
-	unsigned short data[4 * 4] = {
+	const unsigned short data[4 * 4] = {
 	    0, 1, 0, 0x7fc,
 	    0, 1870, 0, 0x7fd,
 	    2017, 1, 0, 0x7fe,
 	    14, 1300, 0, 0x7ff, // clang-format :-/
 	};
-
-	meshopt_decodeFilterQuat(data, 4, 8);
 
 	const unsigned short expected[4 * 4] = {
 	    32767, 0, 11, 0,
@@ -558,19 +585,27 @@ static void decodeFilterQuat12()
 	    158, 14715, 0, 29277, // clang-format :-/
 	};
 
-	assert(memcmp(data, expected, sizeof(data)) == 0);
+	// Aligned by 4
+	unsigned short full[4 * 4];
+	memcpy(full, data, sizeof(full));
+	meshopt_decodeFilterQuat(full, 4, 8);
+	assert(memcmp(full, expected, sizeof(full)) == 0);
+
+	// Tail processing for unaligned data
+	unsigned short tail[3 * 4];
+	memcpy(tail, data, sizeof(tail));
+	meshopt_decodeFilterQuat(tail, 3, 8);
+	assert(memcmp(tail, expected, sizeof(tail)) == 0);
 }
 
 static void decodeFilterExp()
 {
-	unsigned int data[4] = {
+	const unsigned int data[4] = {
 	    0,
 	    0xff000003,
 	    0x02fffff7,
 	    0xfe7fffff, // clang-format :-/
 	};
-
-	meshopt_decodeFilterExp(data, 4, 4);
 
 	const unsigned int expected[4] = {
 	    0,
@@ -579,7 +614,17 @@ static void decodeFilterExp()
 	    0x49fffffe, // clang-format :-/
 	};
 
-	assert(memcmp(data, expected, sizeof(data)) == 0);
+	// Aligned by 4
+	unsigned int full[4];
+	memcpy(full, data, sizeof(full));
+	meshopt_decodeFilterExp(full, 4, 4);
+	assert(memcmp(full, expected, sizeof(full)) == 0);
+
+	// Tail processing for unaligned data
+	unsigned int tail[3];
+	memcpy(tail, data, sizeof(tail));
+	meshopt_decodeFilterExp(tail, 3, 4);
+	assert(memcmp(tail, expected, sizeof(tail)) == 0);
 }
 
 static void clusterBoundsDegenerate()
@@ -708,11 +753,13 @@ static void simplifySloppyStuck()
 	const float vb[] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
 	const unsigned int ib[] = {0, 1, 2, 0, 1, 2};
 
+	unsigned int* target = NULL;
+
 	// simplifying down to 0 triangles results in 0 immediately
-	assert(meshopt_simplifySloppy(0, ib, 3, vb, 3, 12, 0) == 0);
+	assert(meshopt_simplifySloppy(target, ib, 3, vb, 3, 12, 0, 0.f) == 0);
 
 	// simplifying down to 2 triangles given that all triangles are degenerate results in 0 as well
-	assert(meshopt_simplifySloppy(0, ib, 6, vb, 3, 12, 6) == 0);
+	assert(meshopt_simplifySloppy(target, ib, 6, vb, 3, 12, 6, 0.f) == 0);
 }
 
 static void simplifyPointsStuck()
@@ -721,6 +768,60 @@ static void simplifyPointsStuck()
 
 	// simplifying down to 0 points results in 0 immediately
 	assert(meshopt_simplifyPoints(0, vb, 3, 12, 0) == 0);
+}
+
+static void simplifyFlip()
+{
+	// this mesh has been constructed by taking a tessellated irregular grid with a square cutout
+	// and progressively collapsing edges until the only ones left violate border or flip constraints.
+	// there is only one valid non-flip collapse, so we validate that we take it; when flips are allowed,
+	// the wrong collapse is picked instead.
+	float vb[] = {
+	    1.000000f, 1.000000f, -1.000000f,
+	    1.000000f, 1.000000f, 1.000000f,
+	    1.000000f, -1.000000f, 1.000000f,
+	    1.000000f, -0.200000f, -0.200000f,
+	    1.000000f, 0.200000f, -0.200000f,
+	    1.000000f, -0.200000f, 0.200000f,
+	    1.000000f, 0.200000f, 0.200000f,
+	    1.000000f, 0.500000f, -0.500000f,
+	    1.000000f, -1.000000f, 0.000000f, // clang-format :-/
+	};
+
+	// the collapse we expect is 7 -> 0
+	unsigned int ib[] = {
+	    7, 4, 3,
+	    1, 2, 5,
+	    7, 1, 6,
+	    7, 8, 0, // gets removed
+	    7, 6, 4,
+	    8, 5, 2,
+	    8, 7, 3,
+	    8, 3, 5,
+	    5, 6, 1,
+	    7, 0, 1, // gets removed
+	};
+
+	unsigned int expected[] = {
+	    0, 4, 3,
+	    1, 2, 5,
+	    0, 1, 6,
+	    0, 6, 4,
+	    8, 5, 2,
+	    8, 0, 3,
+	    8, 3, 5,
+	    5, 6, 1, // clang-format :-/
+	};
+
+	assert(meshopt_simplify(ib, ib, 30, vb, 9, 12, 3, 1e-3f) == 24);
+	assert(memcmp(ib, expected, sizeof(expected)) == 0);
+}
+
+static void simplifyScale()
+{
+	const float vb[] = {0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3};
+
+	assert(meshopt_simplifyScale(vb, 4, 12) == 3.f);
 }
 
 static void runTestsOnce()
@@ -733,6 +834,7 @@ static void runTestsOnce()
 	decodeIndexRejectExtraBytes();
 	decodeIndexRejectMalformedHeaders();
 	decodeIndexRejectInvalidVersion();
+	decodeIndexMalformedVByte();
 	roundtripIndexTricky();
 	encodeIndexEmpty();
 
@@ -769,6 +871,8 @@ static void runTestsOnce()
 	simplifyStuck();
 	simplifySloppyStuck();
 	simplifyPointsStuck();
+	simplifyFlip();
+	simplifyScale();
 }
 
 namespace meshopt

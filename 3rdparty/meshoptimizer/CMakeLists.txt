@@ -9,16 +9,11 @@ if (NOT CMAKE_VERSION VERSION_LESS 3.15)
     cmake_policy(SET CMP0092 NEW) # Enables clean /W4 override for MSVC
 endif()
 
-project(meshoptimizer VERSION 0.14 LANGUAGES CXX)
+project(meshoptimizer VERSION 0.15 LANGUAGES CXX)
 
 option(MESHOPT_BUILD_DEMO "Build demo" OFF)
 option(MESHOPT_BUILD_GLTFPACK "Build gltfpack" OFF)
 option(MESHOPT_BUILD_SHARED_LIBS "Build shared libraries" OFF)
-
-# add_library() needs BUILD_SHARED_LIBS set to decide between static and
-# shared. This also sets it back to OFF in case parent project has
-# BUILD_SHARED_LIBS but wants MESHOPT_BUILD_SHARED_LIBS to be OFF.
-set(BUILD_SHARED_LIBS ${MESHOPT_BUILD_SHARED_LIBS})
 
 set(SOURCES
     src/meshoptimizer.h
@@ -61,7 +56,12 @@ else()
     add_compile_options(-Wall -Wextra -Wshadow -Wno-missing-field-initializers -Werror)
 endif()
 
-add_library(meshoptimizer ${SOURCES})
+if(MESHOPT_BUILD_SHARED_LIBS)
+    add_library(meshoptimizer SHARED ${SOURCES})
+else()
+    add_library(meshoptimizer STATIC ${SOURCES})
+endif()
+
 target_include_directories(meshoptimizer INTERFACE "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>")
 
 if(MESHOPT_BUILD_SHARED_LIBS)
@@ -79,7 +79,7 @@ endif()
 set(TARGETS meshoptimizer)
 
 if(MESHOPT_BUILD_DEMO)
-    add_executable(demo demo/main.cpp demo/miniz.cpp demo/tests.cpp tools/meshloader.cpp)
+    add_executable(demo demo/main.cpp demo/tests.cpp tools/meshloader.cpp)
     target_link_libraries(demo meshoptimizer)
 endif()
 

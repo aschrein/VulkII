@@ -45,7 +45,7 @@ float3 force(float b, float c, float3 v) {
   return b * v;
 }
 
-void heal(float3 &p) { ito(3) if (isnan(p[i]) || isinf(p[i]) || fabsf(p[i]) > 1.0e3f) p[i] = 0.0f; }
+void heal(float3 &p) { ito(3) if (isnan(p[i]) || isinf(p[i]) || fabsf(p[i]) > 1.0e1f) p[i] = 0.0f; }
 class RenderPass {
   public:
   static constexpr char const *NAME = "GBuffer Pass";
@@ -298,6 +298,50 @@ float4 main(in PSInput input) : SV_TARGET0 {
         rctx.frame_id++;
         // enable_fpe();
         // defer(disable_fpe());
+        if (rctx.frame_id == 1) {
+          rctx.scene->traverse([&](Node *node) {
+            if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
+              if (auto *sc = mn->getComponent<TopomeshComponent>()) {
+                ito(sc->get_num_meshes()) {
+                  Topo_Mesh *tm = sc->get_topo(i);
+                  for (int j = 0; j < (i32)tm->vertices.size; j++) {
+                    Topo_Mesh::Vertex &v = tm->vertices[j];
+                    v.pos /= mn->getAABB().max_dim() * 0.5f;
+                  }
+                  // Pin Seam vertices
+                  jto(tm->seam_edges.size) {
+                    u32                seam_id = tm->seam_edges[j];
+                    Topo_Mesh::Edge &  e       = tm->edges[seam_id];
+                    Topo_Mesh::Vertex &v0      = tm->vertices[e.origin];
+                    Topo_Mesh::Vertex &v1      = tm->vertices[e.end];
+                    if (length(v1.pos) > 1.0e-3f) {
+                      if (fabsf(v1.pos.x) > fabsf(v1.pos.z)) {
+                        // v1.pos = normalize(v1.pos);
+                        float ratio = v1.pos.z / v1.pos.x;
+                        // v1.pos.x    = (sign(v1.pos.x) * 1.001f) * 0.5f + 0.5f;
+                        v1.pos.x = sign(v1.pos.x) * 1.001f;
+                        v1.pos.z = v1.pos.x * ratio;
+                      } else {
+                        float ratio = v1.pos.x / v1.pos.z;
+                        v1.pos.z    = sign(v1.pos.z) * 1.001f;
+                        v1.pos.x    = v1.pos.z * ratio;
+                      }
+                      /*   v1.pos.x = (v1.pos.x * 1.001f) * 0.5f + 0.5f;
+                         v1.pos.z = (v1.pos.x * 1.001f) * 0.5f + 0.5f;*/
+                    }
+                    v1.bparam1 = true;
+                  }
+                  // Translate to 0..1 x 0..1 the usual uv space
+                  for (int j = 0; j < (i32)tm->vertices.size; j++) {
+                    Topo_Mesh::Vertex &v = tm->vertices[j];
+                    v.pos.x = v.pos.x * 0.5f + 0.5f;
+                    v.pos.z = v.pos.z * 0.5f + 0.5f;
+                  }
+                }
+              }
+            }
+          });
+        }
         rctx.scene->traverse([&](Node *node) {
           if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
             if (auto *sc = mn->getComponent<TopomeshComponent>()) {
@@ -318,56 +362,10 @@ float4 main(in PSInput input) : SV_TARGET0 {
                   if (!v.bparam1) v.pos += v.f3param0;
                   // if (length(v.pos) > 1.1f) v.pos = float3(0.0f, 0.0f, 0.0f);
                   v.f3param0 *= fric;
-                  v.pos.y         = 0.0f;
+                  v.pos.y = 0.0f;
+                  heal(v.pos);
                   tm->vertices[j] = v;
                 }
-                // Pin Seam vertices
-                jto(tm->seam_edges.size) {
-                  u32                seam_id = tm->seam_edges[j];
-                  Topo_Mesh::Edge &  e       = tm->edges[seam_id];
-                  Topo_Mesh::Vertex &v0      = tm->vertices[e.origin];
-                  Topo_Mesh::Vertex &v1      = tm->vertices[e.end];
-                  if (length(v1.pos) > 1.0e-3f) {
-                    if (fabsf(v1.pos.x) > fabsf(v1.pos.z)) {
-                      // v1.pos = normalize(v1.pos);
-                      float ratio = v1.pos.z / v1.pos.x;
-                      v1.pos.x    = sign(v1.pos.x);
-                      v1.pos.z    = v1.pos.x * ratio;
-                    } else {
-                      float ratio = v1.pos.x / v1.pos.z;
-                      v1.pos.z    = sign(v1.pos.z);
-                      v1.pos.x    = v1.pos.z * ratio;
-                    }
-                  }
-                  v1.bparam1 = true;
-                }
-                /* float         delta_phi = 2.0f * PI / (tm->seam_edges.size - 1);
-                 float         cur_phi   = 0.0f;
-                 Hash_Set<u32> visited_edges{};
-                 visited_edges.reserve(tm->seam_edges.size);
-                 defer(visited_edges.release());
-                 jto(tm->seam_edges.size) {
-                   u32 seam_id = tm->seam_edges[j];
-                   if (visited_edges.contains(seam_id)) continue;
-                   visited_edges.insert(seam_id);
-                   while (true) {
-                     Topo_Mesh::Edge &  e  = tm->edges[seam_id];
-                     Topo_Mesh::Vertex &v0 = tm->vertices[e.origin];
-                     Topo_Mesh::Vertex &v1 = tm->vertices[e.end];
-                     v1.pos                = float3(cosf(cur_phi), 0.0f, sinf(cur_phi));
-                     cur_phi += delta_phi;
-                     u32 next_seam_id = seam_id;
-                     kto(v1.edges.size) {
-                       Topo_Mesh::Edge &pe = tm->edges[v1.edges[k]];
-                       if (!pe.is_seam) continue;
-                       if (visited_edges.contains(v1.edges[k])) continue;
-                       next_seam_id = v1.edges[k];
-                       break;
-                     }
-                     if (next_seam_id == seam_id) break;
-                     seam_id = next_seam_id;
-                   }
-                 }*/
               }
             }
           }
@@ -640,7 +638,9 @@ class Event_Consumer : public IGUIApp {
  )
  )"));
     // rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/human_bust_sculpt/cut.gltf"));
-    rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/norradalur-froyar/scene.gltf"));
+    // rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/norradalur-froyar/scene.gltf"));
+    rctx.scene->load_mesh(stref_s("mesh"),
+                          stref_s("models/castle-ban-the-rhins-of-galloway/scene.gltf"));
     // rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/human_bust_sculpt/untitled.gltf"));
     // rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/light/scene.gltf"));
     rctx.scene->update();

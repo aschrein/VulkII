@@ -161,7 +161,7 @@ static const char* compressionFilter(StreamFormat::Filter filter)
 	}
 }
 
-static void writeTextureInfo(std::string& json, const cgltf_data* data, const cgltf_texture_view& view, const QuantizationTexture* qt)
+static void writeTextureInfo(std::string& json, const cgltf_data* data, const cgltf_texture_view& view, const QuantizationTexture* qt, const char* scale = NULL)
 {
 	assert(view.texture);
 
@@ -188,6 +188,13 @@ static void writeTextureInfo(std::string& json, const cgltf_data* data, const cg
 	append(json, size_t(view.texture - data->textures));
 	append(json, ",\"texCoord\":");
 	append(json, size_t(view.texcoord));
+	if (scale && view.scale != 1)
+	{
+		append(json, ",\"");
+		append(json, scale);
+		append(json, "\":");
+		append(json, view.scale);
+	}
 	if (view.has_transform || qt)
 	{
 		append(json, ",\"extensions\":{\"KHR_texture_transform\":{");
@@ -326,7 +333,7 @@ static void writeMaterialComponent(std::string& json, const cgltf_data* data, co
 	{
 		comma(json);
 		append(json, "\"clearcoatNormalTexture\":");
-		writeTextureInfo(json, data, cc.clearcoat_normal_texture, qt);
+		writeTextureInfo(json, data, cc.clearcoat_normal_texture, qt, "scale");
 	}
 	if (cc.clearcoat_factor != 0)
 	{
@@ -339,6 +346,103 @@ static void writeMaterialComponent(std::string& json, const cgltf_data* data, co
 		comma(json);
 		append(json, "\"clearcoatRoughnessFactor\":");
 		append(json, cc.clearcoat_roughness_factor);
+	}
+	append(json, "}");
+}
+
+static void writeMaterialComponent(std::string& json, const cgltf_data* data, const cgltf_transmission& tm, const QuantizationTexture* qt)
+{
+	comma(json);
+	append(json, "\"KHR_materials_transmission\":{");
+	if (tm.transmission_texture.texture)
+	{
+		comma(json);
+		append(json, "\"transmissionTexture\":");
+		writeTextureInfo(json, data, tm.transmission_texture, qt);
+	}
+	if (tm.transmission_factor != 0)
+	{
+		comma(json);
+		append(json, "\"transmissionFactor\":");
+		append(json, tm.transmission_factor);
+	}
+	append(json, "}");
+}
+
+static void writeMaterialComponent(std::string& json, const cgltf_data* data, const cgltf_ior& tm, const QuantizationTexture* qt)
+{
+	(void)data;
+	(void)qt;
+
+	comma(json);
+	append(json, "\"KHR_materials_ior\":{");
+	append(json, "\"ior\":");
+	append(json, tm.ior);
+	append(json, "}");
+}
+
+static void writeMaterialComponent(std::string& json, const cgltf_data* data, const cgltf_specular& tm, const QuantizationTexture* qt)
+{
+	comma(json);
+	append(json, "\"KHR_materials_specular\":{");
+	if (tm.specular_texture.texture)
+	{
+		comma(json);
+		append(json, "\"specularTexture\":");
+		writeTextureInfo(json, data, tm.specular_texture, qt);
+	}
+	if (memcmp(tm.specular_color_factor, white, 16) != 0)
+	{
+		comma(json);
+		append(json, "\"specularColorFactor\":[");
+		append(json, tm.specular_color_factor[0]);
+		append(json, ",");
+		append(json, tm.specular_color_factor[1]);
+		append(json, ",");
+		append(json, tm.specular_color_factor[2]);
+		append(json, "]");
+	}
+	if (tm.specular_factor != 1)
+	{
+		comma(json);
+		append(json, "\"specularFactor\":");
+		append(json, tm.specular_factor);
+	}
+	append(json, "}");
+}
+
+static void writeMaterialComponent(std::string& json, const cgltf_data* data, const cgltf_sheen& tm, const QuantizationTexture* qt)
+{
+	comma(json);
+	append(json, "\"KHR_materials_sheen\":{");
+	if (tm.sheen_color_texture.texture)
+	{
+		comma(json);
+		append(json, "\"sheenColorTexture\":");
+		writeTextureInfo(json, data, tm.sheen_color_texture, qt);
+	}
+	if (tm.sheen_roughness_texture.texture)
+	{
+		comma(json);
+		append(json, "\"sheenRoughnessTexture\":");
+		writeTextureInfo(json, data, tm.sheen_roughness_texture, qt);
+	}
+	if (memcmp(tm.sheen_color_factor, black, 12) != 0)
+	{
+		comma(json);
+		append(json, "\"sheenColorFactor\":[");
+		append(json, tm.sheen_color_factor[0]);
+		append(json, ",");
+		append(json, tm.sheen_color_factor[1]);
+		append(json, ",");
+		append(json, tm.sheen_color_factor[2]);
+		append(json, "]");
+	}
+	if (tm.sheen_roughness_factor != 0.f)
+	{
+		comma(json);
+		append(json, "\"sheenRoughnessFactor\":");
+		append(json, tm.sheen_roughness_factor);
 	}
 	append(json, "}");
 }
@@ -362,14 +466,14 @@ void writeMaterial(std::string& json, const cgltf_data* data, const cgltf_materi
 	{
 		comma(json);
 		append(json, "\"normalTexture\":");
-		writeTextureInfo(json, data, material.normal_texture, qt);
+		writeTextureInfo(json, data, material.normal_texture, qt, "scale");
 	}
 
 	if (material.occlusion_texture.texture)
 	{
 		comma(json);
 		append(json, "\"occlusionTexture\":");
-		writeTextureInfo(json, data, material.occlusion_texture, qt);
+		writeTextureInfo(json, data, material.occlusion_texture, qt, "strength");
 	}
 
 	if (material.emissive_texture.texture)
@@ -412,7 +516,7 @@ void writeMaterial(std::string& json, const cgltf_data* data, const cgltf_materi
 		append(json, "\"doubleSided\":true");
 	}
 
-	if (material.has_pbr_specular_glossiness || material.has_clearcoat || material.unlit)
+	if (material.has_pbr_specular_glossiness || material.has_clearcoat || material.has_transmission || material.has_ior || material.has_specular || material.has_sheen || material.unlit)
 	{
 		comma(json);
 		append(json, "\"extensions\":{");
@@ -425,6 +529,26 @@ void writeMaterial(std::string& json, const cgltf_data* data, const cgltf_materi
 		if (material.has_clearcoat)
 		{
 			writeMaterialComponent(json, data, material.clearcoat, qt);
+		}
+
+		if (material.has_transmission)
+		{
+			writeMaterialComponent(json, data, material.transmission, qt);
+		}
+
+		if (material.has_ior)
+		{
+			writeMaterialComponent(json, data, material.ior, qt);
+		}
+
+		if (material.has_specular)
+		{
+			writeMaterialComponent(json, data, material.specular, qt);
+		}
+
+		if (material.has_sheen)
+		{
+			writeMaterialComponent(json, data, material.sheen, qt);
 		}
 
 		if (material.unlit)
@@ -646,22 +770,25 @@ void writeImage(std::string& json, std::vector<BufferView>& views, const cgltf_i
 	if (image.mime_type)
 		mime_type = image.mime_type;
 
+	bool (*encodeImage)(const std::string& data, const char* mime_type, std::string& result, bool normal_map, bool srgb, int quality, float scale, bool pow2, bool uastc, bool verbose) =
+	    settings.texture_toktx ? encodeKtx : encodeBasis;
+
 	if (!img_data.empty())
 	{
-		if (settings.texture_basis)
+		if (settings.texture_ktx2)
 		{
 			std::string encoded;
 
-			if (encodeBasis(img_data, mime_type.c_str(), encoded, info.normal_map, info.srgb, settings.texture_quality, settings.texture_uastc, settings.verbose > 1))
+			if (encodeImage(img_data, mime_type.c_str(), encoded, info.normal_map, info.srgb, settings.texture_quality, settings.texture_scale, settings.texture_pow2, settings.texture_uastc, settings.verbose > 1))
 			{
-				if (settings.texture_ktx2)
+				if (!settings.texture_toktx)
 					encoded = basisToKtx(encoded, info.srgb, settings.texture_uastc);
 
 				writeEmbeddedImage(json, views, encoded.c_str(), encoded.size(), settings.texture_ktx2 ? "image/ktx2" : "image/basis");
 			}
 			else
 			{
-				fprintf(stderr, "Warning: unable to encode image %d with Basis, skipping\n", int(index));
+				fprintf(stderr, "Warning: unable to encode image %d, skipping\n", int(index));
 			}
 		}
 		else
@@ -671,7 +798,7 @@ void writeImage(std::string& json, std::vector<BufferView>& views, const cgltf_i
 	}
 	else if (image.uri)
 	{
-		if (settings.texture_basis)
+		if (settings.texture_ktx2)
 		{
 			std::string full_path = getFullPath(decodeUri(image.uri).c_str(), input_path);
 			std::string basis_uri = getFileName(image.uri) + (settings.texture_ktx2 ? ".ktx2" : ".basis");
@@ -681,9 +808,9 @@ void writeImage(std::string& json, std::vector<BufferView>& views, const cgltf_i
 			{
 				std::string encoded;
 
-				if (encodeBasis(img_data, mime_type.c_str(), encoded, info.normal_map, info.srgb, settings.texture_quality, settings.texture_uastc, settings.verbose > 1))
+				if (encodeImage(img_data, mime_type.c_str(), encoded, info.normal_map, info.srgb, settings.texture_quality, settings.texture_scale, settings.texture_pow2, settings.texture_uastc, settings.verbose > 1))
 				{
-					if (settings.texture_ktx2)
+					if (!settings.texture_toktx)
 						encoded = basisToKtx(encoded, info.srgb, settings.texture_uastc);
 
 					if (writeFile(basis_full_path.c_str(), encoded))
@@ -694,12 +821,12 @@ void writeImage(std::string& json, std::vector<BufferView>& views, const cgltf_i
 					}
 					else
 					{
-						fprintf(stderr, "Warning: unable to save Basis image %s, skipping\n", image.uri);
+						fprintf(stderr, "Warning: unable to save encoded image %s, skipping\n", image.uri);
 					}
 				}
 				else
 				{
-					fprintf(stderr, "Warning: unable to encode image %s with Basis, skipping\n", image.uri);
+					fprintf(stderr, "Warning: unable to encode image %s, skipping\n", image.uri);
 				}
 			}
 			else
@@ -804,12 +931,12 @@ size_t writeMeshIndices(std::vector<BufferView>& views, std::string& json_access
 	return index_accr;
 }
 
-static size_t writeAnimationTime(std::vector<BufferView>& views, std::string& json_accessors, size_t& accr_offset, float mint, int frames, const Settings& settings)
+static size_t writeAnimationTime(std::vector<BufferView>& views, std::string& json_accessors, size_t& accr_offset, float mint, int frames, float period, const Settings& settings)
 {
 	std::vector<float> time(frames);
 
 	for (int j = 0; j < frames; ++j)
-		time[j] = mint + float(j) / settings.anim_freq;
+		time[j] = mint + float(j) * period;
 
 	std::string scratch;
 	StreamFormat format = writeTimeStream(scratch, time);
@@ -1125,7 +1252,10 @@ void writeAnimation(std::string& json, std::vector<BufferView>& views, std::stri
 
 	if (tracks.empty())
 	{
-		fprintf(stderr, "Warning: ignoring animation %d because it has no valid tracks\n", int(i));
+		char index[16];
+		sprintf(index, "%d", int(i));
+
+		fprintf(stderr, "Warning: ignoring animation %s because it has no tracks with motion; use -ac to override\n", animation.name && *animation.name ? animation.name : index);
 		return;
 	}
 
@@ -1136,14 +1266,25 @@ void writeAnimation(std::string& json, std::vector<BufferView>& views, std::stri
 	{
 		const Track& track = *tracks[j];
 
-		bool tc = track.data.size() == track.components;
+		assert(track.time.empty());
+		assert(track.data.size() == track.components * (track.constant ? 1 : animation.frames));
 
-		needs_time = needs_time || !tc;
-		needs_pose = needs_pose || tc;
+		needs_time = needs_time || !track.constant;
+		needs_pose = needs_pose || track.constant;
 	}
 
-	size_t time_accr = needs_time ? writeAnimationTime(views, json_accessors, accr_offset, animation.start, animation.frames, settings) : 0;
-	size_t pose_accr = needs_pose ? writeAnimationTime(views, json_accessors, accr_offset, animation.start, 1, settings) : 0;
+	bool needs_range = needs_pose && !needs_time && animation.frames > 1;
+
+	needs_pose = needs_pose && !(needs_range && tracks.size() == 1);
+
+	assert(int(needs_time) + int(needs_pose) + int(needs_range) <= 2);
+
+	float animation_period = 1.f / float(settings.anim_freq);
+	float animation_length = float(animation.frames - 1) * animation_period;
+
+	size_t time_accr = needs_time ? writeAnimationTime(views, json_accessors, accr_offset, animation.start, animation.frames, animation_period, settings) : 0;
+	size_t pose_accr = needs_pose ? writeAnimationTime(views, json_accessors, accr_offset, animation.start, 1, 0.f, settings) : 0;
+	size_t range_accr = needs_range ? writeAnimationTime(views, json_accessors, accr_offset, animation.start, 2, animation_length, settings) : 0;
 
 	std::string json_samplers;
 	std::string json_channels;
@@ -1154,10 +1295,18 @@ void writeAnimation(std::string& json, std::vector<BufferView>& views, std::stri
 	{
 		const Track& track = *tracks[j];
 
-		bool tc = track.data.size() == track.components;
+		bool range = needs_range && j == 0;
+		int range_size = range ? 2 : 1;
 
 		std::string scratch;
 		StreamFormat format = writeKeyframeStream(scratch, track.path, track.data, settings);
+
+		if (range)
+		{
+			assert(range_size == 2);
+			scratch += scratch;
+		}
+
 		BufferView::Compression compression = settings.compress && track.path != cgltf_animation_path_type_weights ? BufferView::Compression_Attribute : BufferView::Compression_None;
 
 		size_t view = getBufferView(views, BufferView::Kind_Keyframe, format.filter, compression, format.stride, track.path);
@@ -1165,13 +1314,13 @@ void writeAnimation(std::string& json, std::vector<BufferView>& views, std::stri
 		views[view].data += scratch;
 
 		comma(json_accessors);
-		writeAccessor(json_accessors, view, offset, format.type, format.component_type, format.normalized, track.data.size());
+		writeAccessor(json_accessors, view, offset, format.type, format.component_type, format.normalized, track.data.size() * range_size);
 
 		size_t data_accr = accr_offset++;
 
 		comma(json_samplers);
 		append(json_samplers, "{\"input\":");
-		append(json_samplers, tc ? pose_accr : time_accr);
+		append(json_samplers, range ? range_accr : track.constant ? pose_accr : time_accr);
 		append(json_samplers, ",\"output\":");
 		append(json_samplers, data_accr);
 		append(json_samplers, "}");
@@ -1366,4 +1515,24 @@ void writeExtras(std::string& json, const std::string& data, const cgltf_extras&
 	comma(json);
 	append(json, "\"extras\":");
 	appendJson(json, data.c_str() + extras.start_offset, data.c_str() + extras.end_offset);
+}
+
+void writeScene(std::string& json, const cgltf_scene& scene, const std::string& roots)
+{
+	comma(json);
+	append(json, "{");
+	if (scene.name && *scene.name)
+	{
+		append(json, "\"name\":\"");
+		append(json, scene.name);
+		append(json, "\"");
+	}
+	if (!roots.empty())
+	{
+		comma(json);
+		append(json, "\"nodes\":[");
+		append(json, roots);
+		append(json, "]");
+	}
+	append(json, "}");
 }

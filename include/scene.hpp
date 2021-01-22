@@ -607,40 +607,60 @@ struct PBR_Material {
 struct Attribute {
   rd::Attriute_t type;
   rd::Format     format;
-  u32            offset;
-  u32            stride;
-  u32            size;
+  size_t         offset;
+  size_t         stride;
+  size_t         size;
 };
-
-// Copy pasted from meshoptimizer
 
 struct Meshlet {
   u32 vertex_offset;
   u32 index_offset;
-  u32 triangle_count;
+  u32 index_count;
   u32 vertex_count;
-  // (x, y, z, radius)
-  float4 sphere;
-  // (x, y, z, _)
-  float4 cone_apex;
-  // (x, y, z, cutoff)
-  float4 cone_axis_cutoff;
-  union {
-    struct {
-      i8 cone_axis_s8[3];
-      i8 cone_cutoff_s8;
-    };
-    u32 cone_pack;
-  };
+  //// (x, y, z, radius)
+  // float4 sphere;
+  //// (x, y, z, _)
+  // float4 cone_apex;
+  //// (x, y, z, cutoff)
+  // float4 cone_axis_cutoff;
+  // union {
+  //  struct {
+  //    i8 cone_axis_s8[3];
+  //    i8 cone_cutoff_s8;
+  //  };
+  //  u32 cone_pack;
+  //};
 };
 
-struct Raw_Meshlets_Opaque {
-  Array<u8>                  attribute_data;
-  Array<u8>                  index_data;
-  Array<Meshlet>             meshlets;
+class Raw_Meshlets_Opaque {
+  private:
+  ~Raw_Meshlets_Opaque() = default;
+
+  public:
+  Raw_Meshlets_Opaque() { MEMZERO(*this); }
+
+  Array<u8>      attribute_data;
+  Array<u8>      index_data;
+  Array<Meshlet> meshlets;
+  // Array<u32>                 meshlet_vertices;
   InlineArray<Attribute, 16> attributes;
   u32                        num_vertices;
-  u32                        num_indices;
+  // u32                        num_indices;
+  float3 &fetch_position(u32 index) const {
+    ito(attributes.size) {
+      switch (attributes[i].type) {
+
+      case rd::Attriute_t ::POSITION:
+        ASSERT_PANIC(attributes[i].format == rd::Format::RGB32_FLOAT);
+        // float3 pos;
+        // memcpy(&pos, attribute_data.at(index * attributes[i].stride + attributes[i].offset), 12);
+        // return pos;
+        return *(float3 *)attribute_data.at(index * attributes[i].stride + attributes[i].offset);
+      default: break;
+      }
+    }
+    TRAP;
+  }
   u32  get_attribute_size(u32 index) const { return attributes[index].size * num_vertices; }
   void init() {
     MEMZERO(*this);
@@ -648,12 +668,15 @@ struct Raw_Meshlets_Opaque {
     attribute_data.init();
     meshlets.init();
     index_data.init();
+    // meshlet_vertices.init();
   }
   void release() {
     attributes.release();
     attribute_data.release();
     meshlets.release();
     index_data.release();
+    // meshlet_vertices.release();
+    delete this;
   }
 };
 
@@ -787,16 +810,17 @@ struct Raw_Mesh_Opaque {
     return &attribute_data[attributes[attrib_index].offset +
                            attributes[attrib_index].stride * vertex_index];
   }
-  u32    get_attribute_size(u32 index) const { return attributes[index].size * num_vertices; }
-  float3 fetch_position(u32 index) const {
+  u32     get_attribute_size(u32 index) const { return attributes[index].size * num_vertices; }
+  float3 &fetch_position(u32 index) const {
     ito(attributes.size) {
       switch (attributes[i].type) {
 
       case rd::Attriute_t ::POSITION:
         ASSERT_PANIC(attributes[i].format == rd::Format::RGB32_FLOAT);
-        float3 pos;
-        memcpy(&pos, attribute_data.at(index * attributes[i].stride + attributes[i].offset), 12);
-        return pos;
+        // float3 pos;
+        // memcpy(&pos, attribute_data.at(index * attributes[i].stride + attributes[i].offset), 12);
+        // return pos;
+        return *(float3 *)attribute_data.at(index * attributes[i].stride + attributes[i].offset);
       default: break;
       }
     }
@@ -958,6 +982,8 @@ struct AABB {
     float3 dr = max - min;
     return 2.0f * (dr.x * dr.y + dr.x * dr.z + dr.y * dr.z);
   }
+
+  float max_dim() { return fmaxf(max.x - min.x, fmaxf(max.y - min.y, (max.z - min.z))); }
 
   void init(float3 p) {
     min = p;
@@ -1696,20 +1722,20 @@ class Embree_BVH_Builder {
 } // namespace bvh
 #endif
 
-struct GPU_Meshlet {
-  u32 vertex_offset;
-  u32 index_offset;
-  u32 triangle_count;
-  u32 vertex_count;
-  // (x, y, z, radius)
-  float4 sphere;
-  // (x, y, z, _)
-  float4 cone_apex;
-  // (x, y, z, cutoff)
-  float4 cone_axis_cutoff;
-  u32    cone_pack;
-};
-static_assert(sizeof(GPU_Meshlet) == 68, "Packing error");
+// struct GPU_Meshlet {
+//  u32 vertex_offset;
+//  u32 index_offset;
+//  u32 triangle_count;
+//  u32 vertex_count;
+//  // (x, y, z, radius)
+//  float4 sphere;
+//  // (x, y, z, _)
+//  float4 cone_apex;
+//  // (x, y, z, cutoff)
+//  float4 cone_axis_cutoff;
+//  u32    cone_pack;
+//};
+// static_assert(sizeof(GPU_Meshlet) == 68, "Packing error");
 
 struct Ray {
   float3 o, d;
@@ -2123,12 +2149,13 @@ class ISceneFactory {
   virtual u32       add_image(Image2D *img)                               = 0;
 };
 
-Node *              load_gltf_pbr(ISceneFactory *factory, string_ref filename);
-Raw_Mesh_Opaque     optimize_mesh(Raw_Mesh_Opaque const &opaque_mesh);
-Raw_Mesh_Opaque     simplify_mesh(Raw_Mesh_Opaque const &opaque_mesh);
-Raw_Meshlets_Opaque build_meshlets(Raw_Mesh_Opaque &opaque_mesh);
-void                save_image(string_ref filename, Image2D const *image);
-Image2D *           load_image(string_ref filename, rd::Format format = rd::Format::RGBA8_SRGBA);
+Node *               load_gltf_pbr(ISceneFactory *factory, string_ref filename);
+Raw_Mesh_Opaque      optimize_mesh(Raw_Mesh_Opaque const &opaque_mesh);
+Raw_Mesh_Opaque      simplify_mesh(Raw_Mesh_Opaque const &opaque_mesh);
+Raw_Meshlets_Opaque *build_meshlets(Raw_Mesh_Opaque &opaque_mesh, size_t max_vertices = 64,
+                                    size_t max_triangles = 124, float cone_weight = 0.5f);
+void                 save_image(string_ref filename, Image2D const *image);
+Image2D *            load_image(string_ref filename, rd::Format format = rd::Format::RGBA8_SRGBA);
 
 class Asset_Manager {
   Array<Image2D *> images;
@@ -2407,20 +2434,13 @@ class GfxSurface {
 };
 
 class GfxSufraceComponent : public Node::Component {
-  Array<GfxSurface *> gfx_surfaces;
-#ifdef VULKII_EMBREE
-  bvh::Embree_BVH_Builder::BVH_Result bvh{};
-#endif
+  Array<GfxSurface *> gfx_surfaces{};
+
   public:
   DECLARE_TYPE(GfxSufraceComponent, Component)
-#ifdef VULKII_EMBREE
-  bvh::Node *getBVH() { return bvh.root; }
-#else
-  bvh::Node *getBVH() { return NULL; }
-#endif
 
   ~GfxSufraceComponent() override {}
-  GfxSufraceComponent(Node *n) : Component(n) { gfx_surfaces.init(); }
+  GfxSufraceComponent(Node *n) : Component(n) {}
   static GfxSufraceComponent *create(rd::IDevice *factory, Node *n) {
     ASSERT_DEBUG(n->isa<MeshNode>());
     GfxSufraceComponent *s  = new GfxSufraceComponent(n);
@@ -2431,39 +2451,285 @@ class GfxSufraceComponent : public Node::Component {
     n->addComponent(s);
     return s;
   }
-  void buildBVH() {
-#ifdef VULKII_EMBREE
-    bvh.release();
-    static bvh::Embree_BVH_Builder *bvh_builder = bvh::Embree_BVH_Builder::create();
-    // defer(bvh_builder->release());
-    AutoArray<Triangle> triangles{};
-    if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
-      ito(mn->getNumSurfaces()) {
-        Surface *s = mn->getSurface(i);
-        triangles.reserve(s->mesh.num_indices / 3);
-        jto(s->mesh.num_indices / 3) {
-          Triangle_Full ftri = s->mesh.fetch_triangle(j);
-          Triangle      t{};
-          t.a           = node->transform(ftri.v0.position);
-          t.b           = node->transform(ftri.v1.position);
-          t.c           = node->transform(ftri.v2.position);
-          t.surface_id  = i;
-          t.triangle_id = j;
-          triangles.push(t);
-        }
-      }
-    }
-    bvh = bvh_builder->build(&triangles[0], triangles.size);
-#endif
-  }
   u32         getNumSurfaces() { return (u32)gfx_surfaces.size; }
   GfxSurface *getSurface(u32 i) { return gfx_surfaces[i]; }
   void        release() override {
     ito(gfx_surfaces.size) gfx_surfaces[i]->release();
     gfx_surfaces.release();
+    Component::release();
+  }
+};
+
+class BVHSufraceComponent : public Node::Component {
+#ifdef VULKII_EMBREE
+  bvh::Embree_BVH_Builder::BVH_Result bvh{};
+#endif
+  public:
+  DECLARE_TYPE(BVHSufraceComponent, Component)
+#ifdef VULKII_EMBREE
+  bvh::Node *getBVH() { return bvh.root; }
+#else
+  bvh::Node *getBVH() { return NULL; }
+#endif
+
+  ~BVHSufraceComponent() override {}
+  BVHSufraceComponent(Node *n) : Component(n) {}
+  static BVHSufraceComponent *create(Node *n) {
+    ASSERT_DEBUG(n->isa<MeshNode>());
+    BVHSufraceComponent *s  = new BVHSufraceComponent(n);
+    MeshNode *           mn = n->dyn_cast<MeshNode>();
+    n->addComponent(s);
+    s->updateBVH();
+    return s;
+  }
+  void updateBVH() {
+#ifdef VULKII_EMBREE
+    if (bvh.root) bvh.release();
+    static bvh::Embree_BVH_Builder *bvh_builder = bvh::Embree_BVH_Builder::create();
+    AutoArray<Triangle>             triangles{};
+    MeshNode *                      mn = node->dyn_cast<MeshNode>();
+    ASSERT_DEBUG(mn);
+    ito(mn->getNumSurfaces()) {
+      Surface *s = mn->getSurface(i);
+      triangles.reserve(s->mesh.num_indices / 3);
+      jto(s->mesh.num_indices / 3) {
+        Triangle_Full ftri = s->mesh.fetch_triangle(j);
+        Triangle      t{};
+        t.a           = mn->transform(ftri.v0.position);
+        t.b           = mn->transform(ftri.v1.position);
+        t.c           = mn->transform(ftri.v2.position);
+        t.surface_id  = i;
+        t.triangle_id = j;
+        triangles.push(t);
+      }
+    }
+    bvh = bvh_builder->build(&triangles[0], triangles.size);
+#endif
+  }
+  void release() override {
 #ifdef VULKII_EMBREE
     bvh.release();
 #endif
+    Component::release();
+  }
+};
+
+#if 1
+
+class GfxMeshletSurface {
+  rd::IDevice *        factory  = NULL;
+  Raw_Meshlets_Opaque *meshlets = NULL;
+
+  public:
+  InlineArray<size_t, 16>    attribute_offsets{};
+  InlineArray<size_t, 16>    attribute_sizes{};
+  InlineArray<Attribute, 16> attributes{};
+
+  size_t total_memory_needed = 0;
+  u32    total_indices       = 0;
+  size_t index_offset        = 0;
+
+  Resource_ID buffer{};
+
+  private:
+  void init(rd::IDevice *factory, Raw_Meshlets_Opaque *meshlets) {
+    MEMZERO(*this);
+    this->factory       = factory;
+    this->meshlets      = meshlets;
+    total_memory_needed = 0;
+    total_indices       = 0;
+    index_offset        = 0;
+    attribute_offsets.init();
+    attribute_sizes.init();
+    attributes.init();
+
+    rd::Buffer_Create_Info info;
+    MEMZERO(info);
+    info.memory_type = rd::Memory_Type::GPU_LOCAL;
+    info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_VERTEX_BUFFER |
+                      (u32)rd::Buffer_Usage_Bits::USAGE_INDEX_BUFFER |
+                      (u32)rd::Buffer_Usage_Bits::USAGE_UAV |
+                      (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
+    info.size = (u32)get_needed_memory();
+    buffer    = factory->create_buffer(info);
+
+    MEMZERO(info);
+    info.memory_type          = rd::Memory_Type::CPU_WRITE_GPU_READ;
+    info.usage_bits           = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC;
+    info.size                 = (u32)get_needed_memory();
+    Resource_ID stagin_buffer = factory->create_buffer(info);
+    defer(factory->release_resource(stagin_buffer));
+
+    InlineArray<size_t, 16> attribute_cursors;
+    MEMZERO(attribute_cursors);
+    size_t indices_offset = 0;
+    void * ptr            = factory->map_buffer(stagin_buffer);
+    jto(meshlets->attributes.size) {
+      Attribute attribute      = meshlets->attributes[j];
+      size_t    attribute_size = meshlets->get_attribute_size(j);
+      memcpy((u8 *)ptr + attribute_offsets[j] + attribute_cursors[j],
+             &meshlets->attribute_data[0] + attribute.offset, attribute_size);
+      attribute_cursors[j] += attribute_size;
+    }
+    size_t index_size = sizeof(u8) * meshlets->index_data.size;
+    memcpy((u8 *)ptr + index_offset + indices_offset, &meshlets->index_data[0], index_size);
+    indices_offset += index_size;
+    factory->unmap_buffer(stagin_buffer);
+    auto *ctx = factory->start_compute_pass();
+    ctx->copy_buffer(stagin_buffer, 0, buffer, 0, (u32)get_needed_memory());
+    factory->end_compute_pass(ctx);
+    total_indices += meshlets->index_data.size;
+  }
+  size_t get_needed_memory() {
+    if (total_memory_needed == 0) {
+      ito(meshlets->attributes.size) {
+        attributes.push(meshlets->attributes[i]);
+        attribute_offsets.push(0);
+        attribute_sizes.push(0);
+      }
+      jto(meshlets->attributes.size) { attribute_sizes[j] += meshlets->get_attribute_size(j); }
+
+      ito(attributes.size) {
+        jto(i) { attribute_offsets[i] += attribute_sizes[j]; }
+        attribute_offsets[i] = rd::IDevice::align_up(attribute_offsets[i]);
+        total_memory_needed  = attribute_offsets[i] + attribute_sizes[i];
+      }
+      total_memory_needed =
+          rd::IDevice::align_up(total_memory_needed, rd::IDevice::BUFFER_ALIGNMENT);
+      index_offset = total_memory_needed;
+      total_memory_needed += sizeof(u8) * meshlets->index_data.size;
+    }
+    return total_memory_needed;
+  }
+
+  u32 get_num_indices() { return total_indices; }
+
+  public:
+  size_t get_attribute_offset(rd::Attriute_t type) {
+    ito(attributes.size) {
+      if (attributes[i].type == type) {
+        return attribute_offsets[i];
+      }
+    }
+    TRAP;
+  }
+  size_t get_attribute_stride(rd::Attriute_t type) {
+    ito(attributes.size) {
+      if (attributes[i].type == type) {
+        return attributes[i].stride;
+      }
+    }
+    TRAP;
+  }
+  size_t                    get_index_offset() { return index_offset; }
+  static GfxMeshletSurface *create(rd::IDevice *factory, Raw_Meshlets_Opaque *meshlets) {
+    GfxMeshletSurface *out = new GfxMeshletSurface;
+    out->init(factory, meshlets);
+    return out;
+  }
+  void release() {
+    factory->release_resource(buffer);
+    delete this;
+  }
+  void setup_attributes(rd::Graphics_Pipeline_State &state, u32 *attribute_to_location) {
+    ito(attributes.size) {
+      Attribute attr = attributes[i];
+      state.IA_set_vertex_binding(i, attr.stride, rd::Input_Rate::VERTEX);
+      rd::Attribute_Info info;
+      MEMZERO(info);
+      info.binding  = i;
+      info.format   = attr.format;
+      info.location = attribute_to_location[(u32)attr.type];
+      info.offset   = 0;
+      info.type     = attr.type;
+      state.IA_set_attribute(info);
+    }
+  }
+  void bind_uav_buffer(rd::IBinding_Table *table, u32 set, u32 binding) {
+    table->bind_UAV_buffer(set, binding, buffer, 0, 0);
+  }
+  template <typename F> void iterate(F f) {
+    /* jto(gfx_state.num_attributes) {
+       ito(attributes.size) {
+         if (gfx_state.attributes[j].type == attributes[i].type) {
+           ctx->bind_vertex_buffer(gfx_state.attributes[j].binding, buffer, attribute_offsets[i]);
+         }
+       }
+     }
+     ctx->bind_index_buffer(buffer, index_offset, index_type);*/
+    ito(meshlets->meshlets.size) { f(meshlets[i]); }
+    // u32 vertex_cursor = 0;
+    // u32 index_cursor  = 0;
+    // ctx->draw_indexed(surface->mesh.num_indices, 1, index_cursor, 0, vertex_cursor);
+    // index_cursor += surface->mesh.num_indices;
+    // vertex_cursor += surface->mesh.num_vertices;
+  }
+};
+#endif // 0
+
+class MeshletSufraceComponent : public Node::Component {
+  Array<Raw_Meshlets_Opaque *> meshlets{};
+
+  public:
+  DECLARE_TYPE(MeshletSufraceComponent, Component)
+
+  ~MeshletSufraceComponent() override {}
+  MeshletSufraceComponent(Node *n) : Component(n) {}
+  static MeshletSufraceComponent *create(Node *n, size_t max_vertices = 64,
+                                         size_t max_triangles = 124, float cone_weight = 0.5f) {
+    ASSERT_DEBUG(n->isa<MeshNode>());
+    MeshletSufraceComponent *s  = new MeshletSufraceComponent(n);
+    MeshNode *               mn = n->dyn_cast<MeshNode>();
+    ito(mn->getNumSurfaces()) {
+      Surface *sf       = mn->getSurface(i);
+      auto     meshlets = build_meshlets(sf->mesh, max_vertices, max_triangles, cone_weight);
+      s->meshlets.push(meshlets);
+    }
+    n->addComponent(s);
+    return s;
+  }
+  Raw_Meshlets_Opaque *get_meshlets(u32 i) {
+    if (i >= meshlets.size) return NULL;
+    return meshlets[i];
+  }
+
+  void release() override {
+    ito(meshlets.size) meshlets[i]->release();
+    meshlets.release();
+    Component::release();
+  }
+};
+
+class GfxMeshletSufraceComponent : public Node::Component {
+  Array<GfxMeshletSurface *> gfx_meshlets{};
+
+  public:
+  DECLARE_TYPE(GfxMeshletSufraceComponent, Component)
+
+  ~GfxMeshletSufraceComponent() override {}
+  GfxMeshletSufraceComponent(Node *n) : Component(n) {}
+  static GfxMeshletSufraceComponent *create(rd::IDevice *factory, Node *n) {
+    ASSERT_DEBUG(n->isa<MeshNode>());
+    GfxMeshletSufraceComponent *s   = new GfxMeshletSufraceComponent(n);
+    MeshNode *                  mn  = n->dyn_cast<MeshNode>();
+    MeshletSufraceComponent *   msc = n->getComponent<MeshletSufraceComponent>();
+    ASSERT_DEBUG(msc);
+    ito(mn->getNumSurfaces()) {
+      Surface *sf       = mn->getSurface(i);
+      auto     meshlets = msc->get_meshlets(i);
+      s->gfx_meshlets.push(GfxMeshletSurface::create(factory, meshlets));
+    }
+    n->addComponent(s);
+    return s;
+  }
+  GfxMeshletSurface *get_meshlets(u32 i) {
+    if (i >= gfx_meshlets.size) return NULL;
+    return gfx_meshlets[i];
+  }
+
+  void release() override {
+    ito(gfx_meshlets.size) gfx_meshlets[i]->release();
+    gfx_meshlets.release();
     Component::release();
   }
 };

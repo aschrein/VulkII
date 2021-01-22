@@ -555,10 +555,10 @@ class GIComputeGBufferPass {
 
     Resource_ID cs{};
     pso = dev->create_compute_pso(
-        signature,
-        cs = dev->create_shader(
-            rd::Stage_t::COMPUTE,
-            read_file_tmp_stref("examples/shaders/gi_compute_rasterization.hlsl"), NULL, 0));
+        signature, cs = dev->create_shader(
+                       rd::Stage_t::COMPUTE,
+                       read_file_tmp_stref("examples/shaders/gi_compute_rasterization.hlsl"), NULL,
+                       0, stref_s("main_tri_per_lane")));
     dev->release_resource(cs);
 
     indirect_args_buffer = [&] {
@@ -605,9 +605,9 @@ struct PushConstants {
   if (args.dimx == 0) {
     args.dimx = 1;
   } else if (cnt > pc.max_triangle_size) {
-    args.dimx = args.dimx * 2;
+    args.dimx = args.dimx + 1;
   } else if (cnt < pc.min_triangle_size) {
-    args.dimx = args.dimx / 2;
+    args.dimx = args.dimx - 1;
   }
   args.dimx = max(pc.min_resolution, min(pc.max_resolution, args.dimx));
   args.dimy = args.dimx;
@@ -1333,18 +1333,35 @@ float4 main(in PSInput input) : SV_TARGET0 {
       table->push_constants(&viewproj, 0, sizeof(float4x4));
       ctx->bind_table(table);
       ctx->bind_graphics_pso(pso);
-      rctx.scene->traverse([&](Node *node) {
-        if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
-          GfxSufraceComponent *gs    = mn->getComponent<GfxSufraceComponent>();
-          float4x4             world = mn->get_transform();
-          pc.world_transform         = world;
-          table->push_constants(&pc, 0, sizeof(pc));
-          ito(gs->getNumSurfaces()) {
-            GfxSurface *s = gs->getSurface(i);
-            s->draw(ctx, gfx_state);
+
+      if (rctx.config->get_bool("ras.render_meshlets")) {
+        rctx.scene->traverse([&](Node *node) {
+          if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
+            if (auto *sc = mn->getComponent<GfxMeshletSufraceComponent>()) {
+              ito(mn->getNumSurfaces()) {
+                GfxMeshletSurface *gfx_meshlets = sc->get_meshlets(i);
+                gfx_meshlets->iterate([](Meshlet const &meshlet) {
+
+                });
+              }
+            }
           }
-        }
-      });
+        });
+      }
+      if (rctx.config->get_bool("ras.render_geometry")) {
+        rctx.scene->traverse([&](Node *node) {
+          if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
+            GfxSufraceComponent *gs    = mn->getComponent<GfxSufraceComponent>();
+            float4x4             world = mn->get_transform();
+            pc.world_transform         = world;
+            table->push_constants(&pc, 0, sizeof(pc));
+            ito(gs->getNumSurfaces()) {
+              GfxSurface *s = gs->getSurface(i);
+              s->draw(ctx, gfx_state);
+            }
+          }
+        });
+      }
       ctx->end_render_pass();
       timestamps.end_range(ctx);
     }
@@ -1486,14 +1503,62 @@ class GizmoPass {
                                            float3(1.0f, 0.0f, 0.0f));
         });
       }
+      if (rctx.config->get_bool("gizmo.render_meshlets")) {
+        ///////////////
+        // [WARNING] //
+        ///////////////
+        // Edge reference count
+        static thread_local u8 ref_cnt[1 << 20]{};
+        ///////////////
+        rctx.scene->traverse([&](Node *node) {
+          if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
+            if (auto *sc = mn->getComponent<MeshletSufraceComponent>()) {
+              ito(mn->getNumSurfaces()) {
+                Raw_Meshlets_Opaque *meshlets = sc->get_meshlets(i);
+                jto(meshlets->meshlets.size) {
+                  Meshlet &m = meshlets->meshlets[j];
+                  ASSERT_DEBUG(sizeof(ref_cnt) > sizeof(u8) * m.index_count * m.index_count);
+                  memset(ref_cnt, 0, sizeof(u8) * m.index_count * m.index_count);
+                  kto(m.index_count / 3) {
+                    u32 i0 = meshlets->index_data[m.index_offset + k * 3 + 0];
+                    u32 i1 = meshlets->index_data[m.index_offset + k * 3 + 1];
+                    u32 i2 = meshlets->index_data[m.index_offset + k * 3 + 2];
+                    ref_cnt[i0 * m.index_count + i1]++;
+                    ref_cnt[i1 * m.index_count + i0]++;
+
+                    ref_cnt[i1 * m.index_count + i2]++;
+                    ref_cnt[i2 * m.index_count + i1]++;
+
+                    ref_cnt[i2 * m.index_count + i0]++;
+                    ref_cnt[i0 * m.index_count + i2]++;
+                  }
+                  kto(m.index_count / 3) {
+                    u32    i0    = meshlets->index_data[m.index_offset + k * 3 + 0];
+                    u32    i1    = meshlets->index_data[m.index_offset + k * 3 + 1];
+                    u32    i2    = meshlets->index_data[m.index_offset + k * 3 + 2];
+                    i32    refs0 = ref_cnt[i0 * m.index_count + i1];
+                    i32    refs1 = ref_cnt[i1 * m.index_count + i2];
+                    i32    refs2 = ref_cnt[i2 * m.index_count + i0];
+                    float3 p0    = meshlets->fetch_position(m.vertex_offset + i0);
+                    float3 p1    = meshlets->fetch_position(m.vertex_offset + i1);
+                    float3 p2    = meshlets->fetch_position(m.vertex_offset + i2);
+                    if (refs0 == 1) rctx.gizmo_layer->draw_line(p0, p1, float3(1.0f, 1.0f, 0.0f));
+                    if (refs1 == 1) rctx.gizmo_layer->draw_line(p1, p2, float3(1.0f, 1.0f, 0.0f));
+                    if (refs2 == 1) rctx.gizmo_layer->draw_line(p2, p0, float3(1.0f, 1.0f, 0.0f));
+                  }
+                }
+              }
+            }
+          }
+        });
+      }
       if (rctx.config->get_bool("gizmo.render_bvh")) {
         rctx.scene->traverse([&](Node *node) {
           if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
 
-            if (auto *sc = mn->getComponent<GfxSufraceComponent>()) {
+            if (auto *sc = mn->getComponent<BVHSufraceComponent>()) {
               if (sc->getBVH()) {
-                render_bvh(float4x4(1.0f), mn->getComponent<GfxSufraceComponent>()->getBVH(),
-                           rctx.gizmo_layer);
+                render_bvh(float4x4(1.0f), sc->getBVH(), rctx.gizmo_layer);
               }
             }
           }
@@ -1725,8 +1790,8 @@ class Event_Consumer : public IGUIApp {
     if (ImGui::Button("Rebuild BVH")) {
       rctx.scene->traverse([&](Node *node) {
         if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
-          if (mn->getComponent<GfxSufraceComponent>()) {
-            mn->getComponent<GfxSufraceComponent>()->buildBVH();
+          if (mn->getComponent<BVHSufraceComponent>()) {
+            mn->getComponent<BVHSufraceComponent>()->updateBVH();
           }
         }
       });
@@ -1818,16 +1883,18 @@ class Event_Consumer : public IGUIApp {
   (add bool G.I.color_triangles 0)
  )
  )"));
-    rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/norradalur-froyar/scene.gltf"));
-    // rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/human_bust_sculpt/cut.gltf"));
+    // rctx.scene->load_mesh(stref_s("mesh"),
+    //                      stref_s("models/castle-ban-the-rhins-of-galloway/scene.gltf"));
+    // rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/norradalur-froyar/scene.gltf"));
+    rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/human_bust_sculpt/cut.gltf"));
     // rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/human_bust_sculpt/untitled.gltf"));
     // rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/light/scene.gltf"));
     rctx.scene->update();
     rctx.scene->traverse([&](Node *node) {
       if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
-        if (mn->getComponent<GfxSufraceComponent>() == NULL) {
-          GfxSufraceComponent::create(rctx.factory, mn);
-        }
+        GfxSufraceComponent::create(rctx.factory, mn);
+        MeshletSufraceComponent::create(mn, 255, 256);
+        GfxMeshletSufraceComponent::create(factory, mn);
       }
     });
     baker_pass.init(rctx);

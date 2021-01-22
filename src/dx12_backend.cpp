@@ -930,7 +930,8 @@ class DX12Device : public rd::IDevice {
     TRAP;
   }
   Resource_ID create_shader(rd::Stage_t type, string_ref text,
-                            Pair<string_ref, string_ref> *defines, size_t num_defines) override {
+                            Pair<string_ref, string_ref> *defines, size_t num_defines,
+                            string_ref entry) override {
     SCOPED_LOCK;
     static ComPtr<IDxcLibrary>        library;
     static ComPtr<IDxcCompiler>       compiler;
@@ -963,6 +964,7 @@ class DX12Device : public rd::IDevice {
       d.Value = towstr_tmp(defines[i].second);
       dxc_defines.push(d);
     }
+    LPCWSTR lentry = towstr_tmp(entry);
 
     defer(dxc_defines.release());
     WCHAR const *               options[] = {L"-Wignored-attributes", L"-O3", L"UNUSED"};
@@ -987,7 +989,7 @@ class DX12Device : public rd::IDevice {
 
     HRESULT hr = compiler->Compile(blob.Get(),                             // pSource
                                    L"shader.hlsl",                         // pSourceName
-                                   L"main",                                // pEntryPoint
+                                   lentry,                                 // pEntryPoint
                                    profile,                                // pTargetProfile
                                    options, (u32)ARRAYSIZE(options) - 1,   // pArguments, argCount
                                    dxc_defines.ptr, (u32)dxc_defines.size, // pDefines, defineCount

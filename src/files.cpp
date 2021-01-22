@@ -83,35 +83,40 @@ Raw_Mesh_Opaque simplify_mesh(Raw_Mesh_Opaque const &opaque_mesh) {
   return out;
 }
 
-Raw_Meshlets_Opaque build_meshlets(Raw_Mesh_Opaque &opaque_mesh) {
+Raw_Meshlets_Opaque *build_meshlets(Raw_Mesh_Opaque &opaque_mesh, size_t max_vertices,
+                                    size_t max_triangles, float cone_weight) {
   ASSERT_ALWAYS(opaque_mesh.index_type == rd::Index_t::UINT32);
-  const size_t max_vertices  = 64;
-  const size_t max_triangles = 124;
 
-  Array<meshopt_Meshlet> meshlets;
-  meshlets.init();
+  Array<meshopt_Meshlet> meshlets{};
   defer(meshlets.release());
   meshlets.resize(meshopt_buildMeshletsBound(opaque_mesh.num_indices, max_vertices, max_triangles));
 
-  meshlets.resize(meshopt_buildMeshlets(&meshlets[0], (u32 *)&opaque_mesh.index_data[0],
-                                        opaque_mesh.num_indices, opaque_mesh.num_vertices,
-                                        max_vertices, max_triangles));
+  Raw_Meshlets_Opaque *result = new Raw_Meshlets_Opaque;
 
-  InlineArray<Array<u8>, 0x10> tmp_attributes;
-  tmp_attributes.init();
+  Array<unsigned int> meshlet_vertices{};
+  meshlet_vertices.resize(meshlets.size * max_vertices);
+  defer(meshlet_vertices.release());
+  result->index_data.resize(meshlets.size * max_triangles * 3);
+  // result->meshlet_vertices.resize(meshlets.size * max_vertices);
+
+  meshlets.resize(meshopt_buildMeshlets(
+      &meshlets[0], &meshlet_vertices[0], &result->index_data[0], (u32 *)&opaque_mesh.index_data[0],
+      opaque_mesh.num_indices, (float *)&opaque_mesh.fetch_position(0), opaque_mesh.num_vertices,
+      sizeof(opaque_mesh.get_attribute(rd::Attriute_t::POSITION).stride), max_vertices,
+      max_triangles, cone_weight));
+
+  InlineArray<Array<u8>, 0x10> tmp_attributes{};
   defer({ ito(opaque_mesh.attributes.size) tmp_attributes[i].release(); });
   ito(opaque_mesh.attributes.size) {
-    tmp_attributes[i].reserve((opaque_mesh.get_attribute_size(i) * 3) >> 1);
+    tmp_attributes[i].reserve((opaque_mesh.get_attribute_size(i) * 3));
   }
   auto write_attribute_data = [&](u8 const *src, size_t size, u32 attribute_id) {
     tmp_attributes[attribute_id].reserve(tmp_attributes[attribute_id].size + size);
     memcpy(tmp_attributes[attribute_id].ptr + tmp_attributes[attribute_id].size, src, size);
     tmp_attributes[attribute_id].size += size;
   };
-  u32                 vertex_offset = 0;
-  u32                 index_offset  = 0;
-  Raw_Meshlets_Opaque result;
-  result.init();
+  u32 vertex_offset = 0;
+  // u32  index_offset  = 0;
   auto write_vertex = [&](u32 vertex_index) {
     ito(opaque_mesh.attributes.size) {
       write_attribute_data(opaque_mesh.get_attribute_data(i, vertex_index),
@@ -119,74 +124,66 @@ Raw_Meshlets_Opaque build_meshlets(Raw_Mesh_Opaque &opaque_mesh) {
     }
     vertex_offset += 1;
   };
-  auto write_index = [&](u8 index) {
-    result.index_data.reserve(result.index_data.size + 1);
-    memcpy(result.index_data.ptr + index_offset, &index, 1);
-    result.index_data.size += 1;
-    index_offset += 1;
-  };
 
-  result.index_data.reserve(meshlets.size * 128 * 4);
-  result.meshlets.reserve(meshlets.size);
+  result->index_data.reserve(meshlets.size * 128 * 4);
+  result->meshlets.reserve(meshlets.size);
+  // result.attribute_data = opaque_mesh.attribute_data.clone();
   ito(meshlets.size) {
     meshopt_Meshlet meshlet = meshlets[i];
 
-    u32 meshlet_vertex_offset = vertex_offset;
-    u32 meshlet_index_offset  = index_offset;
+    // Attribute position_attribute = opaque_mesh.get_attribute(rd::Attriute_t::POSITION);
+    // MESHOPTIMIZER_EXPERIMENTAL struct meshopt_Bounds meshopt_computeMeshletBounds(const unsigned
+    // int* meshlet_vertices, const unsigned char* meshlet_triangles, size_t triangle_count, const
+    // float* vertex_positions, size_t vertex_count, size_t vertex_positions_stride);
 
-    for (unsigned int i = 0; i < meshlet.vertex_count; ++i) write_vertex(meshlet.vertices[i]);
+    /* meshopt_Bounds bounds = meshopt_computeMeshletBounds(
+         &meshlet, (float *)&opaque_mesh.attribute_data[position_attribute.offset],
+         opaque_mesh.num_vertices, position_attribute.stride);*/
+    ASSERT_DEBUG(vertex_offset == meshlet.vertex_offset);
 
-    ito(meshlet.triangle_count) {
-      write_index(meshlet.indices[i][0]);
-      write_index(meshlet.indices[i][1]);
-      write_index(meshlet.indices[i][2]);
-    }
-    Attribute position_attribute = opaque_mesh.get_attribute(rd::Attriute_t::POSITION);
+    for (unsigned int i = 0; i < meshlet.vertex_count; ++i)
+      write_vertex(meshlet_vertices[meshlet.vertex_offset + i]);
 
-    meshopt_Bounds bounds = meshopt_computeMeshletBounds(
-        &meshlet, (float *)&opaque_mesh.attribute_data[position_attribute.offset],
-        opaque_mesh.num_vertices, position_attribute.stride);
+    Meshlet m = {};
 
-    Meshlet m        = {};
-    m.vertex_offset  = meshlet_vertex_offset;
-    m.index_offset   = meshlet_index_offset;
-    m.triangle_count = meshlet.triangle_count;
-    m.vertex_count   = meshlet.vertex_count;
+    m.vertex_offset = meshlet.vertex_offset;
+    m.index_offset  = meshlet.triangle_offset;
+    m.index_count   = meshlet.triangle_count * 3;
+    m.vertex_count  = meshlet.vertex_count;
 
-    m.sphere = float4(bounds.center[0], bounds.center[1], bounds.center[2], bounds.radius);
+    /*  m.sphere = float4(bounds.center[0], bounds.center[1], bounds.center[2], bounds.radius);
 
-    m.cone_apex.x = bounds.cone_apex[0];
-    m.cone_apex.y = bounds.cone_apex[1];
-    m.cone_apex.z = bounds.cone_apex[2];
+      m.cone_apex.x = bounds.cone_apex[0];
+      m.cone_apex.y = bounds.cone_apex[1];
+      m.cone_apex.z = bounds.cone_apex[2];
 
-    m.cone_axis_cutoff.x = bounds.cone_axis[0];
-    m.cone_axis_cutoff.y = bounds.cone_axis[1];
-    m.cone_axis_cutoff.z = bounds.cone_axis[2];
-    m.cone_axis_cutoff.w = bounds.cone_cutoff;
+      m.cone_axis_cutoff.x = bounds.cone_axis[0];
+      m.cone_axis_cutoff.y = bounds.cone_axis[1];
+      m.cone_axis_cutoff.z = bounds.cone_axis[2];
+      m.cone_axis_cutoff.w = bounds.cone_cutoff;
 
-    m.cone_axis_s8[0] = bounds.cone_axis_s8[0];
-    m.cone_axis_s8[1] = bounds.cone_axis_s8[1];
-    m.cone_axis_s8[2] = bounds.cone_axis_s8[2];
-    m.cone_cutoff_s8  = bounds.cone_cutoff_s8;
+      m.cone_axis_s8[0] = bounds.cone_axis_s8[0];
+      m.cone_axis_s8[1] = bounds.cone_axis_s8[1];
+      m.cone_axis_s8[2] = bounds.cone_axis_s8[2];
+      m.cone_cutoff_s8  = bounds.cone_cutoff_s8;*/
 
-    result.meshlets.push(m);
+    result->meshlets.push(m);
   }
 
-  u32 total_mem = 0;
-  ito(opaque_mesh.attributes.size) { total_mem += (u32)tmp_attributes[i].size; }
-  result.attribute_data.reserve(total_mem);
-  result.attributes.resize(opaque_mesh.attributes.size);
+  size_t total_mem = 0;
+  ito(opaque_mesh.attributes.size) { total_mem += (size_t)tmp_attributes[i].size; }
+  result->attribute_data.reserve(total_mem);
+  result->attributes.resize(opaque_mesh.attributes.size);
   ito(opaque_mesh.attributes.size) {
-    memcpy(result.attribute_data.ptr + result.attribute_data.size, tmp_attributes[i].ptr,
+    memcpy(result->attribute_data.ptr + result->attribute_data.size, tmp_attributes[i].ptr,
            tmp_attributes[i].size);
-    result.attributes[i]        = opaque_mesh.attributes[i];
-    result.attributes[i].offset = (u32)result.attribute_data.size;
-    result.attributes[i].stride = opaque_mesh.attributes[i].size;
-    result.attribute_data.size += tmp_attributes[i].size;
+    result->attributes[i]        = opaque_mesh.attributes[i];
+    result->attributes[i].offset = result->attribute_data.size;
+    result->attributes[i].stride = opaque_mesh.attributes[i].size;
+    result->attribute_data.size += tmp_attributes[i].size;
   }
-  while (result.meshlets.size % 32 != 0) result.meshlets.push(Meshlet{});
-  result.num_vertices = vertex_offset;
-  result.num_indices  = index_offset;
+  while (result->meshlets.size % 32 != 0) result->meshlets.push(Meshlet{});
+  result->num_vertices = vertex_offset;
 
   return result;
 }

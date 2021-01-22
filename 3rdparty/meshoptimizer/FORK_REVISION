@@ -1,8 +1,8 @@
-commit 6958bb669a054daef39f48ec75ee2c78d1272de3
-Merge: dbbe9a6 5ead41d
+commit 686e48b2cb140ddca8ff1197c1988e48e1a1d95b
+Merge: 7af8872 17a65c9
 Author: Arseny Kapoulkine <arseny.kapoulkine@gmail.com>
-Date:   Thu Jul 16 09:04:14 2020 -0700
+Date:   Wed Jan 20 12:19:07 2021 -0800
 
-    Merge pull request #167 from mosra/vcpkg
+    Merge pull request #228 from zeux/gltf-transform
     
-    Mention the Vcpkg package in README
+    gltfpack: Properly handle KHR_texture_transform extension

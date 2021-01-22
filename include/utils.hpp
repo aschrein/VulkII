@@ -1884,6 +1884,8 @@ void *tl_alloc(size_t size) {
 }
 
 static inline void *_tl_realloc(void *ptr, size_t oldsize, size_t newsize) {
+  return realloc(ptr, newsize);
+#  if 0
   if (oldsize == newsize) return ptr;
   size_t min_size = oldsize < newsize ? oldsize : newsize;
   void * new_ptr  = NULL;
@@ -1893,6 +1895,7 @@ static inline void *_tl_realloc(void *ptr, size_t oldsize, size_t newsize) {
   }
   if (ptr != NULL) free(ptr);
   return new_ptr;
+#  endif
 }
 
 #  ifdef UTILS_TL_IMPL_DEBUG

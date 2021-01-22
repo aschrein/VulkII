@@ -557,14 +557,15 @@ class IDevice {
     return (size) & ~(alignment - 1);
   }
 
-  virtual Resource_ID create_image(Image_Create_Info info)                                     = 0;
-  virtual Resource_ID create_buffer(Buffer_Create_Info info)                                   = 0;
+  virtual Resource_ID create_image(Image_Create_Info info)              = 0;
+  virtual Resource_ID create_buffer(Buffer_Create_Info info)            = 0;
   virtual Resource_ID create_shader(Stage_t type, string_ref text,
-                                    Pair<string_ref, string_ref> *defines, size_t num_defines) = 0;
+                                    Pair<string_ref, string_ref> *defines, size_t num_defines,
+                                    string_ref entry = stref_s("main")) = 0;
   virtual Resource_ID create_shader_from_file(Stage_t type, string_ref filename,
                                               Pair<string_ref, string_ref> *defines,
-                                              size_t                        num_defines)                              = 0;
-  virtual Resource_ID create_sampler(Sampler_Create_Info const &info)                          = 0;
+                                              size_t                        num_defines)       = 0;
+  virtual Resource_ID create_sampler(Sampler_Create_Info const &info)   = 0;
   // Deferred release. Must call new_frame 3-6 times for the actual release to make sure it's not
   // used by the GPU.
   virtual void release_resource(Resource_ID id, u32 delay = 6) = 0;

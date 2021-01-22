@@ -173,6 +173,9 @@ static bool canMergeMeshNodes(cgltf_node* lhs, cgltf_node* rhs, const Settings& 
 
 static bool canMergeMeshes(const Mesh& lhs, const Mesh& rhs, const Settings& settings)
 {
+	if (lhs.scene != rhs.scene)
+		return false;
+
 	if (lhs.nodes.size() != rhs.nodes.size())
 		return false;
 
@@ -379,6 +382,7 @@ static void filterStreams(Mesh& mesh)
 {
 	bool morph_normal = false;
 	bool morph_tangent = false;
+	int keep_texture_set = -1;
 
 	for (size_t i = 0; i < mesh.streams.size(); ++i)
 	{
@@ -389,6 +393,11 @@ static void filterStreams(Mesh& mesh)
 			morph_normal = morph_normal || (stream.type == cgltf_attribute_type_normal && hasDeltas(stream.data));
 			morph_tangent = morph_tangent || (stream.type == cgltf_attribute_type_tangent && hasDeltas(stream.data));
 		}
+
+		if (stream.type == cgltf_attribute_type_texcoord && mesh.material && usesTextureSet(*mesh.material, stream.index))
+		{
+			keep_texture_set = std::max(keep_texture_set, stream.index);
+		}
 	}
 
 	size_t write = 0;
@@ -397,7 +406,7 @@ static void filterStreams(Mesh& mesh)
 	{
 		Stream& stream = mesh.streams[i];
 
-		if (stream.type == cgltf_attribute_type_texcoord && (!mesh.material || !usesTextureSet(*mesh.material, stream.index)))
+		if (stream.type == cgltf_attribute_type_texcoord && stream.index > keep_texture_set)
 			continue;
 
 		if (stream.type == cgltf_attribute_type_tangent && (!mesh.material || !mesh.material->normal_texture.texture))
@@ -506,6 +515,7 @@ static void simplifyMesh(Mesh& mesh, float threshold, bool aggressive)
 
 	size_t target_index_count = size_t(double(mesh.indices.size() / 3) * threshold) * 3;
 	float target_error = 1e-2f;
+	float target_error_aggressive = 1e-1f;
 
 	if (target_index_count < 1)
 		return;
@@ -517,10 +527,10 @@ static void simplifyMesh(Mesh& mesh, float threshold, bool aggressive)
 	// Note: if the simplifier got stuck, we can try to reindex without normals/tangents and retry
 	// For now we simply fall back to aggressive simplifier instead
 
-	// if the mesh is complex enough and the precise simplifier got "stuck", we'll try to simplify using the sloppy simplifier which is guaranteed to reach the target count
-	if (aggressive && target_index_count > 50 * 3 && mesh.indices.size() > target_index_count)
+	// if the precise simplifier got "stuck", we'll try to simplify using the sloppy simplifier; this is only used when aggressive simplification is enabled as it breaks attribute discontinuities
+	if (aggressive && mesh.indices.size() > target_index_count)
 	{
-		indices.resize(meshopt_simplifySloppy(&indices[0], &mesh.indices[0], mesh.indices.size(), positions->data[0].f, vertex_count, sizeof(Attr), target_index_count));
+		indices.resize(meshopt_simplifySloppy(&indices[0], &mesh.indices[0], mesh.indices.size(), positions->data[0].f, vertex_count, sizeof(Attr), target_index_count, target_error_aggressive));
 		mesh.indices.swap(indices);
 	}
 }
@@ -846,21 +856,32 @@ void debugSimplify(const Mesh& source, Mesh& kinds, Mesh& loops, float ratio)
 		}
 }
 
-void debugMeshlets(const Mesh& source, Mesh& meshlets, Mesh& bounds, int max_vertices)
+void debugMeshlets(const Mesh& source, Mesh& meshlets, Mesh& bounds, int max_vertices, bool scan)
 {
 	Mesh mesh = source;
 	assert(mesh.type == cgltf_primitive_type_triangles);
 
 	reindexMesh(mesh);
-	optimizeMesh(mesh, false);
+
+	if (scan)
+		optimizeMesh(mesh, false);
 
 	const Stream* positions = getStream(mesh, cgltf_attribute_type_position);
 	assert(positions);
 
-	const size_t max_triangles = 126;
+	const float cone_weight = 0.f;
 
-	std::vector<meshopt_Meshlet> mr(meshopt_buildMeshletsBound(mesh.indices.size(), max_vertices, max_triangles));
-	mr.resize(meshopt_buildMeshlets(&mr[0], &mesh.indices[0], mesh.indices.size(), positions->data.size(), max_vertices, max_triangles));
+	size_t max_triangles = (max_vertices * 2 + 3) & ~3;
+	size_t max_meshlets = meshopt_buildMeshletsBound(mesh.indices.size(), max_vertices, max_triangles);
+
+	std::vector<meshopt_Meshlet> ml(max_meshlets);
+	std::vector<unsigned int> mlv(max_meshlets * max_vertices);
+	std::vector<unsigned char> mlt(max_meshlets * max_triangles * 3);
+
+	if (scan)
+		ml.resize(meshopt_buildMeshletsScan(&ml[0], &mlv[0], &mlt[0], &mesh.indices[0], mesh.indices.size(), positions->data.size(), max_vertices, max_triangles));
+	else
+		ml.resize(meshopt_buildMeshlets(&ml[0], &mlv[0], &mlt[0], &mesh.indices[0], mesh.indices.size(), positions->data[0].f, positions->data.size(), sizeof(Attr), max_vertices, max_triangles, cone_weight));
 
 	// generate meshlet meshes, using unique colors
 	meshlets.nodes = mesh.nodes;
@@ -868,9 +889,9 @@ void debugMeshlets(const Mesh& source, Mesh& meshlets, Mesh& bounds, int max_ver
 	Stream mv = {cgltf_attribute_type_position};
 	Stream mc = {cgltf_attribute_type_color};
 
-	for (size_t i = 0; i < mr.size(); ++i)
+	for (size_t i = 0; i < ml.size(); ++i)
 	{
-		const meshopt_Meshlet& ml = mr[i];
+		const meshopt_Meshlet& m = ml[i];
 
 		unsigned int h = unsigned(i);
 		h ^= h >> 13;
@@ -881,17 +902,17 @@ void debugMeshlets(const Mesh& source, Mesh& meshlets, Mesh& bounds, int max_ver
 
 		unsigned int offset = unsigned(mv.data.size());
 
-		for (size_t j = 0; j < ml.vertex_count; ++j)
+		for (size_t j = 0; j < m.vertex_count; ++j)
 		{
-			mv.data.push_back(positions->data[ml.vertices[j]]);
+			mv.data.push_back(positions->data[mlv[m.vertex_offset + j]]);
 			mc.data.push_back(c);
 		}
 
-		for (size_t j = 0; j < ml.triangle_count; ++j)
+		for (size_t j = 0; j < m.triangle_count; ++j)
 		{
-			meshlets.indices.push_back(offset + ml.indices[j][0]);
-			meshlets.indices.push_back(offset + ml.indices[j][1]);
-			meshlets.indices.push_back(offset + ml.indices[j][2]);
+			meshlets.indices.push_back(offset + mlt[m.triangle_offset + j * 3 + 0]);
+			meshlets.indices.push_back(offset + mlt[m.triangle_offset + j * 3 + 1]);
+			meshlets.indices.push_back(offset + mlt[m.triangle_offset + j * 3 + 2]);
 		}
 	}
 
@@ -905,11 +926,11 @@ void debugMeshlets(const Mesh& source, Mesh& meshlets, Mesh& bounds, int max_ver
 	Stream bv = {cgltf_attribute_type_position};
 	Stream bc = {cgltf_attribute_type_color};
 
-	for (size_t i = 0; i < mr.size(); ++i)
+	for (size_t i = 0; i < ml.size(); ++i)
 	{
-		const meshopt_Meshlet& ml = mr[i];
+		const meshopt_Meshlet& m = ml[i];
 
-		meshopt_Bounds mb = meshopt_computeMeshletBounds(&ml, positions->data[0].f, positions->data.size(), sizeof(Attr));
+		meshopt_Bounds mb = meshopt_computeMeshletBounds(&mlv[m.vertex_offset], &mlt[m.triangle_offset], m.triangle_count, positions->data[0].f, positions->data.size(), sizeof(Attr));
 
 		unsigned int h = unsigned(i);
 		h ^= h >> 13;

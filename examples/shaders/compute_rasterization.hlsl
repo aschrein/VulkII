@@ -54,10 +54,6 @@ bool outside(int2 e1, int2 e2) { return e2.x * e1.y - e2.y * e1.x < 0; }
   // feedback_buffer.Store<float3>((DTid.x * 3 + 1) * 12, p1);
   // feedback_buffer.Store<float3>((DTid.x * 3 + 2) * 12, p2);
 
-  float3 n0 = fetch_normal(pc.first_vertex + i0);
-  float3 n1 = fetch_normal(pc.first_vertex + i1);
-  float3 n2 = fetch_normal(pc.first_vertex + i2);
-
   float4 pp0 = mul(fc.viewproj, mul(pc.model, float4(p0, 1.0)));
   float4 pp1 = mul(fc.viewproj, mul(pc.model, float4(p1, 1.0)));
   float4 pp2 = mul(fc.viewproj, mul(pc.model, float4(p2, 1.0)));
@@ -67,41 +63,90 @@ bool outside(int2 e1, int2 e2) { return e2.x * e1.y - e2.y * e1.x < 0; }
   pp0 /= pp0.w;
   pp1 /= pp1.w;
   pp2 /= pp2.w;
+  //
+  // For simplicity, we assume samples are at pixel centers
+  //  __________
+  // |          |
+  // |          |
+  // |    X     |
+  // |          |
+  // |__________|
+  //
 
-  int2 ip0 = int2(i32(0.5 + float(width) * (pp0.x + 1.0) / 2.0),
-                  i32(0.5 + float(height) * (-pp0.y + 1.0) / 2.0));
-  int2 ip1 = int2(i32(0.5 + float(width) * (pp1.x + 1.0) / 2.0),
-                  i32(0.5 + float(height) * (-pp1.y + 1.0) / 2.0));
-  int2 ip2 = int2(i32(0.5 + float(width) * (pp2.x + 1.0) / 2.0),
-                  i32(0.5 + float(height) * (-pp2.y + 1.0) / 2.0));
+  // v_i - Vertices scaled to window size so 1.5 is inside the second pixel
+  float2 v0 = float2(float(width) * (pp0.x + 1.0) / 2.0, float(height) * (-pp0.y + 1.0) / 2.0);
+  float2 v1 = float2(float(width) * (pp1.x + 1.0) / 2.0, float(height) * (-pp1.y + 1.0) / 2.0);
+  float2 v2 = float2(float(width) * (pp2.x + 1.0) / 2.0, float(height) * (-pp2.y + 1.0) / 2.0);
 
-  int2 imin = int2(min(ip0.x, min(ip1.x, ip2.x)), min(ip0.y, min(ip1.y, ip2.y)));
-  int2 imax = int2(max(ip0.x, max(ip1.x, ip2.x)), max(ip0.y, max(ip1.y, ip2.y)));
+  // Edges
+  float2 n0 = v1 - v0;
+  float2 n1 = v2 - v1;
+  float2 n2 = v0 - v2;
 
-  int2 e0 = ip1 - ip0;
-  int2 e1 = ip2 - ip1;
-  int2 e2 = ip0 - ip2;
+  // Double area
+  float area2 = (n0.x * n2.y - n0.y * n2.x);
 
-  if (outside(e0, e1)) return;
+  // Back/small triangle culling
+  if (area2 < 1.0e-6f) return;
 
-  for (i32 y = imin.y; y <= imax.y; y++) {
-    for (i32 x = imin.x; x <= imax.x; x++) {
+  // 2D Edge Normals
+  n0 = -float2(-n0.y, n0.x) / area2;
+  n1 = -float2(-n1.y, n1.x) / area2;
+  n2 = -float2(-n2.y, n2.x) / area2;
+
+  // Bounding Box
+  float2 fmin = float2(min(v0.x, min(v1.x, v2.x)), min(v0.y, min(v1.y, v2.y)));
+  float2 fmax = float2(max(v0.x, max(v1.x, v2.x)), max(v0.y, max(v1.y, v2.y)));
+
+  int2 imin = int2(fmin);
+  int2 imax = int2(fmax);
+
+  // Edge function values at the first (imin.x + 0.5f, imin.y + 0.5f) sample position
+  float2 first_sample = float2(imin) + float2(0.5f, 0.5f);
+  float  init_ef0     = dot(first_sample - v0, n0);
+  float  init_ef1     = dot(first_sample - v1, n1);
+  float  init_ef2     = dot(first_sample - v2, n2);
+
+  float3 normal_0 = fetch_normal(pc.first_vertex + i0);
+  float3 normal_1 = fetch_normal(pc.first_vertex + i1);
+  float3 normal_2 = fetch_normal(pc.first_vertex + i2);
+
+  // Still a scalar loop
+  //[unroll(2)]
+  for (i32 dy = 0; dy <= imax.y - imin.y; dy += 1) {
+    //[unroll(2)]
+    for (i32 dx = 0; dx <= imax.x - imin.x; dx += 1) {
+
+      i32 x = imin.x + dx;
+      i32 y = imin.y + dy;
+
       if (x >= 0 && y >= 0 && x < height && y < height) {
-        int2 v = int2(x, y);
-        if (pc.flags & RASTERIZATION_FLAG_CULL_PIXELS) {
-          if (outside(e0, v - ip0) || outside(e1, v - ip1) || outside(e2, v - ip2)) continue;
-        }
-        u32 depth = u32(pp0.z * 1000000);
+        float ef0 = init_ef0 + n0.x * float(dx) + n0.y * float(dy);
+        float ef1 = init_ef1 + n1.x * float(dx) + n1.y * float(dy);
+        float ef2 = init_ef2 + n2.x * float(dx) + n2.y * float(dy);
+
+        if (ef0 < 0.0f || ef1 < 0.0f || ef2 < 0.0f) continue;
+
+        // Barycentrics
+        float b0 = ef1;
+        float b1 = ef2;
+        float b2 = ef0;
+        // Perspective correction
+        float bw = b0 / pp0.w + b1 / pp1.w + b2 / pp2.w;
+        b0       = b0 / pp0.w / bw;
+        b1       = b1 / pp1.w / bw;
+        b2       = b2 / pp2.w / bw;
+
+        // add tid.x * 1.0e-6f to avoid z-fight
+        u32 depth = u32((pp0.z) * 1000000);
         u32 next_depth;
         InterlockedMax(depth_target[int2(x, y)], depth, next_depth);
         if (depth > next_depth) {
-          normal_target[int2(x, y)] = float4((n0), 1.0);
+          float3 pixel_normal       = normalize(normal_0 * b0 + normal_1 * b1 + normal_2 * b2);
+          normal_target[int2(x, y)] = float4(
+              float3_splat(max(0.0f, dot(pixel_normal, normalize(float3_splat(1.0f))))), 1.0f);
         }
       }
     }
   }
-
-  //
-  // i32 x = i32(0.5 + float(width) * (pp0.x + 1.0) / 2.0);
-  // i32 y = i32(0.5 + float(height) * (-pp0.y + 1.0) / 2.0);
 }

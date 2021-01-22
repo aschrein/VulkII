@@ -583,7 +583,8 @@ struct Shader_Descriptor_Set {
 };
 
 static Array<u32> compile_hlsl(VkDevice device, string_ref text, shaderc_shader_kind kind,
-                               Pair<string_ref, string_ref> *defines, size_t num_defines) {
+                               Pair<string_ref, string_ref> *defines, size_t num_defines,
+                               string_ref entry) {
 #ifdef WIN32
   static HMODULE dxcompilerDLL = LoadLibraryA("dxcompiler.dll");
   ASSERT_ALWAYS(dxcompilerDLL);
@@ -630,7 +631,7 @@ static Array<u32> compile_hlsl(VkDevice device, string_ref text, shaderc_shader_
     dxc_defines.push(d);
   }
   defer(dxc_defines.release());
-
+  LPCWSTR      lentry    = towstr_tmp(entry);
   WCHAR const *options[] = {
       L"-spirv",
 #ifndef NDEBUG
@@ -645,7 +646,7 @@ static Array<u32> compile_hlsl(VkDevice device, string_ref text, shaderc_shader_
   CComPtr<IDxcOperationResult> result;
   HRESULT                      hr = compiler->Compile(blob,                        // pSource
                                  L"shader.hlsl",              // pSourceName
-                                 L"main",                     // pEntryPoint
+                                 lentry,                      // pEntryPoint
                                  profile,                     // pTargetProfile
                                  options, ARRAYSIZE(options), // pArguments, argCount
                                  dxc_defines.ptr, dxc_defines.size, // pDefines, defineCount
@@ -2385,7 +2386,8 @@ struct VkDeviceContext {
   }
 
   Resource_ID create_shader_raw(rd::Stage_t type, string_ref body,
-                                Pair<string_ref, string_ref> *defines, size_t num_defines) {
+                                Pair<string_ref, string_ref> *defines, size_t num_defines,
+                                string_ref entry) {
     std::lock_guard<std::mutex> _lock(mutex);
     u64                         shader_hash = hash_of(body);
     ito(num_defines) { shader_hash ^= hash_of(defines[0].first) ^ hash_of(defines[0].second); }
@@ -2422,7 +2424,7 @@ struct VkDeviceContext {
     else
       UNIMPLEMENTED;
 
-    si.init(type, shader_hash, compile_hlsl(device, text, kind, defines, num_defines));
+    si.init(type, shader_hash, compile_hlsl(device, text, kind, defines, num_defines, entry));
 
     ID shid = shaders.push(si);
     // shader_cache.insert(shader_hash, shid);
@@ -3833,9 +3835,10 @@ class VkFactory : public rd::IDevice {
     TRAP;
   }
   Resource_ID create_shader(rd::Stage_t type, string_ref body,
-                            Pair<string_ref, string_ref> *defines, size_t num_defines) override {
+                            Pair<string_ref, string_ref> *defines, size_t num_defines,
+                            string_ref entry) override {
     std::lock_guard<std::mutex> _lock(mutex);
-    return dev_ctx->create_shader_raw(type, body, defines, num_defines);
+    return dev_ctx->create_shader_raw(type, body, defines, num_defines, entry);
   }
   void *map_buffer(Resource_ID res_id) override {
     // std::lock_guard<std::mutex> _lock(mutex);

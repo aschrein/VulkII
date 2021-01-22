@@ -1,8 +1,11 @@
 /*
+ * fast_obj
+ *
+ * Version 1.0
  *
  * MIT License
  *
- * Copyright (c) 2018 Richard Knight
+ * Copyright (c) 2018-2020 Richard Knight
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -26,6 +29,10 @@
 
 #ifndef FAST_OBJ_HDR
 #define FAST_OBJ_HDR
+
+#define FAST_OBJ_VERSION_MAJOR  1
+#define FAST_OBJ_VERSION_MINOR  0
+#define FAST_OBJ_VERSION        ((FAST_OBJ_VERSION_MAJOR << 8) | FAST_OBJ_VERSION_MINOR)
 
 
 typedef struct
@@ -367,27 +374,6 @@ int string_equal(const char* a, const char* s, const char* e)
 
 
 static
-int string_find_last(const char* s, char c, size_t* p)
-{
-    const char* e;
-
-    e = s + strlen(s);
-    while (e > s)
-    {
-        e--;
-
-        if (*e == c)
-        {
-            *p = (size_t)(e - s);
-            return 1;
-        }
-    }
-
-    return 0;
-}
-
-
-static
 void string_fix_separators(char* s)
 {
     while (*s)
@@ -686,12 +672,12 @@ const char* parse_face(fastObjData* data, const char* ptr)
         if (v < 0)
             vn.p = (array_size(data->mesh->positions) / 3) - (fastObjUInt)(-v);
         else
-            vn.p = (size_t)(v);
+            vn.p = (fastObjUInt)(v);
 
         if (t < 0)
             vn.t = (array_size(data->mesh->texcoords) / 2) - (fastObjUInt)(-t);
         else if (t > 0)
-            vn.t = (size_t)(t);
+            vn.t = (fastObjUInt)(t);
         else
             vn.t = 0;
 
@@ -813,12 +799,6 @@ const char* parse_usemtl(fastObjData* data, const char* ptr)
 
     e = ptr;
 
-
-    /* If there are no materials yet, add a dummy invalid material at index 0 */
-    if (array_empty(data->mesh->materials))
-        array_push(data->mesh->materials, mtl_default());
-
-
     /* Find an existing material with the same name */
     idx = 0;
     while (idx < array_size(data->mesh->materials))
@@ -830,8 +810,14 @@ const char* parse_usemtl(fastObjData* data, const char* ptr)
         idx++;
     }
 
+    /* If doesn't exists, create a default one with this name
+    Note: this case happens when OBJ doesn't have its MTL */
     if (idx == array_size(data->mesh->materials))
-        idx = 0;
+    {
+        fastObjMaterial new_mtl = mtl_default();
+        new_mtl.name = string_copy(s, e);
+        array_push(data->mesh->materials, new_mtl);
+    }
 
     data->material = idx;
 
@@ -1282,7 +1268,6 @@ fastObjMesh* fast_obj_read(const char* path)
     char*        end;
     char*        last;
     fastObjUInt  read;
-    size_t       sep;
     fastObjUInt  bytes;
 
 
@@ -1329,8 +1314,16 @@ fastObjMesh* fast_obj_read(const char* path)
 
 
     /* Find base path for materials/textures */
-    if (string_find_last(path, FAST_OBJ_SEPARATOR, &sep))
-        data.base = string_substr(path, 0, sep + 1);
+    {
+        const char* sep1 = strrchr(path, FAST_OBJ_SEPARATOR);
+        const char* sep2 = strrchr(path, FAST_OBJ_OTHER_SEP);
+
+        /* Use the last separator in the path */
+        const char* sep = sep2 && (!sep1 || sep1 < sep2) ? sep2 : sep1;
+
+        if (sep)
+            data.base = string_substr(path, 0, sep - path + 1);
+    }
 
 
     /* Create buffer for reading file */

@@ -1,4 +1,5 @@
 MAKEFLAGS+=-r -j
+COMMA=,
 
 config=debug
 files=demo/pirate.obj
@@ -23,11 +24,15 @@ CFLAGS=-g -Wall -Wextra -Werror -std=c89
 CXXFLAGS=-g -Wall -Wextra -Wshadow -Wno-missing-field-initializers -Werror -std=c++98
 LDFLAGS=
 
-WASM_SOURCES=src/vertexcodec.cpp src/indexcodec.cpp src/vertexfilter.cpp
-WASM_EXPORTS="__initialize","_sbrk"
-WASM_EXPORTS+=,"_meshopt_decodeVertexBuffer","_meshopt_decodeIndexBuffer","_meshopt_decodeIndexSequence"
-WASM_EXPORTS+=,"_meshopt_decodeFilterOct","_meshopt_decodeFilterQuat","_meshopt_decodeFilterExp"
-WASM_FLAGS=-O3 -DNDEBUG -s EXPORTED_FUNCTIONS='[$(WASM_EXPORTS)]' -s ALLOW_MEMORY_GROWTH=1 -s TOTAL_STACK=24576 -s TOTAL_MEMORY=65536
+WASMCC=clang++
+WASI_SDK=
+
+WASM_SOURCES=src/vertexcodec.cpp src/indexcodec.cpp src/vertexfilter.cpp tools/wasmstubs.cpp
+WASM_EXPORTS=meshopt_decodeVertexBuffer meshopt_decodeIndexBuffer meshopt_decodeIndexSequence meshopt_decodeFilterOct meshopt_decodeFilterQuat meshopt_decodeFilterExp sbrk __wasm_call_ctors
+WASM_FLAGS=--target=wasm32-wasi --sysroot=$(WASI_SDK)
+WASM_FLAGS+=$(patsubst %,-Wl$(COMMA)--export=%,$(WASM_EXPORTS))
+WASM_FLAGS+=-O3 -DNDEBUG -nostartfiles -nostdlib -Wl,--no-entry -Wl,-s
+WASM_FLAGS+=-Wl,-z -Wl,stack-size=24576 -Wl,--initial-memory=65536
 
 ifeq ($(config),iphone)
 	IPHONESDK=/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk
@@ -37,7 +42,7 @@ ifeq ($(config),iphone)
 endif
 
 ifeq ($(config),trace)
-	CXXFLAGS+=-DTRACE=2
+	CXXFLAGS+=-DTRACE=1
 endif
 
 ifeq ($(config),scalar)
@@ -79,25 +84,27 @@ format:
 gltfpack: $(GLTFPACK_OBJECTS) $(LIBRARY)
 	$(CXX) $^ $(LDFLAGS) -o $@
 
-gltfpack.js: gltf/bin/gltfpack.js
+gltfpack.wasm: gltf/library.wasm
 
-gltf/bin/gltfpack.js: ${LIBRARY_SOURCES} ${GLTFPACK_SOURCES} tools/meshloader.cpp
-	@mkdir -p gltf/bin
-	emcc $^ -o $@ -Os -DNDEBUG -s ALLOW_MEMORY_GROWTH=1 -s MAXIMUM_MEMORY=4GB -s NODERAWFS=1
-	sed -i '1s;^;#!/usr/bin/env node\n;' $@
+gltf/library.wasm: ${LIBRARY_SOURCES} ${GLTFPACK_SOURCES} tools/meshloader.cpp
+	$(WASMCC) $^ -o $@ -Os -DNDEBUG --target=wasm32-wasi --sysroot=$(WASI_SDK) -nostartfiles -Wl,--no-entry -Wl,--export=pack -Wl,--export=malloc -Wl,--export=free -Wl,--export=__wasm_call_ctors -Wl,-s -Wl,--allow-undefined-file=gltf/wasistubs.txt
 
 build/decoder_base.wasm: $(WASM_SOURCES)
 	@mkdir -p build
-	emcc $^ $(WASM_FLAGS) -o $@
+	$(WASMCC) $^ $(WASM_FLAGS) -o $@
 
 build/decoder_simd.wasm: $(WASM_SOURCES)
 	@mkdir -p build
-	emcc $^ $(WASM_FLAGS) -o $@ -msimd128 -mbulk-memory
+	$(WASMCC) $^ $(WASM_FLAGS) -o $@ -msimd128 -mbulk-memory
 
 js/meshopt_decoder.js: build/decoder_base.wasm build/decoder_simd.wasm
-	sed -i "s#Built with emcc.*#Built with $$(emcc --version | head -n 1)#" $@
+	sed -i "s#Built with clang.*#Built with $$($(WASMCC) --version | head -n 1)#" $@
 	sed -i "s#\(var wasm_base = \)\".*\";#\\1\"$$(cat build/decoder_base.wasm | python3 tools/wasmpack.py)\";#" $@
 	sed -i "s#\(var wasm_simd = \)\".*\";#\\1\"$$(cat build/decoder_simd.wasm | python3 tools/wasmpack.py)\";#" $@
+
+js/meshopt_decoder.module.js: js/meshopt_decoder.js
+	sed '/UMD-style export/,$$d' <$< >$@
+	echo "export { MeshoptDecoder };" >>$@
 
 $(EXECUTABLE): $(DEMO_OBJECTS) $(LIBRARY)
 	$(CXX) $^ $(LDFLAGS) -o $@
@@ -113,6 +120,9 @@ codecbench.js codecbench.wasm: tools/codecbench.cpp ${LIBRARY_SOURCES}
 
 codecbench-simd.js codecbench-simd.wasm: tools/codecbench.cpp ${LIBRARY_SOURCES}
 	emcc $^ -O3 -g -DNDEBUG -s TOTAL_MEMORY=268435456 -msimd128 -o $@
+
+codecfuzz: tools/codecfuzz.cpp src/vertexcodec.cpp src/indexcodec.cpp
+	$(CXX) $^ -fsanitize=fuzzer,address,undefined -O1 -g -o $@
 
 $(LIBRARY): $(LIBRARY_OBJECTS)
 	ar rcs $@ $^

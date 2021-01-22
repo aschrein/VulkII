@@ -124,6 +124,16 @@ static void fixupIndices(std::vector<unsigned int>& indices, cgltf_primitive_typ
 		indices.swap(result);
 		type = cgltf_primitive_type_triangles;
 	}
+	else if (type == cgltf_primitive_type_lines)
+	{
+		// glTF files don't require that line index count is divisible by 2, but it is obviously critical for scenes to render
+		indices.resize(indices.size() / 2 * 2);
+	}
+	else if (type == cgltf_primitive_type_triangles)
+	{
+		// glTF files don't require that triangle index count is divisible by 3, but it is obviously critical for scenes to render
+		indices.resize(indices.size() / 3 * 3);
+	}
 }
 
 static void parseMeshesGltf(cgltf_data* data, std::vector<Mesh>& meshes, std::vector<std::pair<size_t, size_t> >& mesh_remap)
@@ -154,6 +164,8 @@ static void parseMeshesGltf(cgltf_data* data, std::vector<Mesh>& meshes, std::ve
 
 			meshes.push_back(Mesh());
 			Mesh& result = meshes.back();
+
+			result.scene = -1;
 
 			result.material = primitive.material;
 
@@ -480,6 +492,10 @@ cgltf_data* parseGltf(const char* path, std::vector<Mesh>& meshes, std::vector<A
 		*error = "file requires Draco mesh compression support";
 	else if (requiresExtension(data, "EXT_meshopt_compression"))
 		*error = "file has already been compressed using gltfpack";
+	else if (requiresExtension(data, "KHR_texture_basisu"))
+		*error = "file requires BasisU texture support";
+	else if (requiresExtension(data, "EXT_mesh_gpu_instancing"))
+		*error = "file requires mesh instancing support";
 	else if (needsDummyBuffers(data))
 		*error = "buffer has no data";
 
@@ -488,6 +504,9 @@ cgltf_data* parseGltf(const char* path, std::vector<Mesh>& meshes, std::vector<A
 		cgltf_free(data);
 		return 0;
 	}
+
+	if (requiresExtension(data, "KHR_mesh_quantization"))
+		fprintf(stderr, "Warning: file uses quantized geometry; repacking may result in increased quantization error\n");
 
 	std::vector<std::pair<size_t, size_t> > mesh_remap;
 
