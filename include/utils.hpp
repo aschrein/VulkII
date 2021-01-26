@@ -1630,10 +1630,17 @@ template <typename K, typename Alloc_t = Default_Allocator> struct BinNode {
     t(key);
     if (right) right->traverse_keys(t);
   }
-  template <typename T> void traverse(T t) {
-    if (left) left->traverse(t);
-    t(this);
-    if (right) right->traverse(t);
+  enum {
+    TRAVERSE_CONTINUE,
+    TRAVERSE_BREAK,
+  };
+  template <typename T> int traverse_break(T t) {
+    if (left)
+      if (left->traverse_break(t) == TRAVERSE_BREAK) return TRAVERSE_BREAK;
+    if (t(this) == TRAVERSE_BREAK) return TRAVERSE_BREAK;
+    if (right)
+      if (right->traverse_break(t) == TRAVERSE_BREAK) return TRAVERSE_BREAK;
+    return TRAVERSE_CONTINUE;
   }
   // returns new root for the subtree
   BinNode *balance() {
@@ -1750,34 +1757,57 @@ class Util_Allocator {
   Util_Allocator(size_t size) { free_root = BinNode_t::create({0, size}); }
   ptrdiff_t alloc(size_t alignment, size_t size) {
     ASSERT_DEBUG(size);
+    if (alignment == 0) alignment = 1;
+    ASSERT_DEBUG(alignment && ((alignment & (alignment - 1)) == 0)); // pot
     if (free_root == NULL) return -1;
     ptrdiff_t offset = -1;
-    free_root->traverse([&](BinNode_t *node) {
-      if (offset >= 0) return;
-      if (node->key.size >= size && (node->key.offset & (alignment - 1)) == 0u) {
-        offset          = node->key.offset;
-        size_t new_size = node->key.size - size;
-        free_root       = free_root->remove({node->key});
+    free_root->traverse_break([&](BinNode_t *node) {
+      size_t end            = node->key.offset + node->key.size;
+      size_t aligned_offset = (node->key.offset + alignment - 1) & (~(alignment - 1));
+      if (aligned_offset >= end) return BinNode_t::TRAVERSE_CONTINUE;
+      size_t usable_space = end - aligned_offset;
+      if (usable_space >= size) {
+        offset            = aligned_offset;
+        size_t key_offset = node->key.offset;
+        size_t key_size   = node->key.size;
+        free_root         = free_root->remove({node->key});
+        if (aligned_offset != key_offset) {
+          size_t diff = aligned_offset - key_offset;
+          ASSERT_DEBUG(diff < key_size && diff > 0);
+          if (free_root == NULL) {
+            free_root = BinNode_t::create({key_offset, diff});
+          } else
+            free_root = free_root->put({key_offset, diff});
+        }
+        size_t new_size = usable_space - size;
         if (new_size) {
           if (free_root == NULL) {
-            free_root = BinNode_t::create({offset + size, new_size});
+            free_root = BinNode_t::create({aligned_offset + size, new_size});
           } else
-            free_root = free_root->put({offset + size, new_size});
+            free_root = free_root->put({aligned_offset + size, new_size});
         }
+        return BinNode_t::TRAVERSE_BREAK;
       }
+      return BinNode_t::TRAVERSE_CONTINUE;
     });
     return offset;
   }
   bool has_free_space(size_t alignment, size_t size) {
     ASSERT_DEBUG(size);
-    ASSERT_DEBUG((alignment & (alignment - 1)) == 0); // pot
+    if (alignment == 0) alignment = 1;
+    ASSERT_DEBUG(alignment && ((alignment & (alignment - 1)) == 0)); // pot
     if (free_root == NULL) return false;
     ptrdiff_t offset = -1;
-    free_root->traverse([&](BinNode_t *node) {
-      if (offset >= 0) return;
-      if (node->key.size >= size && (node->key.offset & (alignment - 1)) == 0u) {
+    free_root->traverse_break([&](BinNode_t *node) {
+      size_t end            = node->key.offset + node->key.size;
+      size_t aligned_offset = (node->key.offset + alignment - 1) & (~(alignment - 1));
+      if (aligned_offset >= end) return BinNode_t::TRAVERSE_CONTINUE;
+      size_t usable_space = end - aligned_offset;
+      if (usable_space >= size) {
         offset = node->key.offset;
+        return BinNode_t::TRAVERSE_BREAK;
       }
+      return BinNode_t::TRAVERSE_CONTINUE;
     });
     return offset >= 0;
   }

@@ -85,14 +85,20 @@ float3 random_color(float2 uv) {
   u32    subcell_y       = group_id.y;
   f32    subcell_uv_step = 1.0f / float(cell_res * COUNTER_GRID_RESOLUTION);
   float2 subcell_uv      = cell_uv + float2(subcell_x, subcell_y) * subcell_uv_step;
-  int2   offsets[6]      = {
+
+#ifdef GI_ORDER_CW
+  int2 offsets[6] = {
       int2(0, 0), int2(0, 1), int2(1, 0), int2(1, 0), int2(0, 1), int2(1, 1),
   };
+#else
+  int2 offsets[6] = {
+      int2(0, 0), int2(1, 0), int2(0, 1), int2(1, 0), int2(1, 1), int2(0, 1),
+  };
+#endif
 
   f32 mip_level = log2(subcell_uv_step * f32(src_res));
   // Scalar loop
   [unroll] for (u32 tri_id = 0; tri_id < 2; tri_id++) {
-
     float2 suv0 = subcell_uv + offsets[0 + tri_id * 3] * subcell_uv_step;
     float2 suv1 = subcell_uv + offsets[1 + tri_id * 3] * subcell_uv_step;
     float2 suv2 = subcell_uv + offsets[2 + tri_id * 3] * subcell_uv_step;
@@ -373,9 +379,8 @@ u32 rasterize_triangle(RWTexture2D<float4> target, Vertex vtx0, Vertex vtx1, Ver
             target[int2(x, y)] = float4(b0, b1, b2, 1.0f);
           else {
             // float3 pixel_normal = normalize(normal_0 * b0 + normal_1 * b1 + normal_2 * b2);
-            float3 pixel_normal =
-                normalize(normal_source.SampleLevel(ss, pixel_uv, mip_level).xyz);
-            target[int2(x, y)] = float4(
+            float3 pixel_normal = normalize(normal_source.SampleLevel(ss, pixel_uv, mip_level).xyz);
+            target[int2(x, y)]  = float4(
                 float3_splat(max(0.0f, dot(pixel_normal, normalize(float3_splat(1.0f))))), 1.0f);
           }
         }

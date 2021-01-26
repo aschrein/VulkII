@@ -1922,20 +1922,21 @@ struct Config {
       if (item.used == false) return;
       sorted.push(name);
     });
-    quicky_sort(&sorted[0], sorted.size, [&](string_t const &a, string_t const &b) {
-      /*double av = 0.0;
-      double bv = 0.0;
-      ito(a.len()) av += pow(10.0, -1.0 * (i + 1)) * (double(a.buf[i]) / 128.0);
-      ito(b.len()) bv += pow(10.0, -1.0 * (i + 1)) * (double(b.buf[i]) / 128.0);
-      return av < bv;*/
-      // if (a.len() < b.len()) return true;
-      size_t len = min(a.len(), b.len());
-      // for (i32 i = (i32)len - 1; i >= 0; i--) {
-      for (i32 i = 0; i < (i32)len; i++) {
-        if (a.buf[i] < b.buf[i]) return true;
-      }
-      return a.len() < b.len();
-    });
+    if (sorted.size)
+      quicky_sort(&sorted[0], sorted.size, [&](string_t const &a, string_t const &b) {
+        /*double av = 0.0;
+        double bv = 0.0;
+        ito(a.len()) av += pow(10.0, -1.0 * (i + 1)) * (double(a.buf[i]) / 128.0);
+        ito(b.len()) bv += pow(10.0, -1.0 * (i + 1)) * (double(b.buf[i]) / 128.0);
+        return av < bv;*/
+        // if (a.len() < b.len()) return true;
+        size_t len = min(a.len(), b.len());
+        // for (i32 i = (i32)len - 1; i >= 0; i--) {
+        for (i32 i = 0; i < (i32)len; i++) {
+          if (a.buf[i] < b.buf[i]) return true;
+        }
+        return a.len() < b.len();
+      });
     // items.iter_pairs([&](string_t const &name, Config_Item &item) {
     ito(sorted.size) {
       string_t const &name = sorted[i];
@@ -2657,7 +2658,7 @@ class GfxMeshletSurface {
        }
      }
      ctx->bind_index_buffer(buffer, index_offset, index_type);*/
-    ito(meshlets->meshlets.size) { f(meshlets[i]); }
+    ito(meshlets->meshlets.size) { f(meshlets->meshlets[i]); }
     // u32 vertex_cursor = 0;
     // u32 index_cursor  = 0;
     // ctx->draw_indexed(surface->mesh.num_indices, 1, index_cursor, 0, vertex_cursor);

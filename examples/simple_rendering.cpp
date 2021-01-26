@@ -37,428 +37,13 @@ struct RenderingContext {
     fprintf(scene_dump, ")\n");
   }
 };
-
+#if 0
 struct GBuffer {
   Resource_ID normal;
   Resource_ID depth;
 };
 
 class BakerPass {
-  public:
-  static constexpr char const *NAME = "GBuffer Pass";
-  Pair<double, char const *>   get_duration() { return {timestamps.duration, NAME}; }
-
-#define RESOURCE_LIST                                                                              \
-  RESOURCE(signature);                                                                             \
-  RESOURCE(pso);                                                                                   \
-  RESOURCE(pass);                                                                                  \
-  RESOURCE(frame_buffer);                                                                          \
-  RESOURCE(normal_rt);                                                                             \
-  RESOURCE(depth_rt);                                                                              \
-  RESOURCE(gbuffer_vs);                                                                            \
-  RESOURCE(gbuffer_ps);
-
-#define RESOURCE(name) Resource_ID name{};
-  RESOURCE_LIST
-#undef RESOURCE
-
-  u32 width  = 0;
-  u32 height = 0;
-  // BufferThing bthing{};
-
-  rd::Render_Pass_Create_Info info{};
-  rd::Graphics_Pipeline_State gfx_state{};
-
-  public:
-  TimeStamp_Pool timestamps = {};
-  struct PushConstants {
-    float4x4 viewproj;
-    float4x4 world_transform;
-  };
-  void init(RenderingContext rctx) {
-    timestamps.init(rctx.factory);
-    // bthing.init(rctx.factory);
-    gbuffer_vs = rctx.factory->create_shader(rd::Stage_t::VERTEX, stref_s(R"(
-struct PushConstants
-{
-  float4x4 viewproj;
-  float4x4 world_transform;
-};
-[[vk::push_constant]] ConstantBuffer<PushConstants> pc : DX12_PUSH_CONSTANTS_REGISTER;
-
-struct PSInput {
-  [[vk::location(0)]] float4 pos     : SV_POSITION;
-  [[vk::location(1)]] float3 normal  : TEXCOORD0;
-  //[[vk::location(2)]] float2 uv      : TEXCOORD1;
-};
-
-struct VSInput {
-  [[vk::location(0)]] float3 pos     : POSITION;
-  [[vk::location(1)]] float3 normal  : NORMAL;
-  //[[vk::location(4)]] float2 uv      : TEXCOORD0;
-};
-
-PSInput main(in VSInput input) {
-  PSInput output;
-  output.normal = mul(pc.world_transform, float4(input.normal.xyz, 0.0f)).xyz;
-  //output.uv     = input.uv;
-  output.pos    = mul(pc.viewproj, mul(pc.world_transform, float4(input.pos, 1.0f)));
-  return output;
-}
-)"),
-                                             NULL, 0);
-    gbuffer_ps = rctx.factory->create_shader(rd::Stage_t::PIXEL, stref_s(R"(
-struct PSInput {
-  [[vk::location(0)]] float4 pos     : SV_POSITION;
-  [[vk::location(1)]] float3 normal  : TEXCOORD0;
-  //[[vk::location(2)]] float2 uv      : TEXCOORD1;
-};
-
-float4 main(in PSInput input) : SV_TARGET0 {
-  return float4(input.normal.xyz, 1.0f);
-}
-)"),
-                                             NULL, 0);
-    signature  = [=] {
-      rd::Binding_Space_Create_Info set_info{};
-      rd::Binding_Table_Create_Info table_info{};
-      table_info.spaces.push(set_info);
-      table_info.push_constants_size = sizeof(PushConstants);
-      return rctx.factory->create_signature(table_info);
-    }();
-    pass = [=] {
-      rd::Render_Pass_Create_Info info{};
-      rd::RT_Ref                  rt0{};
-      rt0.format            = rd::Format::RGBA32_FLOAT;
-      rt0.clear_color.clear = true;
-      rt0.clear_color.r     = 0.0f;
-      rt0.clear_color.g     = 0.0f;
-      rt0.clear_color.b     = 0.0f;
-      rt0.clear_color.a     = 0.0f;
-      info.rts.push(rt0);
-
-      info.depth_target.enabled           = true;
-      info.depth_target.clear_depth.clear = true;
-      info.depth_target.format            = rd::Format::D32_OR_R32_FLOAT;
-      return rctx.factory->create_render_pass(info);
-    }();
-
-    pso = [=] {
-      setup_default_state(gfx_state);
-      rd::DS_State ds_state{};
-      rd::RS_State rs_state{};
-      ds_state.cmp_op             = rd::Cmp::GE;
-      ds_state.enable_depth_test  = true;
-      ds_state.enable_depth_write = true;
-      gfx_state.DS_set_state(ds_state);
-      rd::Blend_State bs{};
-      bs.enabled = false;
-      bs.color_write_mask =
-          (u32)rd::Color_Component_Bit::R_BIT | (u32)rd::Color_Component_Bit::G_BIT |
-          (u32)rd::Color_Component_Bit::B_BIT | (u32)rd::Color_Component_Bit::A_BIT;
-      gfx_state.OM_set_blend_state(0, bs);
-      gfx_state.VS_set_shader(gbuffer_vs);
-      gfx_state.PS_set_shader(gbuffer_ps);
-      {
-        rd::Attribute_Info info;
-        MEMZERO(info);
-        info.binding  = 0;
-        info.format   = rd::Format::RGB32_FLOAT;
-        info.location = 0;
-        info.offset   = 0;
-        info.type     = rd::Attriute_t::POSITION;
-        gfx_state.IA_set_attribute(info);
-      }
-      {
-        rd::Attribute_Info info;
-        MEMZERO(info);
-        info.binding  = 1;
-        info.format   = rd::Format::RGB32_FLOAT;
-        info.location = 1;
-        info.offset   = 0;
-        info.type     = rd::Attriute_t::NORMAL;
-        gfx_state.IA_set_attribute(info);
-      }
-      /*{
-        rd::Attribute_Info info;
-        MEMZERO(info);
-        info.binding  = 2;
-        info.format   = rd::Format::RG32_FLOAT;
-        info.location = 2;
-        info.offset   = 0;
-        info.type     = rd::Attriute_t::TEXCOORD0;
-        gfx_state.IA_set_attribute(info);
-      }*/
-      gfx_state.IA_set_vertex_binding(0, 12, rd::Input_Rate::VERTEX);
-      gfx_state.IA_set_vertex_binding(1, 12, rd::Input_Rate::VERTEX);
-      // gfx_state.IA_set_vertex_binding(2, 8, rd::Input_Rate::VERTEX);
-      gfx_state.IA_set_topology(rd::Primitive::TRIANGLE_LIST);
-      return rctx.factory->create_graphics_pso(signature, pass, gfx_state);
-    }();
-  }
-  void update_frame_buffer(RenderingContext rctx) {
-    if (frame_buffer.is_valid()) rctx.factory->release_resource(frame_buffer);
-    if (normal_rt.is_valid()) rctx.factory->release_resource(normal_rt);
-    if (depth_rt.is_valid()) rctx.factory->release_resource(depth_rt);
-
-    normal_rt = [=] {
-      rd::Image_Create_Info rt0_info{};
-      rt0_info.format     = rd::Format::RGBA32_FLOAT;
-      rt0_info.width      = width;
-      rt0_info.height     = height;
-      rt0_info.depth      = 1;
-      rt0_info.layers     = 1;
-      rt0_info.levels     = 1;
-      rt0_info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_RT |      //
-                            (u32)rd::Image_Usage_Bits::USAGE_SAMPLED | //
-                            (u32)rd::Image_Usage_Bits::USAGE_UAV;
-      return rctx.factory->create_image(rt0_info);
-    }();
-    depth_rt = [=] {
-      rd::Image_Create_Info rt0_info{};
-      rt0_info.format = rd::Format::D32_OR_R32_FLOAT;
-      rt0_info.width  = width;
-      rt0_info.height = height;
-      rt0_info.depth  = 1;
-      rt0_info.layers = 1;
-      rt0_info.levels = 1;
-      rt0_info.usage_bits =
-          (u32)rd::Image_Usage_Bits::USAGE_DT | (u32)rd::Image_Usage_Bits::USAGE_SAMPLED;
-      return rctx.factory->create_image(rt0_info);
-    }();
-    frame_buffer = [=] {
-      rd::Frame_Buffer_Create_Info info{};
-      rd::RT_View                  rt0{};
-      rt0.image  = normal_rt;
-      rt0.format = rd::Format::RGBA32_FLOAT;
-      info.rts.push(rt0);
-
-      info.depth_target.enabled = true;
-      info.depth_target.image   = depth_rt;
-      info.depth_target.format  = rd::Format::D32_OR_R32_FLOAT;
-      return rctx.factory->create_frame_buffer(pass, info);
-    }();
-  }
-  void render(RenderingContext rctx) {
-    timestamps.update(rctx.factory);
-    // float4x4 bvh_visualizer_offset = glm::translate(float4x4(1.0f), float3(-10.0f, 0.0f,
-    // 0.0f));
-    // bthing.test_buffers(rctx.factory);
-    u32 width  = rctx.config->get_u32("g_buffer_width");
-    u32 height = rctx.config->get_u32("g_buffer_height");
-    if (this->width != width || this->height != height) {
-      this->width  = width;
-      this->height = height;
-      update_frame_buffer(rctx);
-    }
-
-    struct PushConstants {
-      float4x4 viewproj;
-      float4x4 world_transform;
-    } pc;
-
-    float4x4 viewproj = rctx.gizmo_layer->get_camera().viewproj();
-
-    rd::ICtx *ctx = rctx.factory->start_render_pass(pass, frame_buffer);
-    {
-      TracyVulkIINamedZone(ctx, "GBuffer Pass");
-      timestamps.begin_range(ctx);
-      ctx->start_render_pass();
-
-      ctx->set_viewport(0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f);
-      ctx->set_scissor(0, 0, width, height);
-      pc.viewproj = viewproj;
-
-      rd::IBinding_Table *table = rctx.factory->create_binding_table(signature);
-      defer(table->release());
-      table->push_constants(&viewproj, 0, sizeof(float4x4));
-      ctx->bind_table(table);
-      ctx->bind_graphics_pso(pso);
-      rctx.scene->traverse([&](Node *node) {
-        if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
-          GfxSufraceComponent *gs    = mn->getComponent<GfxSufraceComponent>();
-          float4x4             world = mn->get_transform();
-          pc.world_transform         = world;
-          table->push_constants(&pc, 0, sizeof(pc));
-          ito(gs->getNumSurfaces()) {
-            GfxSurface *s = gs->getSurface(i);
-            s->draw(ctx, gfx_state);
-          }
-        }
-      });
-      ctx->end_render_pass();
-      timestamps.end_range(ctx);
-    }
-
-    Resource_ID e = rctx.factory->end_render_pass(ctx);
-    timestamps.commit(e);
-  }
-  GBuffer get_gbuffer() {
-    GBuffer out{};
-    out.normal = normal_rt;
-    out.depth  = depth_rt;
-    return out;
-  }
-  void release(rd::IDevice *factory) {
-    timestamps.release(factory);
-#define RESOURCE(name)                                                                             \
-  if (name.is_valid()) factory->release_resource(name);
-    RESOURCE_LIST
-#undef RESOURCE
-  }
-#undef RESOURCE_LIST
-};
-
-class BufferThing {
-#define RESOURCE_LIST                                                                              \
-  RESOURCE(cs0);                                                                                   \
-  RESOURCE(cs1);                                                                                   \
-  RESOURCE(cs2);                                                                                   \
-  RESOURCE(buffer);                                                                                \
-  RESOURCE(buffer1);                                                                               \
-  RESOURCE(readback);                                                                              \
-  RESOURCE(signature);
-
-#define RESOURCE(name) Resource_ID name{};
-  RESOURCE_LIST
-#undef RESOURCE
-
-  public:
-  void init(rd::IDevice *dev) {
-    buffer = [dev] {
-      rd::Buffer_Create_Info buf_info;
-      MEMZERO(buf_info);
-      buf_info.memory_type = rd::Memory_Type::GPU_LOCAL;
-      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_UAV |
-                            (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC |
-                            (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
-      buf_info.size = sizeof(u32) * 16 * 1024 * 1024;
-      return dev->create_buffer(buf_info);
-    }();
-    // Allocate a buffer.
-    buffer1 = [dev] {
-      rd::Buffer_Create_Info buf_info;
-      MEMZERO(buf_info);
-      buf_info.memory_type = rd::Memory_Type::GPU_LOCAL;
-      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_UAV |
-                            (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC |
-                            (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
-      buf_info.size = sizeof(u32) * 16 * 1024 * 1024;
-      return dev->create_buffer(buf_info);
-    }();
-
-    signature = [dev] {
-      rd::Binding_Space_Create_Info set_info{};
-      set_info.bindings.push({rd::Binding_t::UAV_BUFFER, 1});
-      set_info.bindings.push({rd::Binding_t::UAV_BUFFER, 1});
-      rd::Binding_Table_Create_Info table_info{};
-      table_info.spaces.push(set_info);
-      table_info.push_constants_size = 4;
-      return dev->create_signature(table_info);
-    }();
-
-    cs0 = dev->create_compute_pso(signature, dev->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
-[[vk::binding(0, 0)]] RWByteAddressBuffer BufferOut : register(u0, space0);
-
-[numthreads(64, 1, 1)]
-void main(uint3 DTid : SV_DispatchThreadID)
-{
-    uint id = DTid.x % 1024;
-    for (uint i = 0; i < 100; i++)
-      BufferOut.Store<uint>(id * 4, BufferOut.Load<uint>(id * 4) + 1);
-}
-)"),
-                                                                NULL, 0));
-    cs1 = dev->create_compute_pso(signature, dev->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
-[[vk::binding(0, 0)]] RWByteAddressBuffer BufferOut : register(u0, space0);
-[[vk::binding(1, 0)]] RWByteAddressBuffer BufferIn : register(u1, space0);
-
-[numthreads(64, 1, 1)]
-void main(uint3 DTid : SV_DispatchThreadID)
-{
-    uint id = DTid.x % 1024;
-    for (uint i = 0; i < 100; i++)
-      BufferOut.Store<uint>(id * 4, BufferOut.Load<uint>(id * 4) + 1);
-}
-)"),
-                                                                NULL, 0));
-    cs2 = dev->create_compute_pso(signature, dev->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
-[[vk::binding(0, 0)]] RWByteAddressBuffer BufferOut: register(u0, space0);
-[[vk::binding(1, 0)]] RWByteAddressBuffer BufferIn : register(u1, space0);
-  
-struct CullPushConstants
-{
-  uint val;
-};
-[[vk::push_constant]] ConstantBuffer<CullPushConstants> pc : DX12_PUSH_CONSTANTS_REGISTER;
-  
-[numthreads(64, 1, 1)]
-  void main(uint3 DTid : SV_DispatchThreadID)
-{
-    uint id = DTid.x % 1024;
-    for (uint i = 0; i < 100; i++)
-      BufferOut.Store<uint>(id * 4, BufferOut.Load<uint>(id * 4) * pc.val);
-}
-)"),
-                                                                NULL, 0));
-  }
-  void test_buffers(rd::IDevice *dev) {
-    Resource_ID wevent_0{};
-    Resource_ID wevent_1{};
-    {
-      rd::ICtx *ctx = dev->start_async_compute_pass();
-      {
-        TracyVulkIINamedZone(ctx, "Async Compute Example 1");
-        ctx->bind_compute(cs0);
-        rd::IBinding_Table *table = dev->create_binding_table(signature);
-        defer(table->release());
-        table->bind_UAV_buffer(0, 0, buffer, 0, sizeof(u32) * 1024);
-        table->bind_UAV_buffer(0, 1, buffer, 0, sizeof(u32) * 1024);
-        ctx->bind_table(table);
-        ctx->dispatch(1024 * 32, 1, 1);
-      }
-      wevent_0 = dev->end_async_compute_pass(ctx);
-    }
-    // dev->wait_idle();
-    u32 val = 2;
-    {
-      rd::ICtx *ctx = dev->start_async_compute_pass();
-      {
-        TracyVulkIINamedZone(ctx, "Async Compute Example 2");
-        // ctx->wait_for_event(wevent_0);
-        ctx->bind_compute(cs1);
-        rd::IBinding_Table *table = dev->create_binding_table(signature);
-        defer(table->release());
-        table->bind_UAV_buffer(0, 0, buffer1, 0, sizeof(u32) * 1024);
-        table->bind_UAV_buffer(0, 1, buffer1, 0, sizeof(u32) * 1024);
-        ctx->bind_table(table);
-        // ctx->buffer_barrier(buffer, rd::Buffer_Access::UAV);
-        ctx->dispatch(1024 * 32, 1, 1);
-      }
-      wevent_1 = dev->end_async_compute_pass(ctx);
-    }
-    {
-      rd::ICtx *ctx = dev->start_async_copy_pass();
-      {
-        // ctx->wait_for_event(wevent_0);
-        // ctx->wait_for_event(wevent_1);
-        TracyVulkIINamedZone(ctx, "Async Copy Example");
-        ctx->copy_buffer(buffer, 0, buffer1, 0, sizeof(u32) * 16 * 1024 * 1024);
-      }
-      wevent_1 = dev->end_async_copy_pass(ctx);
-    }
-  }
-  void release(rd::IDevice *factory) {
-#define RESOURCE(name)                                                                             \
-  if (name.is_valid()) factory->release_resource(name);
-    RESOURCE_LIST
-#undef RESOURCE
-  }
-#undef RESOURCE_LIST
-};
-
-#if 1
-class GBufferPass {
   public:
   static constexpr char const *NAME = "GBuffer Pass";
   Pair<double, char const *>   get_duration() { return {timestamps.duration, NAME}; }
@@ -723,31 +308,446 @@ float4 main(in PSInput input) : SV_TARGET0 {
   }
 #  undef RESOURCE_LIST
 };
-#endif
+
+class BufferThing {
+#  define RESOURCE_LIST                                                                            \
+    RESOURCE(cs0);                                                                                 \
+    RESOURCE(cs1);                                                                                 \
+    RESOURCE(cs2);                                                                                 \
+    RESOURCE(buffer);                                                                              \
+    RESOURCE(buffer1);                                                                             \
+    RESOURCE(readback);                                                                            \
+    RESOURCE(signature);
+
+#  define RESOURCE(name) Resource_ID name{};
+  RESOURCE_LIST
+#  undef RESOURCE
+
+  public:
+  void init(rd::IDevice *dev) {
+    buffer = [dev] {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.memory_type = rd::Memory_Type::GPU_LOCAL;
+      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_UAV |
+                            (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC |
+                            (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
+      buf_info.size = sizeof(u32) * 16 * 1024 * 1024;
+      return dev->create_buffer(buf_info);
+    }();
+    // Allocate a buffer.
+    buffer1 = [dev] {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.memory_type = rd::Memory_Type::GPU_LOCAL;
+      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_UAV |
+                            (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC |
+                            (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
+      buf_info.size = sizeof(u32) * 16 * 1024 * 1024;
+      return dev->create_buffer(buf_info);
+    }();
+
+    signature = [dev] {
+      rd::Binding_Space_Create_Info set_info{};
+      set_info.bindings.push({rd::Binding_t::UAV_BUFFER, 1});
+      set_info.bindings.push({rd::Binding_t::UAV_BUFFER, 1});
+      rd::Binding_Table_Create_Info table_info{};
+      table_info.spaces.push(set_info);
+      table_info.push_constants_size = 4;
+      return dev->create_signature(table_info);
+    }();
+
+    cs0 = dev->create_compute_pso(signature, dev->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
+[[vk::binding(0, 0)]] RWByteAddressBuffer BufferOut : register(u0, space0);
+
+[numthreads(64, 1, 1)]
+void main(uint3 DTid : SV_DispatchThreadID)
+{
+    uint id = DTid.x % 1024;
+    for (uint i = 0; i < 100; i++)
+      BufferOut.Store<uint>(id * 4, BufferOut.Load<uint>(id * 4) + 1);
+}
+)"),
+                                                                NULL, 0));
+    cs1 = dev->create_compute_pso(signature, dev->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
+[[vk::binding(0, 0)]] RWByteAddressBuffer BufferOut : register(u0, space0);
+[[vk::binding(1, 0)]] RWByteAddressBuffer BufferIn : register(u1, space0);
+
+[numthreads(64, 1, 1)]
+void main(uint3 DTid : SV_DispatchThreadID)
+{
+    uint id = DTid.x % 1024;
+    for (uint i = 0; i < 100; i++)
+      BufferOut.Store<uint>(id * 4, BufferOut.Load<uint>(id * 4) + 1);
+}
+)"),
+                                                                NULL, 0));
+    cs2 = dev->create_compute_pso(signature, dev->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
+[[vk::binding(0, 0)]] RWByteAddressBuffer BufferOut: register(u0, space0);
+[[vk::binding(1, 0)]] RWByteAddressBuffer BufferIn : register(u1, space0);
+  
+struct CullPushConstants
+{
+  uint val;
+};
+[[vk::push_constant]] ConstantBuffer<CullPushConstants> pc : DX12_PUSH_CONSTANTS_REGISTER;
+  
+[numthreads(64, 1, 1)]
+  void main(uint3 DTid : SV_DispatchThreadID)
+{
+    uint id = DTid.x % 1024;
+    for (uint i = 0; i < 100; i++)
+      BufferOut.Store<uint>(id * 4, BufferOut.Load<uint>(id * 4) * pc.val);
+}
+)"),
+                                                                NULL, 0));
+  }
+  void test_buffers(rd::IDevice *dev) {
+    Resource_ID wevent_0{};
+    Resource_ID wevent_1{};
+    {
+      rd::ICtx *ctx = dev->start_async_compute_pass();
+      {
+        TracyVulkIINamedZone(ctx, "Async Compute Example 1");
+        ctx->bind_compute(cs0);
+        rd::IBinding_Table *table = dev->create_binding_table(signature);
+        defer(table->release());
+        table->bind_UAV_buffer(0, 0, buffer, 0, sizeof(u32) * 1024);
+        table->bind_UAV_buffer(0, 1, buffer, 0, sizeof(u32) * 1024);
+        ctx->bind_table(table);
+        ctx->dispatch(1024 * 32, 1, 1);
+      }
+      wevent_0 = dev->end_async_compute_pass(ctx);
+    }
+    // dev->wait_idle();
+    u32 val = 2;
+    {
+      rd::ICtx *ctx = dev->start_async_compute_pass();
+      {
+        TracyVulkIINamedZone(ctx, "Async Compute Example 2");
+        // ctx->wait_for_event(wevent_0);
+        ctx->bind_compute(cs1);
+        rd::IBinding_Table *table = dev->create_binding_table(signature);
+        defer(table->release());
+        table->bind_UAV_buffer(0, 0, buffer1, 0, sizeof(u32) * 1024);
+        table->bind_UAV_buffer(0, 1, buffer1, 0, sizeof(u32) * 1024);
+        ctx->bind_table(table);
+        // ctx->buffer_barrier(buffer, rd::Buffer_Access::UAV);
+        ctx->dispatch(1024 * 32, 1, 1);
+      }
+      wevent_1 = dev->end_async_compute_pass(ctx);
+    }
+    {
+      rd::ICtx *ctx = dev->start_async_copy_pass();
+      {
+        // ctx->wait_for_event(wevent_0);
+        // ctx->wait_for_event(wevent_1);
+        TracyVulkIINamedZone(ctx, "Async Copy Example");
+        ctx->copy_buffer(buffer, 0, buffer1, 0, sizeof(u32) * 16 * 1024 * 1024);
+      }
+      wevent_1 = dev->end_async_copy_pass(ctx);
+    }
+  }
+  void release(rd::IDevice *factory) {
+#  define RESOURCE(name)                                                                           \
+    if (name.is_valid()) factory->release_resource(name);
+    RESOURCE_LIST
+#  undef RESOURCE
+  }
+#  undef RESOURCE_LIST
+};
+
+#  if 1
+class GBufferPass {
+  public:
+  static constexpr char const *NAME = "GBuffer Pass";
+  Pair<double, char const *>   get_duration() { return {timestamps.duration, NAME}; }
+
+#    define RESOURCE_LIST                                                                          \
+      RESOURCE(signature);                                                                         \
+      RESOURCE(pso);                                                                               \
+      RESOURCE(pass);                                                                              \
+      RESOURCE(frame_buffer);                                                                      \
+      RESOURCE(normal_rt);                                                                         \
+      RESOURCE(depth_rt);                                                                          \
+      RESOURCE(gbuffer_vs);                                                                        \
+      RESOURCE(gbuffer_ps);
+
+#    define RESOURCE(name) Resource_ID name{};
+  RESOURCE_LIST
+#    undef RESOURCE
+
+  u32 width  = 0;
+  u32 height = 0;
+  // BufferThing bthing{};
+
+  rd::Render_Pass_Create_Info info{};
+  rd::Graphics_Pipeline_State gfx_state{};
+
+  public:
+  TimeStamp_Pool timestamps = {};
+  struct PushConstants {
+    float4x4 viewproj;
+    float4x4 world_transform;
+  };
+  void init(RenderingContext rctx) {
+    timestamps.init(rctx.factory);
+    // bthing.init(rctx.factory);
+    gbuffer_vs = rctx.factory->create_shader(rd::Stage_t::VERTEX, stref_s(R"(
+struct PushConstants
+{
+  float4x4 viewproj;
+  float4x4 world_transform;
+};
+[[vk::push_constant]] ConstantBuffer<PushConstants> pc : DX12_PUSH_CONSTANTS_REGISTER;
+
+struct PSInput {
+  [[vk::location(0)]] float4 pos     : SV_POSITION;
+  [[vk::location(1)]] float3 normal  : TEXCOORD0;
+  //[[vk::location(2)]] float2 uv      : TEXCOORD1;
+};
+
+struct VSInput {
+  [[vk::location(0)]] float3 pos     : POSITION;
+  [[vk::location(1)]] float3 normal  : NORMAL;
+  //[[vk::location(4)]] float2 uv      : TEXCOORD0;
+};
+
+PSInput main(in VSInput input) {
+  PSInput output;
+  output.normal = mul(pc.world_transform, float4(input.normal.xyz, 0.0f)).xyz;
+  //output.uv     = input.uv;
+  output.pos    = mul(pc.viewproj, mul(pc.world_transform, float4(input.pos, 1.0f)));
+  return output;
+}
+)"),
+                                             NULL, 0);
+    gbuffer_ps = rctx.factory->create_shader(rd::Stage_t::PIXEL, stref_s(R"(
+struct PSInput {
+  [[vk::location(0)]] float4 pos     : SV_POSITION;
+  [[vk::location(1)]] float3 normal  : TEXCOORD0;
+  //[[vk::location(2)]] float2 uv      : TEXCOORD1;
+};
+
+float4 main(in PSInput input) : SV_TARGET0 {
+  return float4(input.normal.xyz, 1.0f);
+}
+)"),
+                                             NULL, 0);
+    signature  = [=] {
+      rd::Binding_Space_Create_Info set_info{};
+      rd::Binding_Table_Create_Info table_info{};
+      table_info.spaces.push(set_info);
+      table_info.push_constants_size = sizeof(PushConstants);
+      return rctx.factory->create_signature(table_info);
+    }();
+    pass = [=] {
+      rd::Render_Pass_Create_Info info{};
+      rd::RT_Ref                  rt0{};
+      rt0.format            = rd::Format::RGBA32_FLOAT;
+      rt0.clear_color.clear = true;
+      rt0.clear_color.r     = 0.0f;
+      rt0.clear_color.g     = 0.0f;
+      rt0.clear_color.b     = 0.0f;
+      rt0.clear_color.a     = 0.0f;
+      info.rts.push(rt0);
+
+      info.depth_target.enabled           = true;
+      info.depth_target.clear_depth.clear = true;
+      info.depth_target.format            = rd::Format::D32_OR_R32_FLOAT;
+      return rctx.factory->create_render_pass(info);
+    }();
+
+    pso = [=] {
+      setup_default_state(gfx_state);
+      rd::DS_State ds_state{};
+      rd::RS_State rs_state{};
+      ds_state.cmp_op             = rd::Cmp::GE;
+      ds_state.enable_depth_test  = true;
+      ds_state.enable_depth_write = true;
+      gfx_state.DS_set_state(ds_state);
+      rd::Blend_State bs{};
+      bs.enabled = false;
+      bs.color_write_mask =
+          (u32)rd::Color_Component_Bit::R_BIT | (u32)rd::Color_Component_Bit::G_BIT |
+          (u32)rd::Color_Component_Bit::B_BIT | (u32)rd::Color_Component_Bit::A_BIT;
+      gfx_state.OM_set_blend_state(0, bs);
+      gfx_state.VS_set_shader(gbuffer_vs);
+      gfx_state.PS_set_shader(gbuffer_ps);
+      {
+        rd::Attribute_Info info;
+        MEMZERO(info);
+        info.binding  = 0;
+        info.format   = rd::Format::RGB32_FLOAT;
+        info.location = 0;
+        info.offset   = 0;
+        info.type     = rd::Attriute_t::POSITION;
+        gfx_state.IA_set_attribute(info);
+      }
+      {
+        rd::Attribute_Info info;
+        MEMZERO(info);
+        info.binding  = 1;
+        info.format   = rd::Format::RGB32_FLOAT;
+        info.location = 1;
+        info.offset   = 0;
+        info.type     = rd::Attriute_t::NORMAL;
+        gfx_state.IA_set_attribute(info);
+      }
+      /*{
+        rd::Attribute_Info info;
+        MEMZERO(info);
+        info.binding  = 2;
+        info.format   = rd::Format::RG32_FLOAT;
+        info.location = 2;
+        info.offset   = 0;
+        info.type     = rd::Attriute_t::TEXCOORD0;
+        gfx_state.IA_set_attribute(info);
+      }*/
+      gfx_state.IA_set_vertex_binding(0, 12, rd::Input_Rate::VERTEX);
+      gfx_state.IA_set_vertex_binding(1, 12, rd::Input_Rate::VERTEX);
+      // gfx_state.IA_set_vertex_binding(2, 8, rd::Input_Rate::VERTEX);
+      gfx_state.IA_set_topology(rd::Primitive::TRIANGLE_LIST);
+      return rctx.factory->create_graphics_pso(signature, pass, gfx_state);
+    }();
+  }
+  void update_frame_buffer(RenderingContext rctx) {
+    if (frame_buffer.is_valid()) rctx.factory->release_resource(frame_buffer);
+    if (normal_rt.is_valid()) rctx.factory->release_resource(normal_rt);
+    if (depth_rt.is_valid()) rctx.factory->release_resource(depth_rt);
+
+    normal_rt = [=] {
+      rd::Image_Create_Info rt0_info{};
+      rt0_info.format     = rd::Format::RGBA32_FLOAT;
+      rt0_info.width      = width;
+      rt0_info.height     = height;
+      rt0_info.depth      = 1;
+      rt0_info.layers     = 1;
+      rt0_info.levels     = 1;
+      rt0_info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_RT |      //
+                            (u32)rd::Image_Usage_Bits::USAGE_SAMPLED | //
+                            (u32)rd::Image_Usage_Bits::USAGE_UAV;
+      return rctx.factory->create_image(rt0_info);
+    }();
+    depth_rt = [=] {
+      rd::Image_Create_Info rt0_info{};
+      rt0_info.format = rd::Format::D32_OR_R32_FLOAT;
+      rt0_info.width  = width;
+      rt0_info.height = height;
+      rt0_info.depth  = 1;
+      rt0_info.layers = 1;
+      rt0_info.levels = 1;
+      rt0_info.usage_bits =
+          (u32)rd::Image_Usage_Bits::USAGE_DT | (u32)rd::Image_Usage_Bits::USAGE_SAMPLED;
+      return rctx.factory->create_image(rt0_info);
+    }();
+    frame_buffer = [=] {
+      rd::Frame_Buffer_Create_Info info{};
+      rd::RT_View                  rt0{};
+      rt0.image  = normal_rt;
+      rt0.format = rd::Format::RGBA32_FLOAT;
+      info.rts.push(rt0);
+
+      info.depth_target.enabled = true;
+      info.depth_target.image   = depth_rt;
+      info.depth_target.format  = rd::Format::D32_OR_R32_FLOAT;
+      return rctx.factory->create_frame_buffer(pass, info);
+    }();
+  }
+  void render(RenderingContext rctx) {
+    timestamps.update(rctx.factory);
+    // float4x4 bvh_visualizer_offset = glm::translate(float4x4(1.0f), float3(-10.0f, 0.0f,
+    // 0.0f));
+    // bthing.test_buffers(rctx.factory);
+    u32 width  = rctx.config->get_u32("g_buffer_width");
+    u32 height = rctx.config->get_u32("g_buffer_height");
+    if (this->width != width || this->height != height) {
+      this->width  = width;
+      this->height = height;
+      update_frame_buffer(rctx);
+    }
+
+    struct PushConstants {
+      float4x4 viewproj;
+      float4x4 world_transform;
+    } pc;
+
+    float4x4 viewproj = rctx.gizmo_layer->get_camera().viewproj();
+
+    rd::ICtx *ctx = rctx.factory->start_render_pass(pass, frame_buffer);
+    {
+      TracyVulkIINamedZone(ctx, "GBuffer Pass");
+      timestamps.begin_range(ctx);
+      ctx->start_render_pass();
+
+      ctx->set_viewport(0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f);
+      ctx->set_scissor(0, 0, width, height);
+      pc.viewproj = viewproj;
+
+      rd::IBinding_Table *table = rctx.factory->create_binding_table(signature);
+      defer(table->release());
+      table->push_constants(&viewproj, 0, sizeof(float4x4));
+      ctx->bind_table(table);
+      ctx->bind_graphics_pso(pso);
+      rctx.scene->traverse([&](Node *node) {
+        if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
+          GfxSufraceComponent *gs    = mn->getComponent<GfxSufraceComponent>();
+          float4x4             world = mn->get_transform();
+          pc.world_transform         = world;
+          table->push_constants(&pc, 0, sizeof(pc));
+          ito(gs->getNumSurfaces()) {
+            GfxSurface *s = gs->getSurface(i);
+            s->draw(ctx, gfx_state);
+          }
+        }
+      });
+      ctx->end_render_pass();
+      timestamps.end_range(ctx);
+    }
+
+    Resource_ID e = rctx.factory->end_render_pass(ctx);
+    timestamps.commit(e);
+  }
+  GBuffer get_gbuffer() {
+    GBuffer out{};
+    out.normal = normal_rt;
+    out.depth  = depth_rt;
+    return out;
+  }
+  void release(rd::IDevice *factory) {
+    timestamps.release(factory);
+#    define RESOURCE(name)                                                                         \
+      if (name.is_valid()) factory->release_resource(name);
+    RESOURCE_LIST
+#    undef RESOURCE
+  }
+#    undef RESOURCE_LIST
+};
+#  endif
 
 class GizmoPass {
   public:
   static constexpr char const *NAME = "Gizmo Pass";
   Pair<double, char const *>   get_duration() { return {timestamps.duration, NAME}; }
 
-#define RESOURCE_LIST                                                                              \
-  RESOURCE(signature);                                                                             \
-  RESOURCE(pso);                                                                                   \
-  RESOURCE(pass);                                                                                  \
-  RESOURCE(frame_buffer);                                                                          \
-  RESOURCE(rt);
+#  define RESOURCE_LIST                                                                            \
+    RESOURCE(signature);                                                                           \
+    RESOURCE(pso);                                                                                 \
+    RESOURCE(pass);                                                                                \
+    RESOURCE(frame_buffer);                                                                        \
+    RESOURCE(rt);
 
-#define RESOURCE(name) Resource_ID name{};
+#  define RESOURCE(name) Resource_ID name{};
   RESOURCE_LIST
-#undef RESOURCE
+#  undef RESOURCE
   void release(rd::IDevice *factory) {
     timestamps.release(factory);
-#define RESOURCE(name)                                                                             \
-  if (name.is_valid()) factory->release_resource(name);
+#  define RESOURCE(name)                                                                           \
+    if (name.is_valid()) factory->release_resource(name);
     RESOURCE_LIST
-#undef RESOURCE
+#  undef RESOURCE
   }
-#undef RESOURCE_LIST
+#  undef RESOURCE_LIST
 
   u32         width  = 0;
   u32         height = 0;
@@ -885,15 +885,15 @@ class ComposePass {
   static constexpr char const *NAME = "Compose Pass";
   Pair<double, char const *>   get_duration() { return {timestamps.duration, NAME}; }
 
-#define RESOURCE_LIST                                                                              \
-  RESOURCE(signature);                                                                             \
-  RESOURCE(sampler_state);                                                                         \
-  RESOURCE(rt);                                                                                    \
-  RESOURCE(pso);
+#  define RESOURCE_LIST                                                                            \
+    RESOURCE(signature);                                                                           \
+    RESOURCE(sampler_state);                                                                       \
+    RESOURCE(rt);                                                                                  \
+    RESOURCE(pso);
 
-#define RESOURCE(name) Resource_ID name{};
+#  define RESOURCE(name) Resource_ID name{};
   RESOURCE_LIST
-#undef RESOURCE
+#  undef RESOURCE
 
   u32 width  = 0;
   u32 height = 0;
@@ -1008,20 +1008,17 @@ void main(uint3 tid : SV_DispatchThreadID)
   }
   void release(rd::IDevice *factory) {
     timestamps.release(factory);
-#define RESOURCE(name)                                                                             \
-  if (name.is_valid()) factory->release_resource(name);
+#  define RESOURCE(name)                                                                           \
+    if (name.is_valid()) factory->release_resource(name);
     RESOURCE_LIST
-#undef RESOURCE
+#  undef RESOURCE
   }
-#undef RESOURCE_LIST
+#  undef RESOURCE_LIST
 };
+#endif
 #if 1
 class Event_Consumer : public IGUIApp {
   public:
-  GBufferPass gbuffer_pass;
-  GizmoPass   gizmo_pass;
-  ComposePass compose_pass;
-
   RenderingContext rctx{};
   void             init_traverse(List *l) {
     if (l == NULL) return;
@@ -1030,7 +1027,7 @@ class Event_Consumer : public IGUIApp {
       init_traverse(l->next);
     } else {
       if (l->cmp_symbol("camera")) {
-        rctx.gizmo_layer->get_camera().traverse(l->next);
+        if (rctx.gizmo_layer) rctx.gizmo_layer->get_camera().traverse(l->next);
       } else if (l->cmp_symbol("config")) {
         rctx.config->traverse(l->next);
       } else if (l->cmp_symbol("scene")) {
@@ -1058,53 +1055,7 @@ class Event_Consumer : public IGUIApp {
 
     ImGui::Begin("Config");
     if (rctx.config->on_imgui()) rctx.dump();
-    ImGui::Text("%s %fms", gbuffer_pass.get_duration().second, gbuffer_pass.get_duration().first);
-    ImGui::Text("%s %fms", gizmo_pass.get_duration().second, gizmo_pass.get_duration().first);
-    ImGui::Text("%s %fms", compose_pass.get_duration().second, compose_pass.get_duration().first);
-    if (ImGui::Button("Rebuild BVH")) {
-      rctx.scene->traverse([&](Node *node) {
-        if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
-          if (mn->getComponent<GfxSufraceComponent>() == NULL) {
-            GfxSufraceComponent::create(rctx.factory, mn);
-            mn->getComponent<GfxSufraceComponent>()->buildBVH();
-          }
-        }
-      });
-    }
-    ImGui::End();
 
-    ImGui::Begin("Gbuffer normal");
-
-    {
-      rctx.gizmo_layer->per_imgui_window();
-      auto wsize = get_window_size();
-      ImGui::Image(bind_texture(gbuffer_pass.normal_rt, 0, 0, rd::Format::NATIVE),
-                   ImVec2(wsize.x, wsize.y));
-      { Ray ray = rctx.gizmo_layer->getMouseRay(); }
-    }
-    ImGui::End();
-    ImGui::Begin("Gbuffer depth");
-    {
-      rctx.gizmo_layer->per_imgui_window();
-      auto wsize = get_window_size();
-      ImGui::Image(bind_texture(gbuffer_pass.depth_rt, 0, 0, rd::Format::NATIVE),
-                   ImVec2(wsize.x, wsize.y));
-    }
-    ImGui::End();
-    ImGui::Begin(gizmo_pass.NAME);
-    {
-      rctx.gizmo_layer->per_imgui_window();
-      auto wsize = get_window_size();
-      ImGui::Image(bind_texture(gizmo_pass.rt, 0, 0, rd::Format::NATIVE), ImVec2(wsize.x, wsize.y));
-    }
-    ImGui::End();
-    ImGui::Begin(compose_pass.NAME);
-    {
-      rctx.gizmo_layer->per_imgui_window();
-      auto wsize = get_window_size();
-      ImGui::Image(bind_texture(compose_pass.rt, 0, 0, rd::Format::NATIVE),
-                   ImVec2(wsize.x, wsize.y));
-    }
     ImGui::End();
   }
   void on_init() override { //
@@ -1121,16 +1072,12 @@ class Event_Consumer : public IGUIApp {
   (add u32  g_buffer_height 512 (min 4) (max 2048))
  )
  )"));
-    rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/human_bust_sculpt/low.gltf"));
+    // rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/human_bust_sculpt/low.gltf"));
     // rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/human_bust_sculpt/untitled.gltf"));
     // rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/light/scene.gltf"));
     rctx.scene->update();
 
-    gbuffer_pass.init(rctx);
-    gizmo_pass.init(rctx);
-    compose_pass.init(rctx);
-    rctx.gizmo_layer = Gizmo_Layer::create(factory, gizmo_pass.pass);
-    char *state      = read_file_tmp("scene_state");
+    char *state = read_file_tmp("scene_state");
 
     if (state != NULL) {
       TMP_STORAGE_SCOPE;
@@ -1140,19 +1087,14 @@ class Event_Consumer : public IGUIApp {
   }
   void on_release() override { //
     rctx.dump();
-    rctx.gizmo_layer->release();
+    if (rctx.gizmo_layer) rctx.gizmo_layer->release();
     rctx.scene->release();
     rctx.config->release();
-    compose_pass.release(rctx.factory);
-    gizmo_pass.release(rctx.factory);
-    compose_pass.release(rctx.factory);
+
     delete rctx.config;
   }
   void on_frame() override { //
     rctx.scene->get_root()->update();
-    gbuffer_pass.render(rctx);
-    gizmo_pass.render(rctx, gbuffer_pass.get_gbuffer().depth);
-    compose_pass.render(rctx, gbuffer_pass.get_gbuffer(), gizmo_pass.rt);
   }
 };
 #endif

@@ -76,13 +76,14 @@ int main(int argc, char *argv[]) {
                                   });
     }
     // ito(1000) { root = root->put((i32)i % 30); }
-    root->traverse([&](BinNode<i32> *node) {
+    root->traverse_break([&](BinNode<i32> *node) {
       if (node->left) {
         ASSERT_DEBUG(node->left->key < node->key);
       }
       if (node->right) {
         ASSERT_DEBUG(node->key < node->right->key || node->key == node->right->key);
       }
+      return BinNode<i32>::TRAVERSE_CONTINUE;
     });
 
     ASSERT_DEBUG(root->depth <= 12);
@@ -96,7 +97,7 @@ int main(int argc, char *argv[]) {
     PCG pcg;
     while (ual.get_free_space()) {
       u32 size   = pcg.next() % 1000 + 1;
-      i32 offset = ual.alloc(size);
+      i32 offset = ual.alloc(0, size);
       if (offset >= 0) allocs.push({(u32)offset, size});
     }
     ASSERT_DEBUG(ual.get_free_space() == 0);
@@ -108,16 +109,37 @@ int main(int argc, char *argv[]) {
     }
     ASSERT_DEBUG(ual.get_free_space() == N);
   }
+  // Alignment tests
+  {
+    static constexpr u32  N = 10000000;
+    Util_Allocator        ual(N);
+    Array<Pair<u32, u32>> allocs{};
+    defer(allocs.release());
+    PCG pcg;
+    int attempts = 10000;
+    while (ual.get_free_space() && attempts--) {
+      u32 size   = pcg.next() % 1000 + 1;
+      i32 offset = ual.alloc(0x100, size);
+      if (offset >= 0) allocs.push({(u32)offset, size});
+    }
+    u32 free_space = ual.get_free_space();
+    ito(allocs.size) {
+      ual.free(allocs[i].first, allocs[i].second);
+      free_space += allocs[i].second;
+      ASSERT_DEBUG(ual.get_free_space() == free_space);
+    }
+    ASSERT_DEBUG(ual.get_free_space() == N);
+  }
   {
     static constexpr u32 N = 10000000;
     Util_Allocator       ual(N);
     ASSERT_DEBUG(ual.get_num_nodes() == 1);
-    ual.alloc(N / 2);
-    i32 offset = ual.alloc(1);
+    ual.alloc(0x100, N / 2);
+    i32 offset = ual.alloc(0x100, 1);
     ual.free(0, N / 2);
     ual.free(offset, 1);
     ASSERT_DEBUG(ual.get_num_nodes() == 1);
-    ASSERT_DEBUG(ual.alloc(N) == 0);
+    ASSERT_DEBUG(ual.alloc(0x100, N) == 0);
     ASSERT_DEBUG(ual.get_num_nodes() == 0);
     ASSERT_DEBUG(ual.get_free_space() == 0);
     ASSERT_DEBUG(get_tl()->allocated == 0);
