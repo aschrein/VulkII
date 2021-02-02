@@ -81,7 +81,7 @@ D3D12_PRIMITIVE_TOPOLOGY to_dx(rd::Primitive op) {
 }
 D3D12_BLEND to_dx(rd::Blend_Factor factor) {
   switch (factor) {
-    // clang-format off
+  // clang-format off
     case rd::Blend_Factor::ZERO                     : return D3D12_BLEND_ZERO;
     case rd::Blend_Factor::ONE                      : return D3D12_BLEND_ONE;
     case rd::Blend_Factor::SRC_COLOR                : return D3D12_BLEND_SRC_COLOR;
@@ -1001,7 +1001,7 @@ class DX12Device : public rd::IDevice {
         ComPtr<IDxcBlobEncoding> errorsBlob;
         hr = result->GetErrorBuffer(&errorsBlob);
         if (SUCCEEDED(hr) && errorsBlob) {
-          fprintf(stdout, "Compilation failed with errors:\n%s\n",
+          fprintf(stderr, "Compilation failed with errors:\n%s\n",
                   (const char *)errorsBlob->GetBufferPointer());
         }
       }
@@ -1487,9 +1487,9 @@ class DX12Binding_Table : public rd::IBinding_Table {
   size_t common_heap_offset  = 0;
   size_t sampler_heap_offset = 0;
   u8     push_constants_data[128];
-  bool   is_bindings_dirty       = false;
-  bool   is_push_constants_dirty = false;
-  bool   is_bound                = false;
+  // bool   is_bindings_dirty       = false;
+  bool is_push_constants_dirty = false;
+  bool is_bound                = false;
 
   public:
   static DX12Binding_Table *create(DX12Device *dev_ctx, DX12Binding_Signature *signature) {
@@ -1531,7 +1531,8 @@ class DX12Binding_Table : public rd::IBinding_Table {
     if (pass_type == rd::Pass_t::RENDER)
       cmd->SetGraphicsRootSignature(signature->root_signature.Get());
     if (signature->common_param_id >= 0) {
-      if (is_bindings_dirty) {
+      // if (is_bindings_dirty)
+      {
         dev_ctx->get_device()->CopyDescriptorsSimple(
             signature->num_desc_common,
             {dev_ctx->get_common_desc_heap()->get_heap()->GetCPUDescriptorHandleForHeapStart().ptr +
@@ -1553,7 +1554,8 @@ class DX12Binding_Table : public rd::IBinding_Table {
         cmd->SetGraphicsRootDescriptorTable(signature->common_param_id, handle);
     }
     if (signature->samplers_param_id >= 0) {
-      if (is_bindings_dirty) {
+      // if (is_bindings_dirty)
+      {
         auto heap_start =
             dev_ctx->get_sampler_desc_heap()->get_heap()->GetCPUDescriptorHandleForHeapStart().ptr;
         auto cpu_heap_start = dev_ctx->get_sampler_desc_heap()
@@ -1574,8 +1576,9 @@ class DX12Binding_Table : public rd::IBinding_Table {
       if (pass_type == rd::Pass_t::RENDER)
         cmd->SetGraphicsRootDescriptorTable(signature->samplers_param_id, handle);
     }
-    is_bound          = true;
-    is_bindings_dirty = false;
+    is_bound                = true;
+    is_push_constants_dirty = true;
+    // is_bindings_dirty = false;
   }
   void unbind() { is_bound = false; }
   void flush_push_constants(ComPtr<ID3D12GraphicsCommandList> cmd, rd::Pass_t pass_type) {
@@ -1615,7 +1618,7 @@ class DX12Binding_Table : public rd::IBinding_Table {
         {dev_ctx->get_common_desc_heap()->get_cpu_heap()->GetCPUDescriptorHandleForHeapStart().ptr +
          dev_ctx->get_common_desc_heap()->get_element_size() *
              (common_heap_offset + (u64)binding_offset)});
-    is_bindings_dirty = true;
+    // is_bindings_dirty = true;
   }
   void bind_sampler(u32 space, u32 binding, Resource_ID sampler_id) override {
     D3D12_SAMPLER_DESC *desc = dev_ctx->get_sampler(sampler_id.id);
@@ -1627,7 +1630,7 @@ class DX12Binding_Table : public rd::IBinding_Table {
                                               .ptr +
                                           dev_ctx->get_sampler_desc_heap()->get_element_size() *
                                               (sampler_heap_offset + (u64)offset)});
-    is_bindings_dirty = true;
+    // is_bindings_dirty = true;
   }
   void bind_UAV_buffer(u32 space, u32 binding, Resource_ID buf_id, size_t offset,
                        size_t size) override {
@@ -1658,7 +1661,7 @@ class DX12Binding_Table : public rd::IBinding_Table {
         {dev_ctx->get_common_desc_heap()->get_cpu_heap()->GetCPUDescriptorHandleForHeapStart().ptr +
          dev_ctx->get_common_desc_heap()->get_element_size() *
              (common_heap_offset + (u64)binding_offset)});
-    is_bindings_dirty = true;
+    // is_bindings_dirty = true;
   }
   void bind_texture(u32 space, u32 binding, u32 index, Resource_ID image_id,
                     rd::Image_Subresource const &_range, rd::Format format) override {
@@ -1725,7 +1728,7 @@ class DX12Binding_Table : public rd::IBinding_Table {
         {dev_ctx->get_common_desc_heap()->get_cpu_heap()->GetCPUDescriptorHandleForHeapStart().ptr +
          dev_ctx->get_common_desc_heap()->get_element_size() *
              (common_heap_offset + (u64)binding_offset)});
-    is_bindings_dirty = true;
+    // is_bindings_dirty = true;
   }
   void bind_UAV_texture(u32 space, u32 binding, u32 index, Resource_ID image_id,
                         rd::Image_Subresource const &_range, rd::Format format) override {
@@ -1785,7 +1788,7 @@ class DX12Binding_Table : public rd::IBinding_Table {
         {dev_ctx->get_common_desc_heap()->get_cpu_heap()->GetCPUDescriptorHandleForHeapStart().ptr +
          dev_ctx->get_common_desc_heap()->get_element_size() *
              (common_heap_offset + (u64)binding_offset)});
-    is_bindings_dirty = true;
+    // is_bindings_dirty = true;
   }
   void release() override {
     if (signature->num_desc_common) {

@@ -176,14 +176,15 @@ struct CullPushConstants
 }
 
 void test_mipmap_generation(rd::IDevice *dev) {
-
-  Image2D *image = load_image(stref_s("images/ECurtis.png"));
+  Image2D *image = load_image(stref_s("images/poster-for-movie.png"));
   defer(if (image) image->release());
   ASSERT_ALWAYS(image);
-  Resource_ID texture =
-      Mip_Builder::create_image(dev, image, (u32)rd::Image_Usage_Bits::USAGE_SAMPLED);
+  Mip_Builder *mb = Mip_Builder::create(dev);
+  defer(mb->release());
+  Resource_ID texture = mb->create_image(dev, image, (u32)rd::Image_Usage_Bits::USAGE_SAMPLED);
 
   fprintf(stdout, "MIP levels generated\n");
+  return;
   Resource_ID sampler_state = [&] {
     rd::Sampler_Create_Info info;
     MEMZERO(info);
@@ -299,18 +300,19 @@ int main(int argc, char *argv[]) {
   {
     auto launch_tests = [](rd::IDevice *dev) {
       defer({ dev->release(); });
-      RenderDoc_CTX::start();
-      do {
-        dev->start_frame();
-        test_buffers(dev);
-        // test_mipmap_generation(dev);
-        dev->end_frame();
-      } while (true);
 
-      RenderDoc_CTX::end();
+      do {
+        RenderDoc_CTX::start();
+        dev->start_frame();
+        // test_buffers(dev);
+        test_mipmap_generation(dev);
+        dev->end_frame();
+        RenderDoc_CTX::end();
+      } while (true);
     };
-    fprintf(stdout, "Testing Vulkan backend\n");
-    launch_tests(rd::create_vulkan(NULL));
+    // fprintf(stdout, "Testing Vulkan backend\n");
+    launch_tests(rd::create_dx12(NULL));
+    // launch_tests(rd::create_vulkan(NULL));
     // fprintf(stdout, "Testing Dx12 backend\n");
     // launch_tests(rd::create_dx12(NULL));
   }

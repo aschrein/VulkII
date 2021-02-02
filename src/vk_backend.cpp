@@ -1540,10 +1540,10 @@ class Resource_Array {
       T &item = items[i];
       if (item.is_alive()) ((Parent_t *)this)->release_item(item);
     }
-    ito(limbo_items.size) {
+    /*ito(limbo_items.size) {
       T &item = items[limbo_items[i].item_index];
-      ((Parent_t *)this)->release_item(item);
-    }
+      if (item.is_alive()) ((Parent_t *)this)->release_item(item);
+    }*/
     items.release();
     free_items.release();
     limbo_items.release();
@@ -1765,8 +1765,9 @@ struct VkDeviceContext {
     static constexpr char const NAME[]  = "Signature_Array";
     VkDeviceContext *           dev_ctx = NULL;
     void                        release_item(VK_Binding_Signature_Slot &item) {
-      item.signature->release(dev_ctx);
+      if (item.signature) item.signature->release(dev_ctx);
       item.signature = NULL;
+      MEMZERO(item);
     }
     void init(VkDeviceContext *dev_ctx) {
       this->dev_ctx = dev_ctx;
@@ -2326,8 +2327,8 @@ struct VkDeviceContext {
     VkImageCreateInfo           cinfo;
     {
       MEMZERO(cinfo);
-      cinfo.flags =
-          VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT;
+      cinfo.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+      // cinfo.flags |= VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT;
       cinfo.sType                 = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
       cinfo.pQueueFamilyIndices   = queue_indices;
       cinfo.queueFamilyIndexCount = 3;
@@ -2344,6 +2345,7 @@ struct VkDeviceContext {
       /*if ((usage_flags & (u32)rd::Image_Usage_Bits::USAGE_RT) != 0 ||
           (usage_flags & (u32)rd::Image_Usage_Bits::USAGE_DT) != 0)*/
       cinfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+      // cinfo.tiling = VK_IMAGE_TILING_LINEAR;
       /* else
          cinfo.tiling = VK_IMAGE_TILING_LINEAR;*/
       cinfo.usage = to_vk_image_usage_bits(usage_flags);

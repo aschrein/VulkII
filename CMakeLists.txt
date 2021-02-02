@@ -150,6 +150,8 @@ endfunction()
 
 add_example(compute_rasterization examples/compute_rasterization.cpp)
 add_example(mesh_tool examples/mesh_tool.cpp)
+add_example(dispatch_kernel examples/dispatch_kernel.cpp)
+add_example(ssr examples/ssr.cpp)
 #add_example(draw_indirect examples/draw_indirect.cpp)
 #add_example(gpu_feedback examples/gpu_feedback.cpp)
 add_example(simple_rendering examples/simple_rendering.cpp)

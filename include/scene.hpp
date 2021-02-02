@@ -1239,7 +1239,11 @@ public:
     ito(children.size) {
       if (children[i]) children[i]->update();
     }
-    aabb.init(offset);
+    if (children.size)
+      aabb = children[0]->getAABB();
+    else
+      aabb.init(offset);
+
     ito(children.size) {
       if (children[i]) aabb.unite(children[i]->getAABB());
     }
@@ -1791,8 +1795,11 @@ class MeshNode : public Node {
   }
   void update() override {
     Node::update();
-
-    ito(surfaces.size) {
+    if (surfaces.size)
+      aabb = AABB{transform(surfaces[0]->mesh.min), transform(surfaces[0]->mesh.max)};
+    else
+      aabb = {};
+    for (u32 i = 1; i < surfaces.size; i++) {
       aabb.unite(AABB{transform(surfaces[i]->mesh.min), transform(surfaces[i]->mesh.max)});
     }
   }

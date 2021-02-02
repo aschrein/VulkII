@@ -317,11 +317,11 @@ struct Image_Subresource {
   i32                      num_layers;
   i32                      level;
   i32                      num_levels;
-  static Image_Subresource top_level() {
+  static Image_Subresource top_level(i32 level = 0) {
     Image_Subresource out;
     out.layer      = 0;
     out.num_layers = 1;
-    out.level      = 0;
+    out.level      = level;
     out.num_levels = 1;
     return out;
   }

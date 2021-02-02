@@ -563,7 +563,8 @@ Node *load_gltf_pbr(ISceneFactory *factory, string_ref filename) {
     }
     return tnode;
   };
-  Node *root = load_node(&data->nodes[0]);
+  Node *root = factory->add_node(stref_s("ROOT"));
+  ito(data->nodes_count) root->add_child(load_node(&data->nodes[i]));
   root->update();
   // vec3 max = root->getAABB().max;
   // vec3 min = root->getAABB().min;

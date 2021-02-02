@@ -228,8 +228,8 @@ float3 random_color(float2 uv) {
 } //
 
 struct Vertex {
-  float4 pos;
-  float3 normal;
+  float4 v;
+  // float3 normal;
   float2 uv;
 };
 
@@ -241,40 +241,17 @@ u32 rasterize_triangle(RWTexture2D<float4> target, Vertex vtx0, Vertex vtx1, Ver
   uint width, height;
   target.GetDimensions(width, height);
 
-  float4 pp0      = vtx0.pos;
-  float4 pp1      = vtx1.pos;
-  float4 pp2      = vtx2.pos;
-  float3 normal_0 = vtx0.normal;
-  float3 normal_1 = vtx1.normal;
-  float3 normal_2 = vtx2.normal;
-
-  // For simplicity just discard triangles that touch the boundary
-  // @TODO(aschrein): Add proper clipping.
-  if (!in_bounds(pp0) || !in_bounds(pp1) || !in_bounds(pp2)) return 0;
-
-  pp0.xyz /= pp0.w;
-  pp1.xyz /= pp1.w;
-  pp2.xyz /= pp2.w;
-
-  //
-  // For simplicity, we assume samples are at pixel centers
-  //  __________
-  // |          |
-  // |          |
-  // |    X     |
-  // |          |
-  // |__________|
-  //
-
-  // v_i - Vertices scaled to window size so 1.5 is inside the second pixel
-  float2 v0 = float2(float(width) * (pp0.x + 1.0) / 2.0, float(height) * (-pp0.y + 1.0) / 2.0);
-  float2 v1 = float2(float(width) * (pp1.x + 1.0) / 2.0, float(height) * (-pp1.y + 1.0) / 2.0);
-  float2 v2 = float2(float(width) * (pp2.x + 1.0) / 2.0, float(height) * (-pp2.y + 1.0) / 2.0);
+  // float4 pp0 = vtx0.pos;
+  // float4 pp1 = vtx1.pos;
+  // float4 pp2 = vtx2.pos;
+  // float3 normal_0 = vtx0.normal;
+  // float3 normal_1 = vtx1.normal;
+  // float3 normal_2 = vtx2.normal;
 
   // Edges
-  float2 n0 = v1 - v0;
-  float2 n1 = v2 - v1;
-  float2 n2 = v0 - v2;
+  float2 n0 = vtx1.v.xy - vtx0.v.xy;
+  float2 n1 = vtx2.v.xy - vtx1.v.xy;
+  float2 n2 = vtx0.v.xy - vtx2.v.xy;
 
   // Double area
   float area2 = (n0.x * n2.y - n0.y * n2.x);
@@ -288,8 +265,10 @@ u32 rasterize_triangle(RWTexture2D<float4> target, Vertex vtx0, Vertex vtx1, Ver
   n2 = -float2(-n2.y, n2.x) / area2;
 
   // Bounding Box
-  float2 fmin = float2(min(v0.x, min(v1.x, v2.x)), min(v0.y, min(v1.y, v2.y)));
-  float2 fmax = float2(max(v0.x, max(v1.x, v2.x)), max(v0.y, max(v1.y, v2.y)));
+  float2 fmin =
+      float2(min(vtx0.v.x, min(vtx1.v.x, vtx2.v.x)), min(vtx0.v.y, min(vtx1.v.y, vtx2.v.y)));
+  float2 fmax =
+      float2(max(vtx0.v.x, max(vtx1.v.x, vtx2.v.x)), max(vtx0.v.y, max(vtx1.v.y, vtx2.v.y)));
 
   int2 imin = int2(fmin);
   int2 imax = int2(fmax);
@@ -299,9 +278,9 @@ u32 rasterize_triangle(RWTexture2D<float4> target, Vertex vtx0, Vertex vtx1, Ver
 
   // Edge function values at the first (imin.x + 0.5f, imin.y + 0.5f) sample position
   float2 first_sample = float2(imin) + float2(0.5f, 0.5f);
-  float  init_ef0     = dot(first_sample - v0, n0);
-  float  init_ef1     = dot(first_sample - v1, n1);
-  float  init_ef2     = dot(first_sample - v2, n2);
+  float  init_ef0     = dot(first_sample - vtx0.v.xy, n0);
+  float  init_ef1     = dot(first_sample - vtx1.v.xy, n1);
+  float  init_ef2     = dot(first_sample - vtx2.v.xy, n2);
 
   u32 num_samples = 0;
 
@@ -346,24 +325,26 @@ u32 rasterize_triangle(RWTexture2D<float4> target, Vertex vtx0, Vertex vtx1, Ver
   //}
 #if 1
   for (i32 dy = 0; dy <= imax.y - imin.y; dy += 1) {
-    float ef0 = init_ef0 + n0.y * float(dy);
-    float ef1 = init_ef1 + n1.y * float(dy);
-    float ef2 = init_ef2 + n2.y * float(dy);
+
     //[unroll(8)]
     for (i32 dx = 0; dx <= imax.x - imin.x; dx += 1) {
-      i32 x = imin.x + dx;
-      i32 y = imin.y + dy;
+      i32   x   = imin.x + dx;
+      i32   y   = imin.y + dy;
+      float ef0 = init_ef0 + n0.y * float(dy) + n0.x * float(dx);
+      float ef1 = init_ef1 + n1.y * float(dy) + n1.x * float(dx);
+      float ef2 = init_ef2 + n2.y * float(dy) + n2.x * float(dx);
       if (ef0 > 0.0f && ef1 > 0.0f && ef2 > 0.0f) {
         // Barycentrics
         float b0 = ef1;
         float b1 = ef2;
         float b2 = ef0;
         // Perspective correction
-        float bw    = b0 / pp0.w + b1 / pp1.w + b2 / pp2.w;
-        b0          = b0 / pp0.w / bw;
-        b1          = b1 / pp1.w / bw;
-        b2          = b2 / pp2.w / bw;
-        float depth = pp0.z * b0 + pp1.z * b1 + pp2.z * b2;
+        float bw = b0 / vtx0.v.w + b1 / vtx1.v.w + b2 / vtx2.v.w;
+
+        b0          = b0 / vtx0.v.w / bw;
+        b1          = b1 / vtx1.v.w / bw;
+        b2          = b2 / vtx2.v.w / bw;
+        float depth = vtx0.v.z * b0 + vtx1.v.z * b1 + vtx2.v.z * b2;
         // Per pixel Attributes
         float2 pixel_uv = vtx0.uv * b0 + vtx1.uv * b1 + vtx2.uv * b2;
 
@@ -385,10 +366,10 @@ u32 rasterize_triangle(RWTexture2D<float4> target, Vertex vtx0, Vertex vtx1, Ver
           }
         }
       }
-      // Increment edge functions
-      ef0 += n0.x;
-      ef1 += n1.x;
-      ef2 += n2.x;
+      //// Increment edge functions
+      // ef0 += n0.x;
+      // ef1 += n1.x;
+      // ef2 += n2.x;
     }
   }
 #endif
@@ -412,40 +393,118 @@ u32 gi_rasterize_quad(RWTexture2D<float4> target, Texture2D<float4> src_pos,
   }
   f32 mip_level = log2(1.0f + uv_size * f32(src_res));
 
-  int2 offsets[6] = {
-      int2(0, 0), int2(0, 1), int2(1, 0), int2(1, 0), int2(0, 1), int2(1, 1),
-  };
   u32 num_samples = 0;
-  // Scalar loop
-  [unroll] for (u32 tri_id = 0; tri_id < 2; tri_id++) {
 
-    float2 suv0 = uv0 + offsets[0 + tri_id * 3] * uv_size;
-    float2 suv1 = uv0 + offsets[1 + tri_id * 3] * uv_size;
-    float2 suv2 = uv0 + offsets[2 + tri_id * 3] * uv_size;
+  float2 qsuv00 = uv0 + float2(0.0f, 0.0f);
+  float2 qsuv01 = uv0 + float2(0.0f, uv_size);
+  float2 qsuv10 = uv0 + float2(uv_size, 0.0f);
+  float2 qsuv11 = uv0 + float2(uv_size, uv_size);
 
-    float4 pp0      = position_source.SampleLevel(ss, suv0, mip_level).xyzw;
-    float4 pp1      = position_source.SampleLevel(ss, suv1, mip_level).xyzw;
-    float4 pp2      = position_source.SampleLevel(ss, suv2, mip_level).xyzw;
-    float3 normal_0 = src_normal.SampleLevel(ss, suv0, mip_level).xyz;
-    float3 normal_1 = src_normal.SampleLevel(ss, suv1, mip_level).xyz;
-    float3 normal_2 = src_normal.SampleLevel(ss, suv2, mip_level).xyz;
-    pp0             = mul(obj_to_clip, float4(pp0.xyz, 1.0));
-    pp1             = mul(obj_to_clip, float4(pp1.xyz, 1.0));
-    pp2             = mul(obj_to_clip, float4(pp2.xyz, 1.0));
-    Vertex vtx0;
-    Vertex vtx1;
-    Vertex vtx2;
+  float4 pp00 = position_source.SampleLevel(ss, qsuv00, mip_level).xyzw;
+  float4 pp01 = position_source.SampleLevel(ss, qsuv01, mip_level).xyzw;
+  float4 pp10 = position_source.SampleLevel(ss, qsuv10, mip_level).xyzw;
+  float4 pp11 = position_source.SampleLevel(ss, qsuv11, mip_level).xyzw;
 
-    vtx0.pos    = pp0;
-    vtx1.pos    = pp1;
-    vtx2.pos    = pp2;
-    vtx0.normal = normal_0;
-    vtx1.normal = normal_1;
-    vtx2.normal = normal_2;
-    vtx0.uv     = suv0;
-    vtx1.uv     = suv1;
-    vtx2.uv     = suv2;
-    num_samples += rasterize_triangle(target, vtx0, vtx1, vtx2, mip_level);
+  // float3 normal_00 = src_normal.SampleLevel(ss, qsuv00, mip_level).xyz;
+  // float3 normal_01 = src_normal.SampleLevel(ss, qsuv01, mip_level).xyz;
+  // float3 normal_10 = src_normal.SampleLevel(ss, qsuv10, mip_level).xyz;
+  // float3 normal_11 = src_normal.SampleLevel(ss, qsuv11, mip_level).xyz;
+  pp00 = mul(obj_to_clip, float4(pp00.xyz, 1.0));
+  pp01 = mul(obj_to_clip, float4(pp01.xyz, 1.0));
+  pp10 = mul(obj_to_clip, float4(pp10.xyz, 1.0));
+  pp11 = mul(obj_to_clip, float4(pp11.xyz, 1.0));
+
+  // For simplicity just discard triangles that touch the boundary
+  // @TODO(aschrein): Add proper clipping.
+  bool tri_is_valid_0 = in_bounds(pp00) && in_bounds(pp01) && in_bounds(pp10);
+  bool tri_is_valid_1 = in_bounds(pp01) && in_bounds(pp10) && in_bounds(pp11);
+
+  pp00.xyz /= pp00.w;
+  pp01.xyz /= pp01.w;
+  pp10.xyz /= pp10.w;
+  pp11.xyz /= pp11.w;
+
+  //
+  // For simplicity, we assume samples are at pixel centers
+  //  __________
+  // |          |
+  // |          |
+  // |    X     |
+  // |          |
+  // |__________|
+  //
+
+  // Vertices scaled to window size so 1.5 is inside the second pixel
+  pp00.xy = float2(float(width) * (pp00.x + 1.0) / 2.0, float(height) * (-pp00.y + 1.0) / 2.0);
+  pp01.xy = float2(float(width) * (pp01.x + 1.0) / 2.0, float(height) * (-pp01.y + 1.0) / 2.0);
+  pp10.xy = float2(float(width) * (pp10.x + 1.0) / 2.0, float(height) * (-pp10.y + 1.0) / 2.0);
+  pp11.xy = float2(float(width) * (pp11.x + 1.0) / 2.0, float(height) * (-pp11.y + 1.0) / 2.0);
+
+#define RASTERIZE_TRIANGE                                                                          \
+  Vertex vtx0;                                                                                     \
+  Vertex vtx1;                                                                                     \
+  Vertex vtx2;                                                                                     \
+  vtx0.v  = cur_v0;                                                                                \
+  vtx1.v  = cur_v1;                                                                                \
+  vtx2.v  = cur_v2;                                                                                \
+  vtx0.uv = suv0;                                                                                  \
+  vtx1.uv = suv1;                                                                                  \
+  vtx2.uv = suv2;                                                                                  \
+  num_samples += rasterize_triangle(target, vtx0, vtx1, vtx2, mip_level);
+
+  //vtx0.normal = cur_normal_0;                                                                      \
+  //vtx1.normal = cur_normal_1;                                                                      \
+  //vtx2.normal = cur_normal_2;                                                                      \
+
+  if (tri_is_valid_0) {
+#ifdef GI_ORDER_CW
+    float2 suv0   = qsuv00;
+    float2 suv1   = qsuv01;
+    float2 suv2   = qsuv10;
+    float4 cur_v0 = pp00;
+    float4 cur_v1 = pp01;
+    float4 cur_v2 = pp10;
+    // float3 cur_normal_0 = normal_00;
+    // float3 cur_normal_1 = normal_01;
+    // float3 cur_normal_2 = normal_10;
+#else
+    float2 suv0   = qsuv00;
+    float2 suv1   = qsuv10;
+    float2 suv2   = qsuv01;
+    float4 cur_v0 = pp00;
+    float4 cur_v1 = pp10;
+    float4 cur_v2 = pp01;
+    // float3 cur_normal_0 = normal_00;
+    // float3 cur_normal_1 = normal_10;
+    // float3 cur_normal_2 = normal_01;
+#endif
+
+    RASTERIZE_TRIANGE
+  }
+  if (tri_is_valid_1) {
+#ifdef GI_ORDER_CW
+    float2 suv0   = qsuv10;
+    float2 suv1   = qsuv01;
+    float2 suv2   = qsuv11;
+    float4 cur_v0 = pp10;
+    float4 cur_v1 = pp01;
+    float4 cur_v2 = pp11;
+    // float3 cur_normal_0 = normal_10;
+    // float3 cur_normal_1 = normal_01;
+    // float3 cur_normal_2 = normal_11;
+#else
+    float2 suv0   = qsuv10;
+    float2 suv1   = qsuv11;
+    float2 suv2   = qsuv01;
+    float4 cur_v0 = pp10;
+    float4 cur_v1 = pp11;
+    float4 cur_v2 = pp01;
+    // float3 cur_normal_0 = normal_10;
+    // float3 cur_normal_1 = normal_11;
+    // float3 cur_normal_2 = normal_01;
+#endif
+
+    RASTERIZE_TRIANGE
   }
   return num_samples;
 }
@@ -475,3 +534,119 @@ u32 gi_rasterize_quad(RWTexture2D<float4> target, Texture2D<float4> src_pos,
                                           subcell_uv_step, mul(fc.viewproj, pc.model));
       add_sample(subcell_uv + float2(subcell_uv_step, subcell_uv_step) / 2.0f, num_samples / 2);
     }
+
+struct PushConstants {
+  u32 levels;
+  u32 op;
+  u32 total_cnt;
+  u32 last_width;
+  u32 last_height;
+};
+[[vk::push_constant]] ConstantBuffer<PushConstants> pc : DX12_PUSH_CONSTANTS_REGISTER;
+
+#define RGBA8_SRGBA 0
+#define RGBA8_UNORM 1
+#define RGB32_FLOAT 2
+#define R32_FLOAT 3
+#define RGBA32_FLOAT 4
+
+#define OP_AVG 0
+#define OP_MAX 1
+#define OP_MIN 2
+#define OP_SUM 3
+
+[[vk::binding(0, 0)]] Texture2D<float4>   src_tex : register(t0, space0);
+[[vk::binding(1, 0)]] RWByteAddressBuffer counter : register(u1, space0);
+[[vk::binding(2, 0)]] globallycoherent RWTexture2D<float4> tex[16] : register(u2, space0);
+groupshared u32                                            group_cnt;
+
+void downsample(int mip_i, int2 dst_xy, int2 mip_size) {
+  int2   xy  = int2(dst_xy * 2);
+  float  N   = 0.0f;
+  float4 acc = float4_splat(0.0f);
+
+  if (xy.x == mip_size.x - 3) {
+    acc += tex[mip_i - 1].Load(int3(xy + int2(2, 0), 0));
+    N += 1.0f;
+  }
+  if (xy.y == mip_size.y - 3) {
+    acc += tex[mip_i - 1].Load(int3(xy + int2(0, 2), 0));
+    N += 1.0f;
+  }
+
+  acc += tex[mip_i - 1].Load(int3(xy + int2(0, 0), 0));
+  acc += tex[mip_i - 1].Load(int3(xy + int2(1, 0), 0));
+  acc += tex[mip_i - 1].Load(int3(xy + int2(0, 1), 0));
+  acc += tex[mip_i - 1].Load(int3(xy + int2(1, 1), 0));
+  N += 4.0f;
+  tex[mip_i][dst_xy] = acc / N;
+}
+
+[numthreads(32, 32, 1)] void main(uint3 tid
+                                  : SV_DispatchThreadID, uint3 gtid
+                                  : SV_GroupThreadID, uint3    gid
+                                  : SV_GroupID) {
+  int2 size;
+  tex[0].GetDimensions(size.x, size.y);
+  if (any(tid.xy * 2 >= size)) return;
+
+  // Copy top level
+  tex[0][tid.xy * 2 + int2(0, 0)] = src_tex.Load(int3(tid.xy * 2 + int2(0, 0), 0));
+  tex[0][tid.xy * 2 + int2(1, 0)] = src_tex.Load(int3(tid.xy * 2 + int2(1, 0), 0));
+  tex[0][tid.xy * 2 + int2(0, 1)] = src_tex.Load(int3(tid.xy * 2 + int2(0, 1), 0));
+  tex[0][tid.xy * 2 + int2(1, 1)] = src_tex.Load(int3(tid.xy * 2 + int2(1, 1), 0));
+
+  GroupMemoryBarrierWithGroupSync();
+  int2 mip_size         = size;
+  u32  pixels_per_group = 32;
+  int2 group_offset     = gid.xy;
+  u32  mip_i            = 1;
+  for (; mip_i < pc.levels; mip_i++) {
+    int2 xy = int2(group_offset.xy * pixels_per_group + gtid.xy);
+    if (any(xy >= mip_size - 1)) {
+      break;
+    }
+    downsample(mip_i, xy, mip_size);
+
+    mip_size = max(int2(1, 1), mip_size / 2);
+
+    // if (any(mip_size < int2(32, 32)))
+    //  break;
+
+    GroupMemoryBarrierWithGroupSync();
+    pixels_per_group = pixels_per_group / 2;
+    if (pixels_per_group == 0) break;
+    if (any(gtid >= pixels_per_group)) break;
+
+    if (all(mip_size == int2(1, 1))) break;
+  }
+  if (gtid.x == 0 && gtid.y == 0) {
+    counter.InterlockedAdd(0, 1, group_cnt);
+  }
+  GroupMemoryBarrierWithGroupSync();
+  // The last group
+  if (group_cnt == pc.total_cnt) {
+    pixels_per_group = 32;
+    for (; mip_i < pc.levels; mip_i++) {
+      mip_size = int2(pc.last_width, pc.last_height);
+      for (u32 y = 0; y < pc.last_width; y += pixels_per_group) {
+        for (u32 x = 0; x < pc.last_width; x += pixels_per_group) {
+          int2 xy = int2(gtid.xy + int2(x, y) * pixels_per_group);
+          if (any(xy >= mip_size - 1)) {
+            break;
+          }
+          downsample(mip_i, xy, mip_size);
+
+          mip_size = max(int2(1, 1), mip_size / 2);
+
+          GroupMemoryBarrierWithGroupSync();
+          pixels_per_group = pixels_per_group / 2;
+          if (pixels_per_group == 0) break;
+          //if (any(gtid >= pixels_per_group)) break;
+
+          if (all(mip_size == int2(1, 1))) break;
+        }
+      }
+    }
+  }
+}

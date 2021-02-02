@@ -1883,18 +1883,18 @@ class Event_Consumer : public IGUIApp {
   (add bool G.I.color_triangles 0)
  )
  )"));
-    // rctx.scene->load_mesh(stref_s("mesh"),
-    //                      stref_s("models/castle-ban-the-rhins-of-galloway/scene.gltf"));
+    rctx.scene->load_mesh(stref_s("mesh"),
+                          stref_s("models/castle-ban-the-rhins-of-galloway/scene.gltf"));
     // rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/norradalur-froyar/scene.gltf"));
-    rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/human_bust_sculpt/cut.gltf"));
+    // rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/human_bust_sculpt/cut.gltf"));
     // rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/human_bust_sculpt/untitled.gltf"));
     // rctx.scene->load_mesh(stref_s("mesh"), stref_s("models/light/scene.gltf"));
     rctx.scene->update();
     rctx.scene->traverse([&](Node *node) {
       if (MeshNode *mn = node->dyn_cast<MeshNode>()) {
         GfxSufraceComponent::create(rctx.factory, mn);
-        MeshletSufraceComponent::create(mn, 255, 256);
-        GfxMeshletSufraceComponent::create(factory, mn);
+        // MeshletSufraceComponent::create(mn, 255, 256);
+        // GfxMeshletSufraceComponent::create(factory, mn);
       }
     });
     baker_pass.init(rctx);

@@ -739,7 +739,11 @@ struct TimeStamp_Pool {
   };
   i32    cur_query_id = -1;
   Query  timestamps[NUM_TIMESTAMPS]{};
-  double duration = 0.0;
+  double duration       = 0.0;
+  double total_duration = 0.0;
+  u64    total_samples  = 0;
+  double min_sample     = 1.0e6;
+  double max_sample     = 0.0;
 
   void init(rd::IDevice *factory) {
     ito(NUM_TIMESTAMPS) {
@@ -774,6 +778,10 @@ struct TimeStamp_Pool {
         if (ready) {
           timestamps[i].in_fly = false;
           double cur_dur       = factory->get_timestamp_ms(timestamps[i].t0, timestamps[i].t1);
+          total_duration += cur_dur;
+          total_samples += 1;
+          min_sample = MIN(min_sample, cur_dur);
+          max_sample = MAX(max_sample, cur_dur);
           duration += (cur_dur - duration) * 0.05;
         }
       }
@@ -806,29 +814,333 @@ struct TimeStamp_Pool {
 };
 #endif // 0
 #if 1
-struct Mip_Builder {
-  enum Filter { FILTER_BOX };
-  static Resource_ID create_image(rd::IDevice *factory, Image2D const *image,
-                                  u32    _usage = (u32)rd::Image_Usage_Bits::USAGE_SAMPLED,
-                                  Filter filter = FILTER_BOX) {
+class Mip_Builder {
+  ~Mip_Builder() = default;
+
+  rd::IDevice *  dev = NULL;
+  TimeStamp_Pool timestamp{};
+
+#  define RESOURCE_LIST                                                                            \
+    RESOURCE(signature);                                                                           \
+    RESOURCE(mip_shader);                                                                          \
+    RESOURCE(mip_pso);                                                                             \
+    RESOURCE(packed_mip_shader);                                                                   \
+    RESOURCE(packed_mip_pso);
+
+#  define RESOURCE(name) Resource_ID name{};
+  RESOURCE_LIST
+#  undef RESOURCE
+  struct PushConstants {
+    u32 levels;
+    u32 op;
+    u32 total_cnt;
+    u32 last_mip;
+    u32 last_width;
+    u32 last_height;
+  };
+  void init(rd::IDevice *dev) {
+    this->dev = dev;
+    timestamp.init(dev);
+    TMP_STORAGE_SCOPE;
+    signature = [=] {
+      rd::Binding_Space_Create_Info set_info{};
+
+      set_info.bindings.push({rd::Binding_t::TEXTURE, 1});
+      set_info.bindings.push({rd::Binding_t::UAV_BUFFER, 1});
+      set_info.bindings.push({rd::Binding_t::UAV_TEXTURE, 16});
+      rd::Binding_Table_Create_Info table_info{};
+      table_info.spaces.push(set_info);
+      table_info.push_constants_size = sizeof(PushConstants);
+      return dev->create_signature(table_info);
+    }();
+    mip_shader = dev->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
+
+struct PushConstants {
+  u32 levels;
+  u32 op;
+  u32 total_cnt;
+  u32 last_mip;
+  u32 last_width;
+  u32 last_height;
+};
+[[vk::push_constant]] ConstantBuffer<PushConstants> pc : DX12_PUSH_CONSTANTS_REGISTER;
+
+#define RGBA8_SRGBA 0
+#define RGBA8_UNORM 1
+#define RGB32_FLOAT 2
+#define R32_FLOAT 3
+#define RGBA32_FLOAT 4
+
+#define OP_AVG 0
+#define OP_MAX 1
+#define OP_MIN 2
+#define OP_SUM 3
+
+[[vk::binding(0, 0)]] Texture2D<float4>   src_tex : register(t0, space0);
+[[vk::binding(1, 0)]] globallycoherent RWByteAddressBuffer counter : register(u1, space0);
+[[vk::binding(2, 0)]] globallycoherent RWTexture2D<float4> tex[16] : register(u2, space0);
+groupshared u32                                            group_cnt;
+
+void downsample(int mip_i, int2 dst_xy, int2 src_mip_size) {
+  int2   xy  = int2(dst_xy * 2);
+  float  N   = 0.0f;
+  float4 acc = float4_splat(0.0f);
+
+  if (xy.x == src_mip_size.x - 3) {
+    acc += tex[mip_i - 1].Load(int3(xy + int2(2, 0), 0));
+    N += 1.0f;
+  }
+  if (xy.y == src_mip_size.y - 3) {
+    acc += tex[mip_i - 1].Load(int3(xy + int2(0, 2), 0));
+    N += 1.0f;
+  }
+  if (xy.x == src_mip_size.x - 3 && xy.y == src_mip_size.y - 3) {
+    acc += tex[mip_i - 1].Load(int3(xy + int2(2, 2), 0));
+    N += 1.0f;
+  }
+  acc += tex[mip_i - 1].Load(int3(xy + int2(0, 0), 0));
+  acc += tex[mip_i - 1].Load(int3(xy + int2(1, 0), 0));
+  acc += tex[mip_i - 1].Load(int3(xy + int2(0, 1), 0));
+  acc += tex[mip_i - 1].Load(int3(xy + int2(1, 1), 0));
+  N += 4.0f;
+  tex[mip_i][dst_xy] = acc / N;
+}
+
+[numthreads(32, 32, 1)] void main(uint3 tid
+                                  : SV_DispatchThreadID, uint3 gtid
+                                  : SV_GroupThreadID, uint3    gid
+                                  : SV_GroupID) {
+  int2 size;
+  tex[0].GetDimensions(size.x, size.y);
+  {
+    if (all(tid.xy * 2 < size)) {
+      // Copy top level
+      tex[0][tid.xy * 2 + int2(0, 0)] = src_tex.Load(int3(tid.xy * 2 + int2(0, 0), 0));
+      tex[0][tid.xy * 2 + int2(1, 0)] = src_tex.Load(int3(tid.xy * 2 + int2(1, 0), 0));
+      tex[0][tid.xy * 2 + int2(0, 1)] = src_tex.Load(int3(tid.xy * 2 + int2(0, 1), 0));
+      tex[0][tid.xy * 2 + int2(1, 1)] = src_tex.Load(int3(tid.xy * 2 + int2(1, 1), 0));
+    }
+    GroupMemoryBarrierWithGroupSync();
+    int2 src_mip_size         = size;
+    int2 dst_mip_size         = max(int2(1, 1), size / 2);
+    u32  pixels_per_group = 32;
+    u32  mip_i            = 1;
+    int2 group_offset     = gid.xy;
+
+    for (; mip_i < pc.levels; mip_i++) {
+      GroupMemoryBarrierWithGroupSync();
+      int2 xy = int2(group_offset.xy * pixels_per_group + gtid.xy);
+      if (all(xy < dst_mip_size) && all(gtid < pixels_per_group))
+        downsample(mip_i, xy, src_mip_size);
+      // Scalar break
+      if (all(dst_mip_size == int2(1, 1))) break;
+      pixels_per_group = pixels_per_group / 2;
+      if (pixels_per_group == 0) break;
+      src_mip_size = dst_mip_size;
+      dst_mip_size = max(int2(1, 1), src_mip_size / 2);
+    }
+  }
+  //group_cnt = 0;
+  GroupMemoryBarrierWithGroupSync();
+  if (gtid.x == 0 && gtid.y == 0) {
+    u32 cnt;
+    counter.InterlockedAdd(0, 1, cnt);
+    group_cnt = cnt;
+    //tex[0][tid.xy] = float4(float(group_cnt), 1.0f, 1.0f, 1.0f);
+  }
+  GroupMemoryBarrierWithGroupSync();
+  // The last group
+  if (group_cnt == pc.total_cnt - 1) {
+    //tex[0][gtid.xy] = float4(1.0f, 1.0f, 1.0f, 1.0f);
+    u32 pixels_per_group = 32;
+    u32  mip_i            = pc.last_mip + 1;
+    int2 mip_size = int2(pc.last_width, pc.last_height);
+    int2 src_mip_size         = mip_size;
+    int2 dst_mip_size         = max(int2(1, 1), mip_size / 2);
+    for (; mip_i <= pc.levels; mip_i++) {
+      GroupMemoryBarrierWithGroupSync();
+      for (u32 y = 0; y < pc.last_height; y += pixels_per_group) {
+        for (u32 x = 0; x < pc.last_width; x += pixels_per_group) {
+          int2 xy = int2(gtid.xy + int2(x, y));
+          if (all(xy < dst_mip_size))
+            downsample(mip_i, xy, src_mip_size);
+        }
+      }
+      // Scalar break
+      if (all(dst_mip_size == int2(1, 1))) break;
+      pixels_per_group = pixels_per_group / 2;
+      if (pixels_per_group == 0) break;
+      src_mip_size = dst_mip_size;
+      dst_mip_size = max(int2(1, 1), src_mip_size / 2);
+    }
+  }
+}
+
+)"),
+                                    NULL, 0);
+    mip_pso    = dev->create_compute_pso(signature, mip_shader);
+  }
+
+  public:
+  static Mip_Builder *create(rd::IDevice *dev) {
+    Mip_Builder *o = new Mip_Builder;
+    o->init(dev);
+    return o;
+  }
+
+  void release() {
+#  define RESOURCE(name)                                                                           \
+    if (name.is_valid()) dev->release_resource(name);
+    RESOURCE_LIST
+#  undef RESOURCE
+    timestamp.release(dev);
+    delete this;
+  }
+#  undef RESOURCE_LIST
+
+  enum Filter { FILTER_BOX, FILTER_MIN, FILTER_MAX };
+  Resource_ID create_image(rd::IDevice *factory, Image2D const *image,
+                           u32  _usage    = (u32)rd::Image_Usage_Bits::USAGE_SAMPLED,
+                           bool build_mip = true, Filter filter = FILTER_BOX) {
     Resource_ID output_image = [=] {
       rd::Image_Create_Info info{};
-      u32                   usage = _usage | (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST;
-      info.format                 = image->format;
-      info.width                  = image->width;
-      info.height                 = image->height;
-      info.depth                  = 1;
-      info.layers                 = 1;
-      info.levels                 = image->get_num_mip_levels();
-      info.usage_bits             = usage;
+      u32                   usage = _usage | (u32)rd::Image_Usage_Bits::USAGE_SAMPLED |
+                  (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST |
+                  (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_SRC;
+      info.format = image->format;
+      info.width  = image->width;
+      info.height = image->height;
+      info.depth  = 1;
+      info.layers = 1;
+      if (build_mip)
+        info.levels = image->get_num_mip_levels();
+      else
+        info.levels = 1;
+      info.usage_bits = usage;
       return factory->create_image(info);
     }();
-    return create_image(factory, output_image, filter);
-  }
-  static Resource_ID create_image(rd::IDevice *factory, Resource_ID output_image,
-                                  Filter filter = FILTER_BOX) {
-    auto desc = factory->get_image_info(output_image);
+    size_t      pitch = rd::IDevice::align_up(image->width * Image2D::get_bpp(image->format),
+                                         rd::IDevice::TEXTURE_DATA_PITCH_ALIGNMENT);
+    Resource_ID staging_buffer = [&] {
+      rd::Buffer_Create_Info buf_info{};
+      buf_info.memory_type = rd::Memory_Type::CPU_WRITE_GPU_READ;
+      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC |
+                            (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
+      buf_info.size = pitch * image->height;
+      return factory->create_buffer(buf_info);
+    }();
+    defer(factory->release_resource(staging_buffer));
+    u8 *ptr = (u8 *)factory->map_buffer(staging_buffer);
+    ito(image->height) {
+      memcpy(ptr + pitch * i,
+             image->data + (size_t)image->width * Image2D::get_bpp(image->format) * i,
+             (size_t)image->width * Image2D::get_bpp(image->format));
+    }
+    // memcpy(ptr, image->data, image->get_size_in_bytes());
+    factory->unmap_buffer(staging_buffer);
 
+    Resource_ID image_staging_buffer = [&] {
+      rd::Buffer_Create_Info buf_info{};
+      buf_info.memory_type = rd::Memory_Type::GPU_LOCAL;
+      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_SRC |
+                            (u32)rd::Buffer_Usage_Bits::USAGE_TRANSFER_DST;
+      buf_info.size = pitch * image->height;
+      return factory->create_buffer(buf_info);
+    }();
+    defer(factory->release_resource(image_staging_buffer));
+
+    {
+      rd::ICtx *ctx = factory->start_compute_pass();
+      ctx->buffer_barrier(image_staging_buffer, rd::Buffer_Access::TRANSFER_DST);
+      ctx->copy_buffer(staging_buffer, 0, image_staging_buffer, 0, pitch * image->height);
+      ctx->buffer_barrier(image_staging_buffer, rd::Buffer_Access::TRANSFER_SRC);
+      ctx->image_barrier(output_image, rd::Image_Access::TRANSFER_DST);
+      ctx->copy_buffer_to_image(image_staging_buffer, 0, output_image,
+                                rd::Image_Copy::top_level(pitch));
+      factory->end_compute_pass(ctx);
+    }
+    if (build_mip) return build_mips(factory, output_image, filter);
+    return output_image;
+  }
+  Resource_ID build_mips(rd::IDevice *factory, Resource_ID output_image,
+                         Filter filter = FILTER_BOX) {
+    auto        desc      = factory->get_image_info(output_image);
+    Resource_ID tmp_image = [=] {
+      rd::Image_Create_Info info{};
+      u32                   usage = (u32)rd::Image_Usage_Bits::USAGE_UAV |
+                  (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST |
+                  (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_SRC;
+      info.format     = rd::Format::RGBA32_FLOAT;
+      info.width      = desc.width;
+      info.height     = desc.height;
+      info.depth      = 1;
+      info.layers     = 1;
+      info.levels     = desc.levels;
+      info.usage_bits = usage;
+      return factory->create_image(info);
+    }();
+    defer(factory->release_resource(output_image));
+    // defer(factory->release_resource(tmp_image));
+    Resource_ID cnt_buffer = [&] {
+      rd::Buffer_Create_Info buf_info{};
+      buf_info.memory_type = rd::Memory_Type::GPU_LOCAL;
+      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_UAV;
+      buf_info.size        = 4;
+      return factory->create_buffer(buf_info);
+    }();
+    defer(factory->release_resource(cnt_buffer));
+    /*((u32 *)factory->map_buffer(cnt_buffer))[0] = 0;
+    factory->unmap_buffer(cnt_buffer);*/
+    rd::ICtx *ctx = factory->start_compute_pass();
+    {
+      TracyVulkIINamedZone(ctx, "Build Mips");
+      timestamp.begin_range(ctx);
+      rd::IBinding_Table *table = factory->create_binding_table(signature);
+      defer(table->release());
+      ctx->image_barrier(tmp_image, rd::Image_Access::UAV);
+      ctx->image_barrier(output_image, rd::Image_Access::SAMPLED);
+      ito(desc.levels) table->bind_UAV_texture(
+          0, 2, i, tmp_image, rd::Image_Subresource::top_level(i), rd::Format::NATIVE);
+      table->bind_texture(0, 0, 0, output_image, rd::Image_Subresource::top_level(0),
+                          rd::Format::NATIVE);
+      table->bind_UAV_buffer(0, 1, cnt_buffer, 0, 0);
+
+      ctx->bind_table(table);
+      ctx->bind_compute(mip_pso);
+      PushConstants pc{};
+      pc.levels            = desc.levels;
+      pc.op                = 0;
+      u32 pixels_per_group = 64;
+      pc.last_width        = ((desc.width) + pixels_per_group - 1) / pixels_per_group;
+      pc.last_height       = ((desc.height) + pixels_per_group - 1) / pixels_per_group;
+      pc.last_mip          = 6;
+      //{
+      //  u32 width  = desc.width;
+      //  u32 height = desc.height;
+      //  while (true) {
+      //    if (width == pc.last_width && height == pc.last_height) break;
+      //    width  = MAX(1, width / 2);
+      //    height = MAX(1, height / 2);
+      //    pc.last_mip++;
+      //  }
+      //  // pc.last_width  = MAX(1, width / 2);
+      //  // pc.last_height = MAX(1, height / 2);
+      //  // pc.last_mip++;
+      //}
+      pc.total_cnt = pc.last_height * pc.last_width;
+      table->push_constants(&pc, 0, sizeof(pc));
+      ctx->dispatch(pc.last_width, pc.last_height, 1);
+      // ctx->dispatch(1 << 7, 1 << 7, 1);
+      timestamp.end_range(ctx);
+    }
+    Resource_ID e = factory->end_compute_pass(ctx);
+
+    timestamp.commit(e);
+    factory->wait_idle();
+    timestamp.update(factory);
+    fprintf(stdout, "%f ms\n", timestamp.total_duration / timestamp.total_samples);
+    return tmp_image;
+#  if 0
     InlineArray<u32, 0x10>  mip_offsets{};
     InlineArray<u32, 0x10>  mip_pitch{};
     InlineArray<int2, 0x10> mip_sizes{};
@@ -1098,6 +1410,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     }
     factory->end_compute_pass(ctx);
     return output_image;
+#  endif
   }
 };
 #endif
@@ -2428,4 +2741,55 @@ static void render_bvh(float4x4 const &t, bvh::Node *bvh, Gizmo_Layer *gl) {
   });
 }
 #endif
+
+class IPass;
+class IPassMng {
+  public:
+  virtual IPass *getPass(char const *name) = 0;
+};
+
+struct RenderingContext {
+  rd::IDevice *factory     = NULL;
+  Config *     config      = NULL;
+  Scene *      scene       = NULL;
+  Gizmo_Layer *gizmo_layer = NULL;
+  IPassMng *   pass_mng    = NULL;
+  void         dump() {
+    FILE *scene_dump = fopen("scene_state", "wb");
+    fprintf(scene_dump, "(\n");
+    defer(fclose(scene_dump));
+    if (gizmo_layer) gizmo_layer->get_camera().dump(scene_dump);
+    config->dump(scene_dump);
+    if (scene) {
+      String_Builder sb;
+      sb.init();
+      scene->save(sb);
+      fwrite(sb.get_str().ptr, 1, sb.get_str().len, scene_dump);
+      sb.release();
+    }
+    fprintf(scene_dump, ")\n");
+  }
+};
+
+struct GBuffer {
+  Resource_ID normal;
+  Resource_ID depth;
+};
+
+class IPass {
+  public:
+  virtual char const *getName()            = 0;
+  virtual u32         getNumBuffers()      = 0;
+  virtual char const *getBufferName(u32 i) = 0;
+  Resource_ID         getBuffer(char const *name) {
+    ito(getNumBuffers()) if (strcmp(getBufferName(i), name) == 0) return getBuffer(i);
+    return {};
+  }
+  virtual Resource_ID getBuffer(u32 i) = 0;
+  virtual void        render()         = 0;
+  // auto deletes itself
+  virtual void   release()             = 0;
+  virtual double getLastDurationInMs() = 0;
+};
+
 #endif // RENDERING_UTILS_HPP

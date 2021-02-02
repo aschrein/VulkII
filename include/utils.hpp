@@ -188,14 +188,14 @@ class RenderDoc_CTX {
           if (getApi(eRENDERDOC_API_Version_1_4_1, (void **)&renderdoc_api) == 1) {
 
           } else {
-            fprintf(stderr, "[RenderDoc] failed to retieve API functions!\n");
+            // fprintf(stderr, "[RenderDoc] failed to retieve API functions!\n");
           }
         } else {
-          fprintf(stderr, "[RenderDoc] GetAPI not found!\n");
+          // fprintf(stderr, "[RenderDoc] GetAPI not found!\n");
         }
       } else {
         dll_not_found = true;
-        fprintf(stderr, "[RenderDoc] module not found!\n");
+        // fprintf(stderr, "[RenderDoc] module not found!\n");
       }
 #    endif
     }
@@ -304,6 +304,7 @@ template <typename T, typename F> bool any(T set, F f) {
 #define TRAP                                                                                       \
   do {                                                                                             \
     fprintf(stderr, "%s:%i TRAP\n", __FILE__, __LINE__);                                           \
+    fflush(stderr);                                                                                \
     abort();                                                                                       \
   } while (0)
 #define NOCOMMIT (void)0
