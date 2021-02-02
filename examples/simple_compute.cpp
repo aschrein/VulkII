@@ -184,7 +184,7 @@ void test_mipmap_generation(rd::IDevice *dev) {
   Resource_ID texture = mb->create_image(dev, image, (u32)rd::Image_Usage_Bits::USAGE_SAMPLED);
 
   fprintf(stdout, "MIP levels generated\n");
-  return;
+  // return;
   Resource_ID sampler_state = [&] {
     rd::Sampler_Create_Info info;
     MEMZERO(info);
@@ -279,18 +279,18 @@ void main(uint3 tid : SV_DispatchThreadID)
   }
   dev->end_compute_pass(ctx);
   dev->wait_idle();
-  /*
-   u8 *map = (u8 *)dev->map_buffer(readback);
-   {
-     Image2D tmp{};
-     tmp.data   = map;
-     tmp.width  = image->width;
-     tmp.height = image->height;
-     tmp.format = rd::Format::RGBA32_FLOAT;
-     write_image_rgba32_float_pfm("img.pfm", tmp.data, tmp.width, pitch, tmp.height, true);
-   }
 
-   dev->unmap_buffer(readback);*/
+  u8 *map = (u8 *)dev->map_buffer(readback);
+  {
+    Image2D tmp{};
+    tmp.data   = map;
+    tmp.width  = image->width;
+    tmp.height = image->height;
+    tmp.format = rd::Format::RGBA32_FLOAT;
+    write_image_rgba32_float_pfm("img.pfm", tmp.data, tmp.width, pitch, tmp.height, true);
+  }
+
+  dev->unmap_buffer(readback);
 }
 
 int main(int argc, char *argv[]) {
@@ -301,14 +301,14 @@ int main(int argc, char *argv[]) {
     auto launch_tests = [](rd::IDevice *dev) {
       defer({ dev->release(); });
 
-      do {
+      //do {
         RenderDoc_CTX::start();
         dev->start_frame();
         // test_buffers(dev);
         test_mipmap_generation(dev);
         dev->end_frame();
         RenderDoc_CTX::end();
-      } while (true);
+      //} while (true);
     };
     // fprintf(stdout, "Testing Vulkan backend\n");
     launch_tests(rd::create_dx12(NULL));
