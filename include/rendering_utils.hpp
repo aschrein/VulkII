@@ -52,6 +52,8 @@ struct ImGui_ID {
   Resource_ID     id;
   u32             base_level;
   u32             base_layer;
+  float           min;
+  float           max;
   rd::Format      format;
   static ImGui_ID def(Resource_ID id) {
     ImGui_ID iid;
@@ -180,6 +182,8 @@ class IGUIApp {
       float2 uScale;
       float2 uTranslate;
       u32    control_flags;
+      float  min;
+      float  max;
     };
     static string_ref imgui_shader = stref_s(R"(
 struct PushConstants
@@ -187,6 +191,8 @@ struct PushConstants
   float2 uScale;
   float2 uTranslate;
   u32    control_flags;
+  float min;
+  float max;
 };
 [[vk::push_constant]] ConstantBuffer<PushConstants> pc : DX12_PUSH_CONSTANTS_REGISTER;
 
@@ -227,7 +233,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
   if (is_control(CONTROL_DEPTH_ENABLE)) {
     float depth = sTexture.Sample(sSampler, input.UV).r;
     depth = pow(depth * 5.0f, 1.0f / 2.0f);
-    return float4_splat(depth);
+    return float4_splat((depth - pc.min) / (pc.max - pc.min));
   } else if (is_control(CONTROL_UINT)) {
     u32 width, height;
     uTexture.GetDimensions(width, height);
@@ -235,6 +241,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
     return float4(float3_splat(float(val) / 20.0f), 1.0f);
   } else {
     float4 color = input.Color * sTexture.Sample(sSampler, input.UV);
+    color = (color - float4_splat(pc.min)) / float4_splat(pc.max - pc.min);
     return color;
   }
 }
@@ -599,7 +606,8 @@ float4 main(in PSInput input) : SV_TARGET0 {
               } else {
                 pc.control_flags = 0;
               }
-
+              pc.min                    = img.min;
+              pc.max                    = img.max;
               rd::IBinding_Table *table = factory->create_binding_table(signature);
               defer(table->release());
               {
@@ -646,12 +654,15 @@ float4 main(in PSInput input) : SV_TARGET0 {
     ImGui_ImplSDL2_Shutdown();
     ImGui::DestroyContext(imgui_ctx);
   }
-  ImTextureID bind_texture(Resource_ID id, u32 layer, u32 level, rd::Format format) {
+  ImTextureID bind_texture(Resource_ID id, u32 layer, u32 level, rd::Format format,
+                           float min = 0.0f, float max = 1.0f) {
     ImGui_ID iid;
     MEMZERO(iid);
     iid.id         = id;
     iid.base_layer = layer;
     iid.base_level = level;
+    iid.min        = min;
+    iid.max        = max;
     if (format == rd::Format::NATIVE) format = factory->get_image_info(id).format;
     iid.format = format;
     image_bindings.push(iid);
@@ -817,20 +828,21 @@ struct TimeStamp_Pool {
 class Mip_Builder {
   ~Mip_Builder() = default;
 
-  rd::IDevice *  dev = NULL;
-  TimeStamp_Pool timestamp{};
+  rd::IDevice *dev = NULL;
+  // TimeStamp_Pool timestamp{};
 
 #  define RESOURCE_LIST                                                                            \
     RESOURCE(signature);                                                                           \
     RESOURCE(mip_shader);                                                                          \
-    RESOURCE(mip_pso);                                                                             \
-    RESOURCE(packed_mip_shader);                                                                   \
-    RESOURCE(packed_mip_pso);
+    RESOURCE(reset_cnt_shader);                                                                    \
+    RESOURCE(reset_cnt_pso);                                                                       \
+    RESOURCE(mip_pso);
 
 #  define RESOURCE(name) Resource_ID name{};
   RESOURCE_LIST
 #  undef RESOURCE
   struct PushConstants {
+    u32 gamma_correct;
     u32 levels;
     u32 op;
     u32 total_cnt;
@@ -840,22 +852,40 @@ class Mip_Builder {
   };
   void init(rd::IDevice *dev) {
     this->dev = dev;
-    timestamp.init(dev);
+    // timestamp.init(dev);
     TMP_STORAGE_SCOPE;
     signature = [=] {
       rd::Binding_Space_Create_Info set_info{};
 
       set_info.bindings.push({rd::Binding_t::TEXTURE, 1});
+      // set_info.bindings.push({rd::Binding_t::SAMPLER, 1});
       set_info.bindings.push({rd::Binding_t::UAV_BUFFER, 1});
+      set_info.bindings.push({rd::Binding_t::UAV_TEXTURE, 1});
       set_info.bindings.push({rd::Binding_t::UAV_TEXTURE, 16});
       rd::Binding_Table_Create_Info table_info{};
       table_info.spaces.push(set_info);
       table_info.push_constants_size = sizeof(PushConstants);
       return dev->create_signature(table_info);
     }();
-    mip_shader = dev->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
+    reset_cnt_shader = dev->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
 
+[[vk::binding(1, 0)]] globallycoherent RWByteAddressBuffer counter : register(u1, space0);
+[[vk::binding(2, 0)]] globallycoherent RWTexture2D<uint>   counter_image : register(u2, space0);
+
+[numthreads(32, 32, 1)] void main(uint3 tid : SV_DispatchThreadID) {
+  if (all(tid == uint3(0, 0, 0)))
+    counter.Store<u32>(0, 0);
+  int2 size;
+  counter_image.GetDimensions(size.x, size.y);
+  if (all(tid.xy < size))
+    counter_image[tid.xy] = 0;
+}
+)"),
+                                          NULL, 0);
+    reset_cnt_pso    = dev->create_compute_pso(signature, reset_cnt_shader);
+    mip_shader       = dev->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
 struct PushConstants {
+  u32 gamma_correct;
   u32 levels;
   u32 op;
   u32 total_cnt;
@@ -876,9 +906,12 @@ struct PushConstants {
 #define OP_MIN 2
 #define OP_SUM 3
 
-[[vk::binding(0, 0)]] Texture2D<float4>   src_tex : register(t0, space0);
+
+[[vk::binding(0, 0)]] Texture2D<float4>                    src_tex : register(t0, space0);
 [[vk::binding(1, 0)]] globallycoherent RWByteAddressBuffer counter : register(u1, space0);
-[[vk::binding(2, 0)]] globallycoherent RWTexture2D<float4> tex[16] : register(u2, space0);
+[[vk::binding(2, 0)]] globallycoherent RWTexture2D<uint>   counter_image : register(u2, space0);
+[[vk::binding(3, 0)]] globallycoherent RWTexture2D<float4> tex[16] : register(u3, space0);
+
 groupshared u32                                            group_cnt;
 
 void downsample(int mip_i, int2 dst_xy, int2 src_mip_size) {
@@ -915,10 +948,18 @@ void downsample(int mip_i, int2 dst_xy, int2 src_mip_size) {
   {
     if (all(tid.xy * 2 < size)) {
       // Copy top level
-      tex[0][tid.xy * 2 + int2(0, 0)] = src_tex.Load(int3(tid.xy * 2 + int2(0, 0), 0));
-      tex[0][tid.xy * 2 + int2(1, 0)] = src_tex.Load(int3(tid.xy * 2 + int2(1, 0), 0));
-      tex[0][tid.xy * 2 + int2(0, 1)] = src_tex.Load(int3(tid.xy * 2 + int2(0, 1), 0));
-      tex[0][tid.xy * 2 + int2(1, 1)] = src_tex.Load(int3(tid.xy * 2 + int2(1, 1), 0));
+      // Gamma correct?
+      if (pc.gamma_correct) {
+        tex[0][tid.xy * 2 + int2(0, 0)] = pow(src_tex.Load(int3(tid.xy * 2 + int2(0, 0), 0)), 0.5f);
+        tex[0][tid.xy * 2 + int2(1, 0)] = pow(src_tex.Load(int3(tid.xy * 2 + int2(1, 0), 0)), 0.5f);
+        tex[0][tid.xy * 2 + int2(0, 1)] = pow(src_tex.Load(int3(tid.xy * 2 + int2(0, 1), 0)), 0.5f);
+        tex[0][tid.xy * 2 + int2(1, 1)] = pow(src_tex.Load(int3(tid.xy * 2 + int2(1, 1), 0)), 0.5f);
+      } else {
+        tex[0][tid.xy * 2 + int2(0, 0)] = src_tex.Load(int3(tid.xy * 2 + int2(0, 0), 0));
+        tex[0][tid.xy * 2 + int2(1, 0)] = src_tex.Load(int3(tid.xy * 2 + int2(1, 0), 0));
+        tex[0][tid.xy * 2 + int2(0, 1)] = src_tex.Load(int3(tid.xy * 2 + int2(0, 1), 0));
+        tex[0][tid.xy * 2 + int2(1, 1)] = src_tex.Load(int3(tid.xy * 2 + int2(1, 1), 0));
+      }
     }
     GroupMemoryBarrierWithGroupSync();
     int2 src_mip_size         = size;
@@ -957,7 +998,7 @@ void downsample(int mip_i, int2 dst_xy, int2 src_mip_size) {
     int2 mip_size = int2(pc.last_width, pc.last_height);
     int2 src_mip_size         = mip_size;
     int2 dst_mip_size         = max(int2(1, 1), mip_size / 2);
-    for (; mip_i <= pc.levels; mip_i++) {
+    for (; mip_i < pc.levels; mip_i++) {
       GroupMemoryBarrierWithGroupSync();
       for (u32 y = 0; y < pc.last_height; y += pixels_per_group) {
         for (u32 x = 0; x < pc.last_width; x += pixels_per_group) {
@@ -978,7 +1019,7 @@ void downsample(int mip_i, int2 dst_xy, int2 src_mip_size) {
 
 )"),
                                     NULL, 0);
-    mip_pso    = dev->create_compute_pso(signature, mip_shader);
+    mip_pso          = dev->create_compute_pso(signature, mip_shader);
   }
 
   public:
@@ -993,7 +1034,7 @@ void downsample(int mip_i, int2 dst_xy, int2 src_mip_size) {
     if (name.is_valid()) dev->release_resource(name);
     RESOURCE_LIST
 #  undef RESOURCE
-    timestamp.release(dev);
+    // timestamp.release(dev);
     delete this;
   }
 #  undef RESOURCE_LIST
@@ -1062,6 +1103,7 @@ void downsample(int mip_i, int2 dst_xy, int2 src_mip_size) {
     if (build_mip) return build_mips(factory, output_image, filter);
     return output_image;
   }
+
   Resource_ID build_mips(rd::IDevice *factory, Resource_ID output_image,
                          Filter filter = FILTER_BOX) {
     auto        desc      = factory->get_image_info(output_image);
@@ -1094,18 +1136,21 @@ void downsample(int mip_i, int2 dst_xy, int2 src_mip_size) {
     rd::ICtx *ctx = factory->start_compute_pass();
     {
       TracyVulkIINamedZone(ctx, "Build Mips");
-      timestamp.begin_range(ctx);
+      // timestamp.begin_range(ctx);
       rd::IBinding_Table *table = factory->create_binding_table(signature);
       defer(table->release());
       ctx->image_barrier(tmp_image, rd::Image_Access::UAV);
       ctx->image_barrier(output_image, rd::Image_Access::SAMPLED);
       ito(desc.levels) table->bind_UAV_texture(
-          0, 2, i, tmp_image, rd::Image_Subresource::top_level(i), rd::Format::NATIVE);
+          0, 3, i, tmp_image, rd::Image_Subresource::top_level(i), rd::Format::NATIVE);
       table->bind_texture(0, 0, 0, output_image, rd::Image_Subresource::top_level(0),
                           rd::Format::NATIVE);
       table->bind_UAV_buffer(0, 1, cnt_buffer, 0, 0);
 
       ctx->bind_table(table);
+      ctx->bind_compute(reset_cnt_pso);
+      ctx->dispatch(1, 1, 1);
+      ctx->buffer_barrier(cnt_buffer, rd::Buffer_Access::UAV);
       ctx->bind_compute(mip_pso);
       PushConstants pc{};
       pc.levels            = desc.levels;
@@ -1114,6 +1159,7 @@ void downsample(int mip_i, int2 dst_xy, int2 src_mip_size) {
       pc.last_width        = ((desc.width) + pixels_per_group - 1) / pixels_per_group;
       pc.last_height       = ((desc.height) + pixels_per_group - 1) / pixels_per_group;
       pc.last_mip          = 6;
+      pc.gamma_correct     = rd::is_srgb(desc.format);
       //{
       //  u32 width  = desc.width;
       //  u32 height = desc.height;
@@ -1131,14 +1177,14 @@ void downsample(int mip_i, int2 dst_xy, int2 src_mip_size) {
       table->push_constants(&pc, 0, sizeof(pc));
       ctx->dispatch(pc.last_width, pc.last_height, 1);
       // ctx->dispatch(1 << 7, 1 << 7, 1);
-      timestamp.end_range(ctx);
+      // timestamp.end_range(ctx);
     }
     Resource_ID e = factory->end_compute_pass(ctx);
 
-    timestamp.commit(e);
-    factory->wait_idle();
-    timestamp.update(factory);
-    fprintf(stdout, "%f ms\n", timestamp.total_duration / timestamp.total_samples);
+    // timestamp.commit(e);
+    // factory->wait_idle();
+    // timestamp.update(factory);
+    // fprintf(stdout, "%f ms\n", timestamp.total_duration / timestamp.total_samples);
     return tmp_image;
   }
 };

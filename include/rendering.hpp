@@ -70,6 +70,10 @@ enum class Format : u32 {
   D32_OR_R32_FLOAT,
 };
 
+static inline bool is_srgb(Format format) {
+  return format == Format::BGRA8_SRGBA || format == Format::RGBA8_SRGBA;
+}
+
 static inline char const *format_to_cstr(Format format) {
   switch (format) {
     // clang-format off
