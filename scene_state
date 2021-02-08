@@ -1,9 +1,9 @@
 (
 (camera
- (set_phi -100.565544)
- (set_theta 13.871105)
- (set_distance 0.062211)
- (set_look_at -0.175404 2.835913 -0.851515)
+ (set_phi -82.332352)
+ (set_theta 13.356275)
+ (set_distance 0.094848)
+ (set_look_at 1.566235 1.222950 -0.148203)
  (set_aspect 1.305774)
  (set_fov 1.570796)
  (set_znear 0.001000)
@@ -12,7 +12,7 @@
 (config
  (add bool "gizmo.enable" 1)
  (add bool "sim.enable" 1)
- (add u32 "g_buffer_width" 904 (min 4) (max 2048))
+ (add u32 "g_buffer_width" 1933)
  (add u32 "baking.size" 1963 (min 4) (max 4096))
  (add bool "gizmo.render_meshlets" 0)
  (add u32 "GI.max_triangle_size" 47 (min 1) (max 256))
@@ -20,7 +20,7 @@
  (add u32 "G.I.grid_size" 38 (min 4) (max 4096))
  (add bool "RASTERIZATION_FLAG_CULL_PIXELS" 1)
  (add bool "gizmo.render_seams" 1)
- (add u32 "g_buffer_height" 948 (min 4) (max 2048))
+ (add u32 "g_buffer_height" 1074)
  (add bool "ras.render_geometry" 1)
  (add u32 "num_persistent_threads" 1160 (min 1) (max 4096))
  (add u32 "GI.min_triangle_size" 2 (min 1) (max 256))
@@ -39,7 +39,7 @@
   (offset float3 0.310000 0.000000 0.000000)
   (rotation float3 0.000000 -0.210000 0.000000)
 (node """mesh"""
-  (offset float3 -1.200000 1.830000 -0.710000)
+  (offset float3 0.080000 0.240000 0.550000)
   (rotation float3 0.000000 -3.870020 1.500000)
 (node """retopo.002"""
   (offset float3 0.000000 0.000000 0.000000)
@@ -57,7 +57,7 @@
   (offset float3 -0.020000 0.000000 0.000000)
   (rotation float3 0.000000 -0.000000 0.000000)
 )
-(node """Plane"""
+(node """Grid"""
   (offset float3 0.000000 0.000000 0.000000)
   (rotation float3 0.000000 -0.000000 0.000000)
 )

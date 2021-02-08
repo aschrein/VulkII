@@ -833,22 +833,23 @@ class Mip_Builder {
 
 #  define RESOURCE_LIST                                                                            \
     RESOURCE(signature);                                                                           \
-    RESOURCE(mip_shader);                                                                          \
     RESOURCE(reset_cnt_shader);                                                                    \
     RESOURCE(reset_cnt_pso);                                                                       \
-    RESOURCE(mip_pso);
+    RESOURCE(mip_avg_pso);                                                                         \
+    RESOURCE(mip_minz_pso);                                                                        \
+    RESOURCE(mip_maxz_pso);
 
 #  define RESOURCE(name) Resource_ID name{};
   RESOURCE_LIST
 #  undef RESOURCE
   struct PushConstants {
-    u32 gamma_correct;
-    u32 levels;
-    u32 op;
-    u32 total_cnt;
-    u32 last_mip;
-    u32 last_width;
-    u32 last_height;
+    u32   gamma_correct;
+    u32   levels;
+    u32   total_cnt;
+    u32   last_mip;
+    u32   last_width;
+    u32   last_height;
+    float minz;
   };
   void init(rd::IDevice *dev) {
     this->dev = dev;
@@ -883,29 +884,32 @@ class Mip_Builder {
 )"),
                                           NULL, 0);
     reset_cnt_pso    = dev->create_compute_pso(signature, reset_cnt_shader);
-    mip_shader       = dev->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
+    string_ref                   shader_template = stref_s(R"(
 struct PushConstants {
   u32 gamma_correct;
   u32 levels;
-  u32 op;
   u32 total_cnt;
   u32 last_mip;
   u32 last_width;
   u32 last_height;
+  float minz;
 };
 [[vk::push_constant]] ConstantBuffer<PushConstants> pc : DX12_PUSH_CONSTANTS_REGISTER;
+
+float depth_to_linear(float d) {
+return
+clamp(
+            (pc.minz) /
+//         ------------
+                d
+, 0.0f, 1.0e6f);
+}
 
 #define RGBA8_SRGBA 0
 #define RGBA8_UNORM 1
 #define RGB32_FLOAT 2
 #define R32_FLOAT 3
 #define RGBA32_FLOAT 4
-
-#define OP_AVG 0
-#define OP_MAX 1
-#define OP_MIN 2
-#define OP_SUM 3
-
 
 [[vk::binding(0, 0)]] Texture2D<float4>                    src_tex : register(t0, space0);
 [[vk::binding(1, 0)]] globallycoherent RWByteAddressBuffer counter : register(u1, space0);
@@ -915,6 +919,7 @@ struct PushConstants {
 groupshared u32                                            group_cnt;
 
 void downsample(int mip_i, int2 dst_xy, int2 src_mip_size) {
+#ifdef OP_AVG
   int2   xy  = int2(dst_xy * 2);
   float  N   = 0.0f;
   float4 acc = float4_splat(0.0f);
@@ -937,6 +942,45 @@ void downsample(int mip_i, int2 dst_xy, int2 src_mip_size) {
   acc += tex[mip_i - 1].Load(int3(xy + int2(1, 1), 0));
   N += 4.0f;
   tex[mip_i][dst_xy] = acc / N;
+#elif OP_MINZ
+  int2   xy  = int2(dst_xy * 2);
+  float acc = float4_splat(1.0e6f).x;
+
+  if (xy.x == src_mip_size.x - 3) {
+    acc = min(tex[mip_i - 1].Load(int3(xy + int2(2, 0), 0)).x, acc);
+  }
+  if (xy.y == src_mip_size.y - 3) {
+    acc = min(tex[mip_i - 1].Load(int3(xy + int2(0, 2), 0)).x, acc);
+  }
+  if (xy.x == src_mip_size.x - 3 && xy.y == src_mip_size.y - 3) {
+    acc = min(tex[mip_i - 1].Load(int3(xy + int2(2, 2), 0)).x, acc);
+  }
+  acc = min(tex[mip_i - 1].Load(int3(xy + int2(0, 0), 0)).x, acc);
+  acc = min(tex[mip_i - 1].Load(int3(xy + int2(1, 0), 0)).x, acc);
+  acc = min(tex[mip_i - 1].Load(int3(xy + int2(0, 1), 0)).x, acc);
+  acc = min(tex[mip_i - 1].Load(int3(xy + int2(1, 1), 0)).x, acc);
+  tex[mip_i][dst_xy] = float4_splat(acc);
+#elif OP_MAXZ
+  int2   xy  = int2(dst_xy * 2);
+  float acc = float4_splat(-1.0e6f).x;
+
+  if (xy.x == src_mip_size.x - 3) {
+    acc = max(tex[mip_i - 1].Load(int3(xy + int2(2, 0), 0)).x, acc);
+  }
+  if (xy.y == src_mip_size.y - 3) {
+    acc = max(tex[mip_i - 1].Load(int3(xy + int2(0, 2), 0)).x, acc);
+  }
+  if (xy.x == src_mip_size.x - 3 && xy.y == src_mip_size.y - 3) {
+    acc = max(tex[mip_i - 1].Load(int3(xy + int2(2, 2), 0)).x, acc);
+  }
+  acc = max(tex[mip_i - 1].Load(int3(xy + int2(0, 0), 0)).x, acc);
+  acc = max(tex[mip_i - 1].Load(int3(xy + int2(1, 0), 0)).x, acc);
+  acc = max(tex[mip_i - 1].Load(int3(xy + int2(0, 1), 0)).x, acc);
+  acc = max(tex[mip_i - 1].Load(int3(xy + int2(1, 1), 0)).x, acc);
+  tex[mip_i][dst_xy] = float4_splat(acc);
+#else
+  #error
+#endif
 }
 
 [numthreads(32, 32, 1)] void main(uint3 tid
@@ -955,10 +999,17 @@ void downsample(int mip_i, int2 dst_xy, int2 src_mip_size) {
         tex[0][tid.xy * 2 + int2(0, 1)] = pow(src_tex.Load(int3(tid.xy * 2 + int2(0, 1), 0)), 0.5f);
         tex[0][tid.xy * 2 + int2(1, 1)] = pow(src_tex.Load(int3(tid.xy * 2 + int2(1, 1), 0)), 0.5f);
       } else {
+#if OP_MAXZ || OP_MINZ
+        tex[0][tid.xy * 2 + int2(0, 0)].x = depth_to_linear(src_tex.Load(int3(tid.xy * 2 + int2(0, 0), 0)).x);
+        tex[0][tid.xy * 2 + int2(1, 0)].x = depth_to_linear(src_tex.Load(int3(tid.xy * 2 + int2(1, 0), 0)).x);
+        tex[0][tid.xy * 2 + int2(0, 1)].x = depth_to_linear(src_tex.Load(int3(tid.xy * 2 + int2(0, 1), 0)).x);
+        tex[0][tid.xy * 2 + int2(1, 1)].x = depth_to_linear(src_tex.Load(int3(tid.xy * 2 + int2(1, 1), 0)).x);
+#else
         tex[0][tid.xy * 2 + int2(0, 0)] = src_tex.Load(int3(tid.xy * 2 + int2(0, 0), 0));
         tex[0][tid.xy * 2 + int2(1, 0)] = src_tex.Load(int3(tid.xy * 2 + int2(1, 0), 0));
         tex[0][tid.xy * 2 + int2(0, 1)] = src_tex.Load(int3(tid.xy * 2 + int2(0, 1), 0));
         tex[0][tid.xy * 2 + int2(1, 1)] = src_tex.Load(int3(tid.xy * 2 + int2(1, 1), 0));
+#endif
       }
     }
     GroupMemoryBarrierWithGroupSync();
@@ -1016,13 +1067,29 @@ void downsample(int mip_i, int2 dst_xy, int2 src_mip_size) {
     }
   }
 }
-
-)"),
-                                    NULL, 0);
-    mip_pso          = dev->create_compute_pso(signature, mip_shader);
+)");
+    Pair<string_ref, string_ref> defines[]       = {
+        {stref_s("OP_AVG"), stref_s("1")},
+        {stref_s("OP_MINZ"), stref_s("1")},
+        {stref_s("OP_MAXZ"), stref_s("1")},
+    };
+    Resource_ID mip_avg_shader =
+        dev->create_shader(rd::Stage_t::COMPUTE, shader_template, &defines[0], 1);
+    Resource_ID mip_minz_shader =
+        dev->create_shader(rd::Stage_t::COMPUTE, shader_template, &defines[1], 1);
+    Resource_ID mip_maxz_shader =
+        dev->create_shader(rd::Stage_t::COMPUTE, shader_template, &defines[2], 1);
+    mip_avg_pso  = dev->create_compute_pso(signature, mip_avg_shader);
+    mip_minz_pso = dev->create_compute_pso(signature, mip_minz_shader);
+    mip_maxz_pso = dev->create_compute_pso(signature, mip_maxz_shader);
+    dev->release_resource(mip_avg_shader);
+    dev->release_resource(mip_minz_shader);
+    dev->release_resource(mip_maxz_shader);
   }
 
   public:
+  // double getDurationMS() { return timestamp.duration; }
+
   static Mip_Builder *create(rd::IDevice *dev) {
     Mip_Builder *o = new Mip_Builder;
     o->init(dev);
@@ -1039,7 +1106,7 @@ void downsample(int mip_i, int2 dst_xy, int2 src_mip_size) {
   }
 #  undef RESOURCE_LIST
 
-  enum Filter { FILTER_BOX, FILTER_MIN, FILTER_MAX };
+  enum Filter { FILTER_BOX, FILTER_MINZ, FILTER_MAXZ };
   Resource_ID create_image(rd::IDevice *factory, Image2D const *image,
                            u32  _usage    = (u32)rd::Image_Usage_Bits::USAGE_SAMPLED,
                            bool build_mip = true, Filter filter = FILTER_BOX) {
@@ -1048,15 +1115,12 @@ void downsample(int mip_i, int2 dst_xy, int2 src_mip_size) {
       u32                   usage = _usage | (u32)rd::Image_Usage_Bits::USAGE_SAMPLED |
                   (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST |
                   (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_SRC;
-      info.format = image->format;
-      info.width  = image->width;
-      info.height = image->height;
-      info.depth  = 1;
-      info.layers = 1;
-      if (build_mip)
-        info.levels = image->get_num_mip_levels();
-      else
-        info.levels = 1;
+      info.format     = image->format;
+      info.width      = image->width;
+      info.height     = image->height;
+      info.depth      = 1;
+      info.layers     = 1;
+      info.levels     = 1;
       info.usage_bits = usage;
       return factory->create_image(info);
     }();
@@ -1100,29 +1164,32 @@ void downsample(int mip_i, int2 dst_xy, int2 src_mip_size) {
                                 rd::Image_Copy::top_level(pitch));
       factory->end_compute_pass(ctx);
     }
-    if (build_mip) return build_mips(factory, output_image, filter);
+    if (build_mip) {
+      Resource_ID tmp_image = [=] {
+        rd::Image_Create_Info info{};
+        u32                   usage = (u32)rd::Image_Usage_Bits::USAGE_UAV |
+                    (u32)rd::Image_Usage_Bits::USAGE_SAMPLED |
+                    (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST |
+                    (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_SRC;
+        info.format     = rd::Format::RGBA32_FLOAT;
+        info.width      = image->width;
+        info.height     = image->height;
+        info.depth      = 1;
+        info.layers     = 1;
+        info.levels     = image->get_num_mip_levels();
+        info.usage_bits = usage;
+        return factory->create_image(info);
+      }();
+      build_mips(factory, tmp_image, output_image, filter);
+      dev->release_resource(output_image);
+      return tmp_image;
+    }
     return output_image;
   }
 
-  Resource_ID build_mips(rd::IDevice *factory, Resource_ID output_image,
-                         Filter filter = FILTER_BOX) {
-    auto        desc      = factory->get_image_info(output_image);
-    Resource_ID tmp_image = [=] {
-      rd::Image_Create_Info info{};
-      u32 usage = (u32)rd::Image_Usage_Bits::USAGE_UAV | (u32)rd::Image_Usage_Bits::USAGE_SAMPLED |
-                  (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST |
-                  (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_SRC;
-      info.format     = rd::Format::RGBA32_FLOAT;
-      info.width      = desc.width;
-      info.height     = desc.height;
-      info.depth      = 1;
-      info.layers     = 1;
-      info.levels     = desc.levels;
-      info.usage_bits = usage;
-      return factory->create_image(info);
-    }();
-    defer(factory->release_resource(output_image));
-    // defer(factory->release_resource(tmp_image));
+  void build_mips(rd::IDevice *factory, Resource_ID output_image, Resource_ID input_image,
+                  Filter filter = FILTER_BOX, TimeStamp_Pool *timestamp = NULL, f32 minz = 0.0f) {
+    auto        desc       = factory->get_image_info(output_image);
     Resource_ID cnt_buffer = [&] {
       rd::Buffer_Create_Info buf_info{};
       buf_info.memory_type = rd::Memory_Type::GPU_LOCAL;
@@ -1136,14 +1203,14 @@ void downsample(int mip_i, int2 dst_xy, int2 src_mip_size) {
     rd::ICtx *ctx = factory->start_compute_pass();
     {
       TracyVulkIINamedZone(ctx, "Build Mips");
-      // timestamp.begin_range(ctx);
+      if (timestamp) timestamp->begin_range(ctx);
       rd::IBinding_Table *table = factory->create_binding_table(signature);
       defer(table->release());
-      ctx->image_barrier(tmp_image, rd::Image_Access::UAV);
-      ctx->image_barrier(output_image, rd::Image_Access::SAMPLED);
+      ctx->image_barrier(output_image, rd::Image_Access::UAV);
+      ctx->image_barrier(input_image, rd::Image_Access::SAMPLED);
       ito(desc.levels) table->bind_UAV_texture(
-          0, 3, i, tmp_image, rd::Image_Subresource::top_level(i), rd::Format::NATIVE);
-      table->bind_texture(0, 0, 0, output_image, rd::Image_Subresource::top_level(0),
+          0, 3, i, output_image, rd::Image_Subresource::top_level(i), rd::Format::NATIVE);
+      table->bind_texture(0, 0, 0, input_image, rd::Image_Subresource::top_level(0),
                           rd::Format::NATIVE);
       table->bind_UAV_buffer(0, 1, cnt_buffer, 0, 0);
 
@@ -1151,15 +1218,24 @@ void downsample(int mip_i, int2 dst_xy, int2 src_mip_size) {
       ctx->bind_compute(reset_cnt_pso);
       ctx->dispatch(1, 1, 1);
       ctx->buffer_barrier(cnt_buffer, rd::Buffer_Access::UAV);
-      ctx->bind_compute(mip_pso);
+      if (filter == FILTER_BOX)
+        ctx->bind_compute(mip_avg_pso);
+      else if (filter == FILTER_MAXZ)
+        ctx->bind_compute(mip_maxz_pso);
+      else if (filter == FILTER_MINZ)
+        ctx->bind_compute(mip_minz_pso);
+      else {
+        TRAP;
+      }
       PushConstants pc{};
       pc.levels            = desc.levels;
-      pc.op                = 0;
       u32 pixels_per_group = 64;
-      pc.last_width        = ((desc.width) + pixels_per_group - 1) / pixels_per_group;
-      pc.last_height       = ((desc.height) + pixels_per_group - 1) / pixels_per_group;
-      pc.last_mip          = 6;
-      pc.gamma_correct     = rd::is_srgb(desc.format);
+      pc.last_width        = MAX(1, desc.width >> 6);
+      pc.last_height       = MAX(1, desc.height >> 6);
+
+      pc.last_mip      = 6;
+      pc.gamma_correct = rd::is_srgb(desc.format);
+      pc.minz          = minz;
       //{
       //  u32 width  = desc.width;
       //  u32 height = desc.height;
@@ -1173,19 +1249,19 @@ void downsample(int mip_i, int2 dst_xy, int2 src_mip_size) {
       //  // pc.last_height = MAX(1, height / 2);
       //  // pc.last_mip++;
       //}
-      pc.total_cnt = pc.last_height * pc.last_width;
+      u32 groups_x = ((desc.width) + pixels_per_group - 1) / pixels_per_group;
+      u32 groups_y = ((desc.height) + pixels_per_group - 1) / pixels_per_group;
+      pc.total_cnt = groups_x * groups_y;
       table->push_constants(&pc, 0, sizeof(pc));
-      ctx->dispatch(pc.last_width, pc.last_height, 1);
+      ctx->dispatch(groups_x, groups_y, 1);
       // ctx->dispatch(1 << 7, 1 << 7, 1);
-      // timestamp.end_range(ctx);
+      if (timestamp) timestamp->end_range(ctx);
     }
     Resource_ID e = factory->end_compute_pass(ctx);
-
-    // timestamp.commit(e);
+    if (timestamp) timestamp->commit(e);
     // factory->wait_idle();
     // timestamp.update(factory);
     // fprintf(stdout, "%f ms\n", timestamp.total_duration / timestamp.total_samples);
-    return tmp_image;
   }
 };
 #endif
@@ -2063,15 +2139,15 @@ float4 main(in PSInput input) : SV_TARGET0 {
   Ray    getMouseRay() const { return mouse_ray; }
   void   reserveLines(size_t cnt) { line_segments.reserve(cnt); }
   void   render_linebox(float3 min, float3 max, float3 color) {
-    float coordsx[6] = {
+    float coordsx[2] = {
         min.x,
         max.x,
     };
-    float coordsy[6] = {
+    float coordsy[2] = {
         min.y,
         max.y,
     };
-    float coordsz[6] = {
+    float coordsz[2] = {
         min.z,
         max.z,
     };

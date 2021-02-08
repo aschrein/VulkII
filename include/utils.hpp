@@ -24,23 +24,6 @@
 
 static inline double time() { return ((double)clock()) / CLOCKS_PER_SEC; }
 
-struct Timer {
-  double cur_time;
-  double old_time;
-  double dt;
-  void   init() {
-    cur_time = time();
-    old_time = time();
-    dt       = 0.0;
-  }
-  void update() {
-    cur_time = time();
-    dt       = cur_time - old_time;
-    old_time = cur_time;
-  }
-  void release() {}
-};
-
 #define ASSERT_ALWAYS(x)                                                                           \
   do {                                                                                             \
     if (!(x)) {                                                                                    \
@@ -265,6 +248,42 @@ static void restore_fpe(u32 new_mask) {
 #else
 #  define DLL_EXPORT
 #  define ATTR_USED
+#endif
+
+struct Timer {
+  double cur_time;
+  double old_time;
+  double dt;
+  void   init() {
+    cur_time = time();
+    old_time = time();
+    dt       = 0.0;
+  }
+  void update() {
+    cur_time = time();
+    dt       = cur_time - old_time;
+    old_time = cur_time;
+  }
+  void release() {}
+};
+
+#ifdef _WIN32
+struct DeltaTimer {
+  LARGE_INTEGER old_time, cur_time;
+  double        dt = 0.0;
+  LARGE_INTEGER freq;
+  void          init() { QueryPerformanceFrequency(&freq); }
+  void          start_range() { QueryPerformanceCounter(&old_time); }
+  void          end_range() {
+    QueryPerformanceCounter(&cur_time);
+    dt = double(cur_time.QuadPart - old_time.QuadPart);
+    dt *= 1000.0;
+    dt /= double(freq.QuadPart);
+  }
+  void release() {}
+};
+#else
+
 #endif
 
 template <typename T> T copy(T const &in) { return in; }
@@ -555,6 +574,17 @@ struct string_ref {
     size_t slen = strlen(str);
     if (ptr == NULL || str == NULL) return false;
     return len != slen ? false : strncmp(ptr, str, len) == 0 ? true : false;
+  }
+};
+
+struct wstring_ref {
+  const wchar_t *ptr;
+  size_t         len;
+  wstring_ref substr(size_t offset, size_t new_len) { return wstring_ref{ptr + offset, new_len}; }
+  bool        eq(wchar_t const *str) const {
+    size_t slen = wcslen(str);
+    if (ptr == NULL || str == NULL) return false;
+    return len != slen ? false : wcsncmp(ptr, str, len) == 0 ? true : false;
   }
 };
 
@@ -1021,6 +1051,8 @@ struct Default_Allocator {
 
 //#define SWAP(a, b) do {auto tmp = a; a = b; b = tmp; } while (0)
 
+// For example cmp = [](float2 const &a, float2 const &b) { return a.x < b.x; }
+// strictly less than
 template <typename T, typename F> void quicky_sort(T *arr, u32 size, F cmp) {
   if (size == 0 || size == 1) return;
   if (size == 2) {
@@ -1032,19 +1064,23 @@ template <typename T, typename F> void quicky_sort(T *arr, u32 size, F cmp) {
   u32 i     = 0;
   u32 j     = size - 1;
   T   pivot = arr[(j + i) / 2];
+
   while (true) {
+    // while (arr[i] < pivot) i++
     while (cmp(arr[i], pivot)) {
       i++;
       ASSERT_DEBUG(i <= j);
     }
+    if (i >= j) break;
+    // while (pivot < arr[j]) j--
     while (cmp(pivot, arr[j])) {
       j--;
       ASSERT_DEBUG(i <= j);
     }
     if (i >= j) break;
+    // true = arr[i] >= pivot && arr[j] <= pivot && i < j
     SWAP(arr[i], arr[j]);
-    i++;
-    j--;
+    // true = arr[i] <= pivot && arr[j] >= pivot && i < j
   }
   // tail call optimization
   u32 partition = j + 1;
@@ -1104,12 +1140,25 @@ template <typename T, unsigned int N> struct InlineArray {
   }
   bool isfull() const { return size == N; }
   void remove(T val) {
-    ito(size) {
+    for (i32 i = 0; i < size; i++) {
       if (elems[i] == val) {
         for (u32 j = i; j < size - 1; j++) {
           elems[j] = elems[j + 1];
         }
         i--;
+        size--;
+      }
+    }
+  }
+  void remove_index_fast(u32 i) {
+    if (i >= size) return;
+    if (i != size - 1) elems[i] = elems[size - 1];
+    size--;
+  }
+  void remove_fast(T val) {
+    ito(size) {
+      if (elems[i] == val) {
+        if (i != size - 1) elems[i] = elems[size - 1];
         size--;
       }
     }
@@ -1141,6 +1190,40 @@ struct Array {
     size           = len;
     this->capacity = len;
     memcpy(ptr, data, len * sizeof(T));
+  }
+  // Removes by shifting to the left
+  void remove(T const &val) {
+    for (i32 i = 0; i < size; i++) {
+      if (ptr[i] == val) {
+        for (u32 j = i; j < size - 1; j++) {
+          ptr[j] = ptr[j + 1];
+        }
+        size--;
+        i--;
+      }
+    }
+  }
+  // Removes from the back and breaks the sequential consistency
+  void remove_fast(T const &val) {
+    for (i32 i = 0; i < size; i++) {
+      if (ptr[i] == val) {
+        if (i != size - 1) {
+          ptr[i] = ptr[size - 1];
+          size--;
+          i--;
+        }
+      }
+    }
+  }
+  // Removes from the back and breaks the sequential consistency
+  void remove_index_fast(u32 index) {
+    if (index >= size) return;
+    if (index == size - 1) {
+      size--;
+      return;
+    }
+    ptr[index] = ptr[size - 1];
+    size--;
   }
   bool contains(T const &item) {
     ito(size) if (ptr[i] == item) return true;
@@ -1184,7 +1267,11 @@ struct Array {
   }
   void push(T elem) {
     if (size + 1 > capacity) {
-      size_t new_capacity = capacity + grow_k;
+      size_t new_capacity = capacity
+                            // Linear factor
+                            + grow_k
+                            // Small exponential factor
+                            + (capacity >> 6);
       ptr      = (T *)Allcator_t::realloc(ptr, sizeof(T) * capacity, sizeof(T) * new_capacity);
       capacity = new_capacity;
     }
@@ -1225,11 +1312,11 @@ struct Array {
     }
     ASSERT_DEBUG(size != 0);
     size -= 1;
-    if (size == 0) {
+    /*if (size == 0) {
       Allcator_t::free(ptr);
       ptr      = NULL;
       capacity = 0;
-    }
+    }*/
     return elem;
   }
   T &operator[](size_t i) {
@@ -1284,6 +1371,46 @@ struct SmallArray {
       array.push(val);
       size++;
     }
+  }
+  void remove_index(u32 index) {
+    if (index >= size) return;
+    if (index >= N) {
+      size_t old_size = 0;
+      array.remove_index_fast(index);
+      size = array.size + N;
+    } else {
+      if (index != size - 1) local[index] = local[size - 1];
+      if (size > N) local[index] = array.pop();
+      size--;
+    }
+  }
+  void remove_fast(T const &val) {
+    // remove from local
+    size_t clamped_size = MIN(size, N);
+    for (i32 i = 0; i < clamped_size; i++) {
+      if (local[i] == val) {
+        if (i != clamped_size - 1) local[i] = local[clamped_size - 1];
+        // for (u32 j = i; j < clamped_size - 1; j++) {
+        // local[j] = local[j + 1];
+        //}
+        clamped_size--;
+        i--;
+      }
+    }
+    // remove from global
+    if (size > N) {
+      array.remove_fast(val);
+    }
+    // migrate
+    if (clamped_size < N && array.size) {
+      ito(array.size) {
+        T elem                = array.pop();
+        local[clamped_size++] = elem;
+        if (array.size == 0) break;
+        if (clamped_size == N) break;
+      }
+    }
+    size = clamped_size + array.size;
   }
   bool has(T elem) {
     ito(size) {
@@ -1416,7 +1543,14 @@ struct Hash_Set {
       }
     }
   }
-
+  template <typename F> void iter(F f) {
+    ito(arr.size) {
+      auto &item = arr[i];
+      if (item.hash != 0) {
+        f(item.key);
+      }
+    }
+  }
   bool insert(K key) {
     u32  iters = 0x10;
     bool suc   = false;
@@ -1771,16 +1905,16 @@ class Util_Allocator {
         offset            = aligned_offset;
         size_t key_offset = node->key.offset;
         size_t key_size   = node->key.size;
-        free_root         = free_root->remove({node->key});
+
         if (aligned_offset != key_offset) {
           size_t diff = aligned_offset - key_offset;
           ASSERT_DEBUG(diff < key_size && diff > 0);
-          if (free_root == NULL) {
-            free_root = BinNode_t::create({key_offset, diff});
-          } else
-            free_root = free_root->put({key_offset, diff});
+          node->key.size = diff;
+        } else {
+          free_root = free_root->remove({node->key});
         }
         size_t new_size = usable_space - size;
+        // Insert leftovers
         if (new_size) {
           if (free_root == NULL) {
             free_root = BinNode_t::create({aligned_offset + size, new_size});

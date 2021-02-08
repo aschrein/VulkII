@@ -1672,6 +1672,7 @@ class DX12Binding_Table : public rd::IBinding_Table {
     D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
     auto                            res_desc = res->GetDesc();
     rd::Image_Subresource           range    = _range;
+    range.level = CLAMP(range.level, 0, res_desc.MipLevels - 1);
     if (range.num_layers == -1) range.num_layers = res_desc.DepthOrArraySize;
     if (range.num_levels == -1) range.num_levels = res_desc.MipLevels;
     desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -1937,7 +1938,7 @@ class FrameBuffer {
                                            info.rts.size);
     if (dsv_offset >= 0)
       dev_ctx->deferred_release_desc_range(D3D12_DESCRIPTOR_HEAP_TYPE_DSV, dsv_offset,
-                                           info.rts.size);
+                                           1);
     delete this;
   }
 };
@@ -2497,7 +2498,7 @@ Resource_ID DX12Device::create_graphics_pso(Resource_ID signature, Resource_ID r
   }
   desc.InputLayout.NumElements        = ie_desc.size;
   desc.InputLayout.pInputElementDescs = &ie_desc[0];
-  desc.NumRenderTargets               = state.num_rts;
+  desc.NumRenderTargets               = rp->get_info().rts.size;
   desc.PrimitiveTopologyType          = to_dx_type(state.topology);
 
   desc.RasterizerState.AntialiasedLineEnable = false;

@@ -26,6 +26,7 @@ class GBufferPass : public IPass {
   RESOURCE(pass);                                                                                  \
   RESOURCE(frame_buffer);                                                                          \
   RESOURCE(normal_rt);                                                                             \
+  RESOURCE(position_rt);                                                                           \
   RESOURCE(depth_rt);                                                                              \
   RESOURCE(gbuffer_vs);                                                                            \
   RESOURCE(gbuffer_ps);
@@ -79,6 +80,7 @@ struct PSInput {
   [[vk::location(0)]] float4 pos     : SV_POSITION;
   [[vk::location(1)]] float3 normal  : TEXCOORD0;
   [[vk::location(2)]] float2 uv      : TEXCOORD1;
+  [[vk::location(3)]] float3 vpos    : TEXCOORD2;
 };
 
 struct VSInput {
@@ -92,6 +94,7 @@ PSInput main(in VSInput input) {
   output.normal = mul(pc.obj_to_view, float4(input.normal.xyz, 0.0f)).xyz;
   output.uv     = input.uv;
   output.pos    = mul(pc.view_to_proj, mul(pc.obj_to_view, float4(input.pos, 1.0f)));
+  output.vpos   = mul(pc.obj_to_view, float4(input.pos, 1.0f));
   return output;
 }
 )"),
@@ -101,10 +104,19 @@ struct PSInput {
   [[vk::location(0)]] float4 pos     : SV_POSITION;
   [[vk::location(1)]] float3 normal  : TEXCOORD0;
   [[vk::location(2)]] float2 uv      : TEXCOORD1;
+  [[vk::location(3)]] float3 vpos    : TEXCOORD2;
 };
 
-float4 main(in PSInput input) : SV_TARGET0 {
-  return float4(input.normal.xyz, 1.0f);
+struct PSOutput {
+  float4 rt0 : SV_TARGET0;
+  float4 rt1 : SV_TARGET1;
+};
+
+PSOutput main(in PSInput input) {
+  PSOutput o;
+  o.rt0 = float4(input.normal.xyz, 1.0f);
+  o.rt1 = float4(input.vpos.xyz, 1.0f);
+  return o;
 }
 )"),
                                     NULL, 0);
@@ -117,15 +129,26 @@ float4 main(in PSInput input) : SV_TARGET0 {
     }();
     pass = [=] {
       rd::Render_Pass_Create_Info info{};
-      rd::RT_Ref                  rt0{};
-      rt0.format            = rd::Format::RGBA32_FLOAT;
-      rt0.clear_color.clear = true;
-      rt0.clear_color.r     = 0.0f;
-      rt0.clear_color.g     = 0.0f;
-      rt0.clear_color.b     = 0.0f;
-      rt0.clear_color.a     = 0.0f;
-      info.rts.push(rt0);
-
+      {
+        rd::RT_Ref rt0{};
+        rt0.format            = rd::Format::RGBA32_FLOAT;
+        rt0.clear_color.clear = true;
+        rt0.clear_color.r     = 0.0f;
+        rt0.clear_color.g     = 0.0f;
+        rt0.clear_color.b     = 0.0f;
+        rt0.clear_color.a     = 0.0f;
+        info.rts.push(rt0);
+      }
+      {
+        rd::RT_Ref rt0{};
+        rt0.format            = rd::Format::RGBA32_FLOAT;
+        rt0.clear_color.clear = true;
+        rt0.clear_color.r     = 0.0f;
+        rt0.clear_color.g     = 0.0f;
+        rt0.clear_color.b     = 0.0f;
+        rt0.clear_color.a     = 0.0f;
+        info.rts.push(rt0);
+      }
       info.depth_target.enabled           = true;
       info.depth_target.clear_depth.clear = true;
       info.depth_target.format            = rd::Format::D32_OR_R32_FLOAT;
@@ -150,6 +173,7 @@ float4 main(in PSInput input) : SV_TARGET0 {
           (u32)rd::Color_Component_Bit::R_BIT | (u32)rd::Color_Component_Bit::G_BIT |
           (u32)rd::Color_Component_Bit::B_BIT | (u32)rd::Color_Component_Bit::A_BIT;
       gfx_state.OM_set_blend_state(0, bs);
+      gfx_state.OM_set_blend_state(1, bs);
       gfx_state.VS_set_shader(gbuffer_vs);
       gfx_state.PS_set_shader(gbuffer_ps);
       {
@@ -194,7 +218,20 @@ float4 main(in PSInput input) : SV_TARGET0 {
     if (frame_buffer.is_valid()) dev->release_resource(frame_buffer);
     if (normal_rt.is_valid()) dev->release_resource(normal_rt);
     if (depth_rt.is_valid()) dev->release_resource(depth_rt);
-
+    if (position_rt.is_valid()) dev->release_resource(position_rt);
+    position_rt = [=] {
+      rd::Image_Create_Info rt0_info{};
+      rt0_info.format     = rd::Format::RGBA32_FLOAT;
+      rt0_info.width      = width;
+      rt0_info.height     = height;
+      rt0_info.depth      = 1;
+      rt0_info.layers     = 1;
+      rt0_info.levels     = 1;
+      rt0_info.usage_bits = (u32)rd::Image_Usage_Bits::USAGE_RT |      //
+                            (u32)rd::Image_Usage_Bits::USAGE_SAMPLED | //
+                            (u32)rd::Image_Usage_Bits::USAGE_UAV;
+      return dev->create_image(rt0_info);
+    }();
     normal_rt = [=] {
       rd::Image_Create_Info rt0_info{};
       rt0_info.format     = rd::Format::RGBA32_FLOAT;
@@ -226,7 +263,9 @@ float4 main(in PSInput input) : SV_TARGET0 {
       rt0.image  = normal_rt;
       rt0.format = rd::Format::RGBA32_FLOAT;
       info.rts.push(rt0);
-
+      rt0.image  = position_rt;
+      rt0.format = rd::Format::RGBA32_FLOAT;
+      info.rts.push(rt0);
       info.depth_target.enabled = true;
       info.depth_target.image   = depth_rt;
       info.depth_target.format  = rd::Format::D32_OR_R32_FLOAT;
@@ -313,13 +352,15 @@ float4 main(in PSInput input) : SV_TARGET0 {
   }
 
   char const *getName() override { return NAME; }
-  u32         getNumBuffers() override { return 2; }
+  u32         getNumBuffers() override { return 3; }
   char const *getBufferName(u32 i) override {
     if (i == 0) return "GBuffer.Normal";
+    if (i == 1) return "GBuffer.VPos";
     return "GBuffer.Depth";
   }
   Resource_ID getBuffer(u32 i) override {
     if (i == 0) return normal_rt;
+    if (i == 1) return position_rt;
     return depth_rt;
   }
   double getLastDurationInMs() override { return timestamps.duration; }
@@ -504,6 +545,7 @@ class GizmoPass : public IPass {
   double      getLastDurationInMs() override { return timestamps.duration; }
 };
 
+#if 0
 class HiZPass : public IPass {
   ~HiZPass() = default;
 
@@ -511,25 +553,25 @@ class HiZPass : public IPass {
   static constexpr char const *NAME = "HiZ Pass";
   Pair<double, char const *>   get_duration() { return {timestamps.duration, NAME}; }
 
-#define RESOURCE_LIST                                                                              \
-  RESOURCE(signature);                                                                             \
-  RESOURCE(hiz);                                                                                   \
-  RESOURCE(cnt_image);                                                                             \
-  RESOURCE(reset_cnt_pso);                                                                         \
-  RESOURCE(pso);
+#  define RESOURCE_LIST                                                                            \
+    RESOURCE(signature);                                                                           \
+    RESOURCE(hiz);                                                                                 \
+    RESOURCE(cnt_image);                                                                           \
+    RESOURCE(reset_cnt_pso);                                                                       \
+    RESOURCE(pso);
 
-#define RESOURCE(name) Resource_ID name{};
+#  define RESOURCE(name) Resource_ID name{};
   RESOURCE_LIST
-#undef RESOURCE
+#  undef RESOURCE
   void release() override {
     timestamps.release(rctx->factory);
-#define RESOURCE(name)                                                                             \
-  if (name.is_valid()) rctx->factory->release_resource(name);
+#  define RESOURCE(name)                                                                           \
+    if (name.is_valid()) rctx->factory->release_resource(name);
     RESOURCE_LIST
-#undef RESOURCE
+#  undef RESOURCE
     delete this;
   }
-#undef RESOURCE_LIST
+#  undef RESOURCE_LIST
   RenderingContext *rctx = NULL;
 
   static constexpr u32 SIZE_POT = 11;
@@ -758,6 +800,93 @@ uint4 calculate_mip_rect(uint dimensions, uint mip)
   Resource_ID getBuffer(u32 i) override { return hiz; }
   double      getLastDurationInMs() override { return timestamps.duration; }
 };
+#endif
+
+class HiZPass : public IPass {
+  ~HiZPass() = default;
+
+  public:
+  static constexpr char const *NAME = "HiZ Pass";
+  Pair<double, char const *>   get_duration() { return {timestamps.duration, NAME}; }
+
+#define RESOURCE_LIST RESOURCE(hiz);
+
+#define RESOURCE(name) Resource_ID name{};
+  RESOURCE_LIST
+#undef RESOURCE
+  void release() override {
+    timestamps.release(rctx->factory);
+#define RESOURCE(name)                                                                             \
+  if (name.is_valid()) rctx->factory->release_resource(name);
+    RESOURCE_LIST
+#undef RESOURCE
+    mip_builder->release();
+    delete this;
+  }
+#undef RESOURCE_LIST
+  Mip_Builder *     mip_builder = NULL;
+  RenderingContext *rctx        = NULL;
+  u32               width       = 0;
+  u32               height      = 0;
+  u32               mip_levels  = 0;
+
+  void update_frame_buffer(RenderingContext *rctx) {
+    auto dev = rctx->factory;
+    if (hiz.is_valid()) dev->release_resource(hiz);
+    hiz = [=] {
+      rd::Image_Create_Info info{};
+      u32 usage = (u32)rd::Image_Usage_Bits::USAGE_UAV | (u32)rd::Image_Usage_Bits::USAGE_SAMPLED |
+                  (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_DST |
+                  (u32)rd::Image_Usage_Bits::USAGE_TRANSFER_SRC;
+      info.format     = rd::Format::R32_FLOAT;
+      info.width      = width;
+      info.height     = height;
+      info.depth      = 1;
+      info.layers     = 1;
+      info.levels     = mip_levels;
+      info.usage_bits = usage;
+      return dev->create_image(info);
+    }();
+  }
+
+  TimeStamp_Pool timestamps = {};
+  struct PushConstants {
+    u32 levels;
+    u32 op;
+  };
+  static HiZPass *create(RenderingContext *rctx) {
+    HiZPass *o = new HiZPass;
+    o->init(rctx);
+    return o;
+  }
+  void init(RenderingContext *rctx) {
+    this->rctx = rctx;
+    auto dev   = rctx->factory;
+    timestamps.init(dev);
+    mip_builder = Mip_Builder::create(dev);
+  }
+  void render() {
+    auto dev = rctx->factory;
+    timestamps.update(dev);
+    u32         width    = rctx->config->get_u32("g_buffer_width");
+    u32         height   = rctx->config->get_u32("g_buffer_height");
+    Resource_ID depth_rt = rctx->pass_mng->getPass(GBufferPass::NAME)->getBuffer("GBuffer.Depth");
+    if (this->width != width || this->height != height) {
+      this->width      = width;
+      this->height     = height;
+      this->mip_levels = Image2D::get_num_mip_levels(width, height);
+      update_frame_buffer(rctx);
+    }
+    mip_builder->build_mips(dev, hiz, depth_rt, Mip_Builder::FILTER_MINZ, &timestamps,
+                            rctx->gizmo_layer->get_camera().znear);
+  }
+
+  char const *getName() override { return NAME; }
+  u32         getNumBuffers() override { return 1; }
+  char const *getBufferName(u32 i) override { return "HiZ"; }
+  Resource_ID getBuffer(u32 i) override { return hiz; }
+  double      getLastDurationInMs() override { return timestamps.duration; }
+};
 
 class ComposePass : public IPass {
   ~ComposePass() = default;
@@ -770,6 +899,7 @@ class ComposePass : public IPass {
   RESOURCE(signature);                                                                             \
   RESOURCE(sampler_state);                                                                         \
   RESOURCE(rt);                                                                                    \
+  RESOURCE(rt1);                                                                                   \
   RESOURCE(pso);
 
 #define RESOURCE(name) Resource_ID name{};
@@ -788,6 +918,19 @@ class ComposePass : public IPass {
   u32               width  = 0;
   u32               height = 0;
 
+  struct FrameConstants {
+    float4x4 world_to_view;
+    float4x4 view_to_world;
+    float4x4 view_to_proj;
+    float4x4 proj_to_view;
+    afloat3  camera_pos;
+    afloat3  camera_look;
+    afloat3  camera_up;
+    afloat3  camera_right;
+    f32      camera_tan_fov_05;
+    f32      camera_aspect;
+  };
+
   public:
   TimeStamp_Pool timestamps = {};
   struct PushConstants {};
@@ -802,12 +945,20 @@ class ComposePass : public IPass {
     timestamps.init(dev);
 
     signature = [=] {
-      rd::Binding_Space_Create_Info set_info{};
-      set_info.bindings.push({rd::Binding_t::UAV_TEXTURE, 1});
-      set_info.bindings.push({rd::Binding_t::SAMPLER, 1});
-      set_info.bindings.push({rd::Binding_t::TEXTURE, 16});
       rd::Binding_Table_Create_Info table_info{};
-      table_info.spaces.push(set_info);
+      {
+        rd::Binding_Space_Create_Info set_info{};
+        set_info.bindings.push({rd::Binding_t::UAV_TEXTURE, 2});
+        set_info.bindings.push({rd::Binding_t::SAMPLER, 1});
+        set_info.bindings.push({rd::Binding_t::TEXTURE, 32});
+        table_info.spaces.push(set_info);
+      }
+      {
+        rd::Binding_Space_Create_Info set_info{};
+        set_info.bindings.push({rd::Binding_t::UNIFORM_BUFFER, 1});
+        table_info.spaces.push(set_info);
+      }
+
       table_info.push_constants_size = 0; // sizeof(PushConstants);
       return dev->create_signature(table_info);
     }();
@@ -826,40 +977,32 @@ class ComposePass : public IPass {
       return dev->create_sampler(info);
     }();
     pso = [&] {
+      TMP_STORAGE_SCOPE;
       Resource_ID cs{};
       defer(dev->release_resource(cs));
-      return dev->create_compute_pso(signature,
-                                     cs = dev->create_shader(rd::Stage_t::COMPUTE, stref_s(R"(
-[[vk::binding(0, 0)]] RWTexture2D<float4> compose        : register(u0, space0);
-[[vk::binding(1, 0)]] SamplerState        ss             : register(s1, space0);
-
-[[vk::binding(2, 0)]] Texture2D<float4>   inputs[16] : register(t2, space0);
-
-#define GBUFFER_NORMAL 0
-#define GBUFFER_DEPTH 1
-#define GIZMO_LAYER 2
-
-[numthreads(16, 16, 1)]
-void main(uint3 tid : SV_DispatchThreadID)
-{
-  uint width, height;
-  compose.GetDimensions(width, height);
-  if (tid.x >= width || tid.y >= height)
-    return;
-  float2 uv = (float2(tid.xy) + float2(0.5f, 0.5f)) / float2(width, height);
-  float3 normal = inputs[GBUFFER_NORMAL].Load(int3(tid.xy, 0)).xyz;
-  float4 gizmo  = inputs[GIZMO_LAYER].Load(int3(tid.xy, 0)).xyzw;
-  float3 color = float3_splat(max(0.0f, dot(normal, normalize(float3(1.0, 1.0, 1.0)))));
-  compose[tid.xy] = float4(lerp(pow(color, 1.0f), gizmo.xyz, gizmo.w), 1.0f);
-}
-)"),
-                                                             NULL, 0));
+      return dev->create_compute_pso(
+          signature, cs = dev->create_shader(rd::Stage_t::COMPUTE,
+                                             stref_s(read_file_tmp("examples/shaders/ssr.hlsl")), NULL, 0));
     }();
   }
   void update_frame_buffer(RenderingContext *rctx) {
     auto dev = rctx->factory;
     if (rt.is_valid()) dev->release_resource(rt);
+    if (rt1.is_valid()) dev->release_resource(rt1);
     rt = [=] {
+      rd::Image_Create_Info rt0_info{};
+      rt0_info.format     = rd::Format::RGBA32_FLOAT;
+      rt0_info.width      = width;
+      rt0_info.height     = height;
+      rt0_info.depth      = 1;
+      rt0_info.layers     = 1;
+      rt0_info.levels     = 1;
+      rt0_info.usage_bits =                          //
+          (u32)rd::Image_Usage_Bits::USAGE_SAMPLED | //
+          (u32)rd::Image_Usage_Bits::USAGE_UAV;
+      return dev->create_image(rt0_info);
+    }();
+    rt1 = [=] {
       rd::Image_Create_Info rt0_info{};
       rt0_info.format     = rd::Format::RGBA32_FLOAT;
       rt0_info.width      = width;
@@ -880,25 +1023,67 @@ void main(uint3 tid : SV_DispatchThreadID)
     u32         height    = rctx->config->get_u32("g_buffer_height");
     Resource_ID depth_rt  = rctx->pass_mng->getPass(GBufferPass::NAME)->getBuffer("GBuffer.Depth");
     Resource_ID normal_rt = rctx->pass_mng->getPass(GBufferPass::NAME)->getBuffer("GBuffer.Normal");
+    Resource_ID vpos_rt   = rctx->pass_mng->getPass(GBufferPass::NAME)->getBuffer("GBuffer.VPos");
     Resource_ID gizmo_layer = rctx->pass_mng->getPass(GizmoPass::NAME)->getBuffer((u32)0);
+    Resource_ID hiz         = rctx->pass_mng->getPass(HiZPass::NAME)->getBuffer((u32)0);
     if (this->width != width || this->height != height) {
       this->width  = width;
       this->height = height;
       update_frame_buffer(rctx);
     }
 
+    Camera         camera = rctx->gizmo_layer->get_camera();
+    float4x4       view   = rctx->gizmo_layer->get_camera().view;
+    float4x4       proj   = rctx->gizmo_layer->get_camera().proj;
+    FrameConstants fc{};
+    fc.world_to_view     = view;
+    fc.view_to_world     = inverse(view);
+    fc.view_to_proj      = proj;
+    fc.proj_to_view      = inverse(proj);
+    fc.camera_tan_fov_05 = std::tan(camera.fov * 0.5f);
+    fc.camera_aspect     = camera.aspect;
+    fc.camera_look       = camera.look;
+    fc.camera_up         = camera.up;
+    fc.camera_right      = camera.right;
+    Resource_ID cbuffer  = [=] {
+      rd::Buffer_Create_Info buf_info;
+      MEMZERO(buf_info);
+      buf_info.memory_type = rd::Memory_Type::CPU_WRITE_GPU_READ;
+      buf_info.usage_bits  = (u32)rd::Buffer_Usage_Bits::USAGE_UNIFORM_BUFFER;
+      buf_info.size        = sizeof(fc);
+      return dev->create_buffer(buf_info);
+    }();
+    dev->release_resource(cbuffer);
+    {
+      memcpy(dev->map_buffer(cbuffer), &fc, sizeof(fc));
+      dev->unmap_buffer(cbuffer);
+    }
+
     rd::IBinding_Table *table = dev->create_binding_table(signature);
     defer(table->release());
+    table->bind_cbuffer(1, 0, cbuffer, 0, 0);
+
+    auto hiz_desc = dev->get_image_info(hiz);
+
     table->bind_texture(0, 2, 0, normal_rt, rd::Image_Subresource::top_level(), rd::Format::NATIVE);
-    table->bind_texture(0, 2, 1, depth_rt, rd::Image_Subresource::top_level(), rd::Format::NATIVE);
-    table->bind_texture(0, 2, 2, gizmo_layer, rd::Image_Subresource::top_level(),
+    table->bind_texture(0, 2, 1, vpos_rt, rd::Image_Subresource::top_level(), rd::Format::NATIVE);
+    table->bind_texture(0, 2, 2, depth_rt, rd::Image_Subresource::top_level(), rd::Format::NATIVE);
+    table->bind_texture(0, 2, 5, gizmo_layer, rd::Image_Subresource::top_level(),
                         rd::Format::NATIVE);
+    // ito(hiz_desc.levels)
+    table->bind_texture(0, 2, 16, hiz, rd::Image_Subresource::all_levels(), rd::Format::NATIVE);
     table->bind_UAV_texture(0, 0, 0, rt, rd::Image_Subresource::top_level(), rd::Format::NATIVE);
+    table->bind_UAV_texture(0, 0, 1, rt1, rd::Image_Subresource::top_level(), rd::Format::NATIVE);
+
     table->bind_sampler(0, 1, sampler_state);
     rd::ICtx *ctx = dev->start_compute_pass();
     ctx->image_barrier(normal_rt, rd::Image_Access::SAMPLED);
+    ctx->image_barrier(vpos_rt, rd::Image_Access::SAMPLED);
     ctx->image_barrier(depth_rt, rd::Image_Access::SAMPLED);
     ctx->image_barrier(gizmo_layer, rd::Image_Access::SAMPLED);
+    ctx->image_barrier(hiz, rd::Image_Access::SAMPLED);
+    ctx->image_barrier(rt, rd::Image_Access::UAV);
+    ctx->image_barrier(rt1, rd::Image_Access::UAV);
     {
       TracyVulkIINamedZone(ctx, NAME);
       timestamps.begin_range(ctx);
@@ -912,9 +1097,9 @@ void main(uint3 tid : SV_DispatchThreadID)
   }
 
   char const *getName() override { return NAME; }
-  u32         getNumBuffers() override { return 1; }
-  char const *getBufferName(u32 i) override { return "Compose.RT"; }
-  Resource_ID getBuffer(u32 i) override { return rt; }
+  u32         getNumBuffers() override { return 2; }
+  char const *getBufferName(u32 i) override { return i == 0 ? "Compose.RT0" : "Compose.RT1"; }
+  Resource_ID getBuffer(u32 i) override { return i == 0 ? rt : rt1; }
   double      getLastDurationInMs() override { return timestamps.duration; }
 };
 
@@ -988,17 +1173,23 @@ class Event_Consumer : public IGUIApp, public IPassMng {
         {
           rctx->gizmo_layer->per_imgui_window();
           auto    wsize = get_window_size();
-          float4 *m     = minmax.get_or_null(passes[i]->getBuffer(i).data);
+          float4 *m     = minmax.get_or_null(passes[i]->getBuffer(j).data);
           if (m == NULL)
-            minmax.insert(passes[i]->getBuffer(i).data, float4{0.0f, 1.0f, 0.0f, 0.0f});
-          m = minmax.get_or_null(passes[i]->getBuffer(i).data);
+            minmax.insert(passes[i]->getBuffer(j).data, float4{0.0f, 1.0f, 0.0f, 0.0f});
+          m = minmax.get_or_null(passes[i]->getBuffer(j).data);
           ImGui::SetNextItemWidth(100);
           ImGui::DragFloat("min", &m->x, 1.0e-3f);
           ImGui::SameLine();
           ImGui::SetNextItemWidth(100);
           ImGui::DragFloat("max", &m->y, 1.0e-3f);
-          ImGui::Image(bind_texture(passes[i]->getBuffer(i), 0, 0, rd::Format::NATIVE, m->x, m->y),
-                       ImVec2(wsize.x, wsize.y - 20.0f));
+          ImGui::SameLine();
+          ImGui::SetNextItemWidth(100);
+          int mip = m->z;
+          ImGui::DragInt("mip", &mip, 1);
+          m->z = float(mip);
+          ImGui::Image(
+              bind_texture(passes[i]->getBuffer(j), 0, mip, rd::Format::NATIVE, m->x, m->y),
+              ImVec2(wsize.x, wsize.y - 20.0f));
           { Ray ray = rctx->gizmo_layer->getMouseRay(); }
         }
         ImGui::End();
@@ -1038,8 +1229,8 @@ class Event_Consumer : public IGUIApp, public IPassMng {
     });
     rctx->pass_mng = this;
     passes.push(GBufferPass::create(rctx));
-    passes.push(GizmoPass::create(rctx));
     passes.push(HiZPass::create(rctx));
+    passes.push(GizmoPass::create(rctx));
     passes.push(ComposePass::create(rctx));
 
     rctx->gizmo_layer = Gizmo_Layer::create(factory, ((GizmoPass *)getPass(GizmoPass::NAME))->pass);

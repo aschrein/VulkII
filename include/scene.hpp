@@ -25,6 +25,7 @@ using int4     = ivec4;
 using uint2    = uvec2;
 using uint3    = uvec3;
 using uint4    = uvec4;
+using double2  = dvec2;
 using float2   = vec2;
 using float3   = vec3;
 using float4   = vec4;
@@ -200,6 +201,9 @@ class Random_Factory {
 
     return float3(std::cosf(phi) * sinTheta, std::sinf(phi) * sinTheta, cosTheta);
   }
+  Random_Factory() = default;
+  Random_Factory(u64 state, u64 inc) : pcg{state, inc} {}
+  PCG get_state() { return pcg; }
 
   private:
   PCG pcg;
@@ -973,6 +977,47 @@ class Typed {
   }
 };
 
+struct AABB2D {
+  float2               min;
+  float2               max;
+  static constexpr f32 EPS = 1.0e-6f;
+
+  float  max_dim() { return fmaxf(max.x - min.x, max.y - min.y); }
+  float2  dim() { return float2(max.x - min.x, max.y - min.y); }
+  float2 center() { return (min + max) / 2.0f; }
+  void   init(float2 p) {
+    min = p;
+    max = p;
+  }
+  void unite(float2 p) {
+    min.x = MIN(min.x, p.x);
+    min.y = MIN(min.y, p.y);
+    max.x = MAX(max.x, p.x);
+    max.y = MAX(max.y, p.y);
+  }
+  void unite(AABB2D const &p) {
+    min.x = MIN(min.x, p.min.x);
+    min.y = MIN(min.y, p.min.y);
+    max.x = MAX(max.x, p.max.x);
+    max.y = MAX(max.y, p.max.y);
+  }
+  bool inside(float2 tmin) {
+    return                 //
+        tmin.x >= min.x && //
+        tmin.x <= max.x && //
+        tmin.y >= min.y && //
+        tmin.y <= max.y && //
+        true;
+  }
+  bool collides(AABB2D const &p) {
+    return !(max.x < p.min.x || //
+             min.x > p.max.x || //
+             max.y < p.min.y || //
+             min.y > p.max.y || //
+             false);
+  }
+};
+
 struct AABB {
   float3               min;
   float3               max;
@@ -1346,7 +1391,9 @@ template <typename T> struct BVH_Helper {
 };
 #endif
 
-static float dot2(float3 a) { return dot(a, a); }
+static float                               dot2(float3 a) { return dot(a, a); }
+static float                               dot2(float2 a) { return dot(a, a); }
+template <typename T, typename K> static K dot2(T a) { return dot(a, a); }
 
 struct Triangle {
   float3 a;
@@ -1958,7 +2005,7 @@ struct Config {
         if (item.v_u32_min != item.v_u32_max) {
           modified = ImGui::SliderInt(buf, (int *)&item.v_u32, item.v_u32_min, item.v_u32_max);
         } else {
-          modified = ImGui::InputInt(buf, (int *)&item.v_u32);
+          modified = ImGui::DragInt(buf, (int *)&item.v_u32);
         }
       } else if (item.type == Config_Item::F32) {
         if (item.v_f32_min != item.v_f32_max) {
@@ -1970,7 +2017,7 @@ struct Config {
           ImGui::SetNextItemWidth(20.0f);
           ImGui::InputFloat("max", (float *)&item.v_f32_max);
         } else {
-          modified = ImGui::InputFloat(buf, (float *)&item.v_f32);
+          modified = ImGui::DragFloat(buf, (float *)&item.v_f32);
         }
       } else if (item.type == Config_Item::BOOL) {
         modified = ImGui::Checkbox(buf, &item.v_bool);
